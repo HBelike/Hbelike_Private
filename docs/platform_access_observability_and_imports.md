@@ -9,7 +9,7 @@
 - 使用 PostgreSQL 保存账号、会话、运行配置版本和手动运行记录；浏览器仅持有 HttpOnly 会话 Cookie，不保存密码或 API Key。
 - 管理员可修改内容流水线的项目数量、检索关键词与生成提示词；手动执行经由单例后台执行器启动，避免 HTTP 请求被外部模型调用长期占用。
 - LangSmith 仅写入 Provider、模型名、请求数量、字符数、Token 用量和调用结果长度。简历、面经正文、附件、完整对话和密钥均不上传。
-- LangSmith 控制台以 iframe 尝试嵌入；若控制台的 CSP/X-Frame-Options 禁止嵌入，页面保留“在新窗口打开”的正式回退。
+- LangSmith 控制台不嵌入工作台。LangSmith 的 CSP/X-Frame-Options 会拒绝第三方 iframe，因此可观测性页仅展示连接状态，并在新标签页打开官方控制台。
 - 面经文件原件只在解析任务内短暂使用；持久化内容是解析后的 Markdown、来源、标签和索引。多文件模式可选“归并为一份”或“每份独立入库”。
 
 ## 调用链
@@ -23,6 +23,9 @@ LoginPage
 AdminConsolePage
   -> /api/admin/pipeline-config
   -> PipelineConfigVersion
+
+ManualPipelinePanel（首页，仅管理员）
+  -> /api/admin/pipeline-runs
   -> ManualPipelineRunner
   -> Application.run_manual_pipeline()
 
