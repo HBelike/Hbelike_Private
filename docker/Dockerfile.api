@@ -1,0 +1,26 @@
+# 求职助手 API 的生产镜像。一个容器只启动一个 Uvicorn 进程，
+# 以保证当前 SSE 断线恢复与进程内并发闸门的语义一致。
+FROM python:3.13-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONPATH=/app
+
+WORKDIR /app
+
+COPY requirements.txt requirements-career-assistant.txt ./
+RUN python -m pip install --upgrade pip \
+    && python -m pip install -r requirements.txt -r requirements-career-assistant.txt
+
+COPY . ./
+
+RUN addgroup --system career \
+    && adduser --system --ingroup career --home /nonexistent career \
+    && mkdir -p /var/lib/career-temporary-attachments \
+    && chown -R career:career /app /var/lib/career-temporary-attachments
+
+USER career
+EXPOSE 8012
+
+CMD ["python", "-m", "uvicorn", "src.web.api:create_app", "--factory", "--host", "0.0.0.0", "--port", "8012", "--no-access-log"]

@@ -1,0 +1,88 @@
+"""求职助手持久化层的不可变读取模型。"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+from enum import StrEnum
+from uuid import UUID
+
+from src.career_assistant.contracts import ModelSelectionMode
+
+
+class MessageRole(StrEnum):
+    """允许写入对话历史的消息角色。"""
+
+    SYSTEM = "system"
+    USER = "user"
+    ASSISTANT = "assistant"
+    TOOL = "tool"
+
+
+class AgentTurnStatus(StrEnum):
+    """Agent Turn 的可持久化生命周期状态。"""
+
+    QUEUED = "queued"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+@dataclass(frozen=True)
+class ConversationRecord:
+    """单个求职助手会话的持久化视图。"""
+
+    id: UUID
+    organization_id: UUID
+    actor_id: UUID
+    title: str
+    status: str
+    created_at: datetime
+    updated_at: datetime
+    archived_at: datetime | None
+
+
+@dataclass(frozen=True)
+class MessageRecord:
+    """已脱敏后才允许写入的对话消息。"""
+
+    id: UUID
+    conversation_id: UUID
+    turn_id: UUID | None
+    role: MessageRole
+    content_text: str
+    is_redacted: bool
+    created_at: datetime
+
+
+@dataclass(frozen=True)
+class SessionSummaryRecord:
+    """供后续 AgentLoop 压缩上下文使用的脱敏会话摘要。"""
+
+    id: UUID
+    conversation_id: UUID
+    summary_text: str
+    summary_version: int
+    contains_sensitive_data: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True)
+class AgentTurnRecord:
+    """单次 Agent 执行的状态记录，不保存原始附件或模型密钥。"""
+
+    id: UUID
+    conversation_id: UUID
+    actor_id: UUID
+    requested_selection_mode: ModelSelectionMode
+    requested_model_profile_id: UUID | None
+    input_kind_codes: tuple[str, ...]
+    status: AgentTurnStatus
+    error_code: str | None
+    error_message: str | None
+    started_at: datetime | None
+    completed_at: datetime | None
+    created_at: datetime
+    updated_at: datetime

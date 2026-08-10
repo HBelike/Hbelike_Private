@@ -1,0 +1,20 @@
+# 不把开发环境、密钥或运行期数据带进生产镜像。
+.git
+.gitignore
+.idea
+.venv
+__pycache__
+**/__pycache__
+*.py[cod]
+.env
+.env.*
+data
+logs
+outputs
+web-ui/node_modules
+web-ui/dist
+web-ui/.npm-cache
+.pytest_cache
+.ruff_cache
+*.sqlite
+*.db
