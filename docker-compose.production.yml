@@ -20,6 +20,8 @@ services:
       - "443:443/udp"
     volumes:
       - ./docker/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # 仅挂载 StorageTask 复制出的公开素材；原始 outputs 不直接暴露到公网。
+      - application_outputs:/srv/application-outputs:ro
       - caddy_data:/data
       - caddy_config:/config
     depends_on:

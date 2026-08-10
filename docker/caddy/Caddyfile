@@ -15,6 +15,13 @@
         Permissions-Policy "camera=(), microphone=(), geolocation=()"
     }
 
+    # LocalPublicStorageProvider 仅将已复制到 outputs/public 的媒体暴露为只读文件，
+    # 供微信公众号和未来的视频 Provider 从公网拉取；不暴露原始生成目录或应用数据。
+    handle_path /media/* {
+        root * /srv/application-outputs/public
+        file_server
+    }
+
     # SSE 对话与普通 API 均直达 FastAPI，避免额外 Nginx 层重写 X-Forwarded-Proto。
     @api path /api/*
     handle @api {

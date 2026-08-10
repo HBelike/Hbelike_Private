@@ -79,7 +79,7 @@ CLOUDFLARE_R2_BUCKET=
 CLOUDFLARE_R2_PUBLIC_BASE_URL=
 ```
 
-本地 `storage.provider=local` 只有在设置 `STORAGE_LOCAL_PUBLIC_BASE_URL` 且该地址实际能被火山方舟访问时，才能作为 Seedance 的图片引用来源；`127.0.0.1` 不能满足此条件。
+本地 `storage.provider=local` 只有在设置 `STORAGE_LOCAL_PUBLIC_BASE_URL` 且该地址实际能被火山方舟访问时，才能作为 Seedance 的图片引用来源。生产 Compose 会由 Caddy 只读服务 `outputs/public`，因此应填写 `https://你的域名/media`，而不是 `127.0.0.1` 或裸域名。
 
 ## Kimi 的评估结论
 
