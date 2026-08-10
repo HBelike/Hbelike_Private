@@ -45,18 +45,29 @@
 基础实例默认启用 Gotenberg：DOC/XLS 会转换成 PDF 后再进入现有解析链。DOCX/XLSX、PDF、图片文件可直接处理。
 
 - 纯文本或结构清晰的 Office/PDF：应用内解析器优先处理，成本最低。
-- 双栏、扫描件、复杂表格 PDF：可启用 GPU 版 Docling 服务。
+- 双栏、扫描件、复杂表格 PDF：可启用 Docling 服务；CPU 可用但速度较慢，GPU 适合高吞吐场景。
 - 图片、扫描页 OCR 置信度不足：使用固定的云端视觉模型兜底；它不是用户可切换的聊天模型。
 
-启用有 NVIDIA GPU 的 Docling：
+启用 CPU Docling（无 GPU 服务器的推荐起步方案）：
 
 ```bash
-# .env.production 内设为 CAREER_DOCLING_ENABLED=true
+# .env.production 内设为 CAREER_DOCLING_ENABLED=true、DOCLING_CPU_THREADS=1
 docker compose --env-file .env.production -f docker-compose.production.yml \
-  --profile document-processing up -d
+  --profile document-processing up -d career-docling career-api pipeline-scheduler
 ```
 
-普通 CPU 服务器保持 `CAREER_DOCLING_ENABLED=false`，系统会继续使用本地解析、Gotenberg 与云端视觉兜底。
+CPU Docling 使用单 worker、单线程起步，能处理扫描 PDF、DOCX/XLSX 与图片 OCR；初次启动会下载较大的模型镜像，因此先确认服务器磁盘至少留有 15 GB 空闲空间。复杂长文档的处理时间会明显高于 GPU，应避免同时上传多份扫描件。确认稳定后，可把 `DOCLING_CPU_THREADS` 逐步调到 `2`。
+
+没有启用 Docling 时，纯文本 PDF 仍由应用内解析器提取，DOC/XLS 仍可经 Gotenberg 转 PDF；但扫描件、DOCX/XLSX 与图片的完整识别依赖 Docling 或已配置的云端视觉模型。
+
+启用有 NVIDIA GPU 的 Docling（需宿主机已安装 NVIDIA 驱动与 NVIDIA Container Toolkit）：
+
+```bash
+docker compose --env-file .env.production \
+  -f docker-compose.production.yml \
+  -f docker-compose.production.gpu.yml \
+  --profile document-processing up -d career-docling career-api pipeline-scheduler
+```
 
 ## 容量基线
 

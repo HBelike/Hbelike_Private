@@ -4,7 +4,6 @@ import { computed, onMounted, ref } from 'vue'
 const loading = ref(true)
 const status = ref(null)
 const errorMessage = ref('')
-const frameLoaded = ref(false)
 
 const consoleUrl = computed(() => status.value?.ui_url || 'https://smith.langchain.com')
 
@@ -22,10 +21,6 @@ async function loadStatus() {
   } finally {
     loading.value = false
   }
-}
-
-function openConsole() {
-  window.open(consoleUrl.value, '_blank', 'noopener,noreferrer')
 }
 
 async function responseError(response, fallback) {
@@ -48,7 +43,7 @@ async function responseError(response, fallback) {
       </div>
       <div class="observability-actions">
         <button class="secondary-button" type="button" @click="loadStatus">刷新状态</button>
-        <button class="refresh-button" type="button" @click="openConsole">在新窗口打开</button>
+        <a class="refresh-button observability-open-button" :href="consoleUrl" target="_blank" rel="noopener noreferrer">打开 LangSmith</a>
       </div>
     </header>
 
@@ -70,29 +65,21 @@ async function responseError(response, fallback) {
           <small>运行记录按项目维度归档。</small>
         </article>
         <article>
-          <span>隐私边界</span>
-          <strong>仅元数据</strong>
-          <small>不上传账号、Cookie、原始简历或附件。</small>
+          <span>控制台访问</span>
+          <strong>外部页面</strong>
+          <small>LangSmith 不支持嵌入工作台，需在新标签页中打开。</small>
         </article>
       </section>
 
-      <section class="observability-browser">
-        <div class="observability-browser-bar">
-          <span class="observability-browser-dots"><i></i><i></i><i></i></span>
-          <span>{{ consoleUrl }}</span>
-          <button type="button" @click="openConsole">↗ 打开</button>
+      <section class="observability-console-card" aria-label="LangSmith 控制台入口">
+        <div class="observability-console-mark" aria-hidden="true">↗</div>
+        <div class="observability-console-copy">
+          <p class="eyebrow">EXTERNAL CONSOLE</p>
+          <h3>在 LangSmith 中查看完整追踪记录</h3>
+          <p>LangSmith 的页面安全策略禁止被 iframe 嵌入，因此工作台只展示当前连接状态。点击下方入口可在新标签页登录并查看 Trace、耗时与运行详情。</p>
+          <code>{{ consoleUrl }}</code>
         </div>
-        <div class="observability-frame-wrap">
-          <div v-if="!frameLoaded" class="observability-frame-loading">正在载入 LangSmith 控制台…</div>
-          <iframe
-            :src="consoleUrl"
-            title="LangSmith 监控控制台"
-            @load="frameLoaded = true"
-          ></iframe>
-        </div>
-        <p class="observability-note">
-          若 LangSmith 因登录策略、第三方 Cookie 或页面安全策略拒绝嵌入，请使用“在新窗口打开”。监控采集不受页面嵌入限制。
-        </p>
+        <a class="secondary-button observability-console-link" :href="consoleUrl" target="_blank" rel="noopener noreferrer">在新标签页打开控制台 ↗</a>
       </section>
     </template>
   </section>

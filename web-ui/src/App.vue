@@ -5,6 +5,7 @@ import InterviewLibraryPage from './components/InterviewLibraryPage.vue'
 import LoginPage from './components/LoginPage.vue'
 import ObservabilityPage from './components/ObservabilityPage.vue'
 import AdminConsolePage from './components/AdminConsolePage.vue'
+import ManualPipelinePanel from './components/ManualPipelinePanel.vue'
 
 const preview = ref(null)
 const mediaLibrary = ref({ items: [], pending_video_clips: [], summary: {} })
@@ -1171,6 +1172,8 @@ onBeforeUnmount(() => {
             </span>
           </div>
         </section>
+
+        <ManualPipelinePanel v-if="authUser?.role === 'admin'" />
 
         <section class="module-grid">
           <article

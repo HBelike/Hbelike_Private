@@ -1,14 +1,11 @@
 <script setup>
-import { onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { onMounted, reactive, ref } from 'vue'
 
 const loading = ref(true)
 const saving = ref(false)
-const runningPipeline = ref(false)
 const errorMessage = ref('')
 const successMessage = ref('')
 const version = ref(null)
-const pipelineRuns = ref([])
-let pipelinePollTimer = null
 
 const form = reactive({
   top_n: 5,
@@ -18,11 +15,7 @@ const form = reactive({
   video_prompt: ''
 })
 
-onMounted(async () => {
-  await Promise.all([loadConfig(), loadPipelineRuns()])
-})
-
-onBeforeUnmount(() => stopPipelinePolling())
+onMounted(loadConfig)
 
 async function loadConfig() {
   loading.value = true
@@ -85,74 +78,6 @@ async function saveConfig() {
   } finally {
     saving.value = false
   }
-}
-
-async function loadPipelineRuns() {
-  try {
-    const response = await fetch('/api/admin/pipeline-runs', { credentials: 'include', cache: 'no-store' })
-    if (!response.ok) throw new Error(await responseError(response, '无法读取运行历史'))
-    pipelineRuns.value = (await response.json()).items ?? []
-    const hasActiveRun = pipelineRuns.value.some((item) => ['queued', 'running'].includes(item.status))
-    runningPipeline.value = hasActiveRun
-    if (hasActiveRun) startPipelinePolling()
-    else stopPipelinePolling()
-  } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '无法读取运行历史'
-    stopPipelinePolling()
-  }
-}
-
-async function startPipeline() {
-  if (runningPipeline.value) return
-  errorMessage.value = ''
-  successMessage.value = ''
-  runningPipeline.value = true
-  try {
-    const response = await fetch('/api/admin/pipeline-runs', {
-      method: 'POST',
-      credentials: 'include',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        client_request_id: typeof crypto?.randomUUID === 'function'
-          ? crypto.randomUUID()
-          : `manual-${Date.now()}-${Math.random().toString(16).slice(2)}`
-      })
-    })
-    if (!response.ok) throw new Error(await responseError(response, '无法提交完整流水线'))
-    const item = (await response.json()).item
-    successMessage.value = `已提交完整流水线 ${item?.id ? `#${String(item.id).slice(0, 8)}` : ''}，可继续浏览；任务会在后台依次执行。`
-    await loadPipelineRuns()
-    startPipelinePolling()
-  } catch (error) {
-    runningPipeline.value = false
-    errorMessage.value = error instanceof Error ? error.message : '无法提交完整流水线'
-  }
-}
-
-function startPipelinePolling() {
-  if (pipelinePollTimer) return
-  pipelinePollTimer = window.setInterval(loadPipelineRuns, 4000)
-}
-
-function stopPipelinePolling() {
-  if (!pipelinePollTimer) return
-  window.clearInterval(pipelinePollTimer)
-  pipelinePollTimer = null
-}
-
-function pipelineStatusText(status) {
-  return ({ queued: '排队中', running: '运行中', succeeded: '已完成', failed: '失败' })[status] ?? status
-}
-
-function pipelineStatusClass(status) {
-  return `is-${status ?? 'queued'}`
-}
-
-function pipelineTime(value) {
-  if (!value) return '等待开始'
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return String(value)
-  return date.toLocaleString('zh-CN', { hour12: false })
 }
 
 async function responseError(response, fallback) {
@@ -228,36 +153,6 @@ async function responseError(response, fallback) {
           </button>
         </footer>
       </form>
-
-      <section class="admin-pipeline-card">
-        <div class="admin-card-heading">
-          <div>
-            <p class="eyebrow">MANUAL EXECUTION</p>
-            <h3>手动执行完整流水线</h3>
-          </div>
-          <span>按当前已保存版本执行</span>
-        </div>
-        <p class="admin-pipeline-copy">按顺序执行自检、GitHub 搜索、内容总结、图像与视频蓝图、音视频任务、排版与草稿箱投递；缺少外部资源的任务会记录为可追踪状态。</p>
-        <div class="admin-pipeline-actions">
-          <button class="refresh-button" type="button" :disabled="runningPipeline" @click="startPipeline">
-            {{ runningPipeline ? '流水线运行中…' : '执行本次完整流水线' }}
-          </button>
-          <button class="secondary-button" type="button" @click="loadPipelineRuns">刷新运行记录</button>
-        </div>
-        <div v-if="pipelineRuns.length" class="admin-pipeline-runs" aria-live="polite">
-          <article v-for="item in pipelineRuns" :key="item.id" class="admin-pipeline-run">
-            <div>
-              <strong>#{{ String(item.id).slice(0, 8) }}</strong>
-              <small>{{ pipelineTime(item.started_at || item.created_at) }}</small>
-            </div>
-            <span class="admin-run-status" :class="pipelineStatusClass(item.status)">{{ pipelineStatusText(item.status) }}</span>
-            <p v-if="item.error_message">{{ item.error_message }}</p>
-            <p v-else-if="item.metadata?.tasks?.length">已记录 {{ item.metadata.tasks.length }} 个任务结果</p>
-            <p v-else>任务已登记，等待执行器更新。</p>
-          </article>
-        </div>
-        <p v-else class="admin-pipeline-empty">暂无手动运行记录。</p>
-      </section>
     </template>
   </section>
 </template>
