@@ -8,12 +8,14 @@ import uvicorn
 from src.web.api import create_app
 
 
-app = create_app()
+# 无论从终端、IDE 还是后台进程启动，都以该脚本所在目录作为项目根目录。
+# 不能依赖当前工作目录，否则本地私有配置（例如 .env.career-assistant）可能无法被读取。
+PROJECT_ROOT = Path(__file__).resolve().parent
+app = create_app(project_root=PROJECT_ROOT)
 
 
 if __name__ == "__main__":
     # 本地 Web API 的唯一开发入口。Vite 默认代理到此端口。
-    project_root = Path(__file__).resolve().parent
     port = int(os.environ.get("PREVIEW_SERVER_PORT", "18080"))
     reload_enabled = os.environ.get("PREVIEW_SERVER_RELOAD", "true").lower() in {
         "1",
@@ -32,7 +34,7 @@ if __name__ == "__main__":
         host="127.0.0.1",
         port=port,
         reload=reload_enabled,
-        reload_dirs=[str(project_root / "src"), str(project_root / "config")]
+        reload_dirs=[str(PROJECT_ROOT / "src"), str(PROJECT_ROOT / "config")]
         if reload_enabled
         else None,
         reload_includes=["*.py", "*.yaml"] if reload_enabled else None,
