@@ -6,6 +6,7 @@ import os
 import sys
 from pathlib import Path
 
+from cryptography.fernet import Fernet
 from dotenv import load_dotenv
 
 
@@ -31,6 +32,7 @@ from src.career_assistant.persistence import (
     ModelCostTier,
     ModelProfileDraft,
 )
+from src.career_assistant.persistence.credential_cipher import CredentialCipher
 from src.career_assistant.persistence.conversation_repository import DEFAULT_ORGANIZATION_ID
 from src.career_assistant.settings import load_model_gateway_settings
 
@@ -43,7 +45,10 @@ def main() -> None:
         raise RuntimeError("请通过 CAREER_DATABASE_URL 提供求职助手 PostgreSQL 连接串")
 
     database = CareerDatabase(database_url)
-    repository = CareerModelProfileRepository(database)
+    repository = CareerModelProfileRepository(
+        database,
+        credential_cipher=CredentialCipher.from_master_key(Fernet.generate_key()),
+    )
     created_profile_ids = []
 
     try:

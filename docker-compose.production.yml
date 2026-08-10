@@ -2,7 +2,32 @@
 # 首次上线前复制 .env.production.example 为 .env.production，并填入所有 Secret。
 name: wechat-agent-platform
 
+x-default-logging: &default-logging
+  driver: local
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
+  caddy:
+    image: caddy:2.10.2-alpine
+    restart: unless-stopped
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN:?请在 .env.production 设置 APP_DOMAIN}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./docker/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      career-web:
+        condition: service_healthy
+    networks: [career-private]
+    logging: *default-logging
+
   career-postgres:
     image: pgvector/pgvector:pg16
     restart: unless-stopped
@@ -19,6 +44,7 @@ services:
       retries: 20
       start_period: 10s
     networks: [career-private]
+    logging: *default-logging
 
   career-migrate:
     build:
@@ -34,6 +60,33 @@ services:
       career-postgres:
         condition: service_healthy
     networks: [career-private]
+    logging: *default-logging
+
+  # 命名卷会遮住镜像内的 /app/.agents。该一次性初始化服务仅在目标文件缺失时
+  # 写入随镜像发布的审查过的 SKILL.md，并把卷交给非 root 的 API 进程用户。
+  # 这样重新部署不会覆盖 WebUI 后续保存的项目本地 Skill。
+  skill-seed:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    image: wechat-agent-career-api:local
+    user: "0:0"
+    command:
+      [
+        "python",
+        "scripts/seed_project_skills.py",
+        "--seed-root",
+        "/app/deploy/skill-seeds",
+        "--destination-root",
+        "/app/.agents/skills",
+        "--owner",
+        "career:career",
+      ]
+    restart: "no"
+    volumes:
+      - application_skills:/app/.agents
+    networks: [career-private]
+    logging: *default-logging
 
   career-gotenberg:
     image: gotenberg/gotenberg:8.34.0
@@ -41,6 +94,7 @@ services:
     environment:
       LIBREOFFICE_AUTO_START: "true"
     networks: [career-private]
+    logging: *default-logging
 
   career-api:
     build:
@@ -64,6 +118,9 @@ services:
     volumes:
       - application_data:/app/data
       - application_outputs:/app/outputs
+      - application_logs:/app/logs
+      # 项目本地 Skill 的编辑结果不应随着 API 镜像重建而消失。
+      - application_skills:/app/.agents
     healthcheck:
       test: ["CMD-SHELL", "python -c \"from urllib.request import urlopen; assert urlopen('http://127.0.0.1:8012/api/health', timeout=5).status == 200\""]
       interval: 10s
@@ -75,7 +132,45 @@ services:
         condition: service_completed_successfully
       career-gotenberg:
         condition: service_started
+      skill-seed:
+        condition: service_completed_successfully
     networks: [career-private]
+    init: true
+    logging: *default-logging
+
+  # 公众号周榜的唯一常驻调度进程。它和 API 共用 SQLite/媒体卷，必须保持单副本；
+  # 不要横向扩容，直到旧工作流迁移为 PostgreSQL 或引入分布式任务锁。
+  pipeline-scheduler:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    image: wechat-agent-career-api:local
+    restart: unless-stopped
+    env_file: ${CAREER_ENV_FILE:-.env.production}
+    environment:
+      APP_RUN_MODE: scheduler
+      CAREER_DATABASE_URL: postgresql+psycopg://${CAREER_POSTGRES_USER}:${CAREER_POSTGRES_PASSWORD}@career-postgres:5432/${CAREER_POSTGRES_DB}
+      CAREER_TEMPORARY_ATTACHMENT_ROOT: /var/lib/career-temporary-attachments
+      CAREER_REDACTION_ENABLED: ${CAREER_REDACTION_ENABLED:-true}
+      CAREER_DOCLING_ENABLED: ${CAREER_DOCLING_ENABLED:-false}
+      CAREER_DOCLING_SERVICE_BASE_URL: ${CAREER_DOCLING_SERVICE_BASE_URL:-http://career-docling:5001}
+      CAREER_GOTENBERG_ENABLED: ${CAREER_GOTENBERG_ENABLED:-true}
+      CAREER_GOTENBERG_SERVICE_BASE_URL: ${CAREER_GOTENBERG_SERVICE_BASE_URL:-http://career-gotenberg:3000}
+    command: ["python", "main.py"]
+    tmpfs:
+      - /var/lib/career-temporary-attachments:size=128m,mode=1770
+    volumes:
+      - application_data:/app/data
+      - application_outputs:/app/outputs
+      - application_logs:/app/logs
+    depends_on:
+      career-migrate:
+        condition: service_completed_successfully
+      career-gotenberg:
+        condition: service_started
+    networks: [career-private]
+    init: true
+    logging: *default-logging
 
   career-web:
     build:
@@ -83,13 +178,19 @@ services:
       dockerfile: docker/Dockerfile.web
     image: wechat-agent-career-web:local
     restart: unless-stopped
-    ports:
-      # 默认仅提供给宿主机反向代理；要直接公网暴露时再在 .env.production 中显式改为 0.0.0.0。
-      - "${WEB_BIND_ADDRESS:-127.0.0.1}:${WEB_PORT:-8080}:80"
+    expose:
+      - "80"
     depends_on:
       career-api:
         condition: service_healthy
     networks: [career-private]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    logging: *default-logging
 
   # 复杂 PDF、双栏排版和扫描件的 GPU 文档解析服务。普通云服务器默认不启动它；
   # 若服务器有 NVIDIA GPU，请同时把 CAREER_DOCLING_ENABLED=true，并使用
@@ -108,6 +209,7 @@ services:
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
     gpus: all
     networks: [career-private]
+    logging: *default-logging
 
 networks:
   career-private:
@@ -117,3 +219,7 @@ volumes:
   career_postgres_data:
   application_data:
   application_outputs:
+  application_logs:
+  application_skills:
+  caddy_data:
+  caddy_config:

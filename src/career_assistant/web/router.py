@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+from contextvars import ContextVar, Token
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import date
@@ -105,14 +106,19 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class CareerRequestActor:
-    """登录体系接入前的请求身份边界。
-
-    现在统一使用迁移初始化的本地默认用户。后续登录模块只需替换
-    ``get_request_actor``，Router、AgentLoop 和仓储的调用方式无需改变。
-    """
+    """当前请求在 Career 数据模型中的组织与操作者边界。"""
 
     organization_id: UUID
     actor_id: UUID
+
+
+# API 的认证中间件会在每个已登录请求开始时写入真实平台用户。ContextVar 可以让既有
+# 同步路由和流式处理链继续调用 get_request_actor()，无需把身份参数层层穿透到 Task。
+# 开发环境未开启 PLATFORM_AUTH_REQUIRED 时保留默认 Actor，避免破坏本地历史验证脚本。
+_request_actor_context: ContextVar[CareerRequestActor | None] = ContextVar(
+    "career_request_actor",
+    default=None,
+)
 
 
 @dataclass
@@ -274,8 +280,24 @@ def install_career_assistant_api(app: FastAPI, project_root: Path) -> None:
             app.state.career_assistant_services = None
 
 
+def set_request_actor(actor: CareerRequestActor) -> Token[CareerRequestActor | None]:
+    """把认证后的平台用户映射为当前请求的 Career Actor。"""
+
+    return _request_actor_context.set(actor)
+
+
+def reset_request_actor(token: Token[CareerRequestActor | None]) -> None:
+    """在请求结束时清除 ContextVar，避免连接复用时串用上一个用户。"""
+
+    _request_actor_context.reset(token)
+
+
 def get_request_actor() -> CareerRequestActor:
-    """返回当前临时本地身份；后续认证中间件会替代这里的固定实现。"""
+    """返回当前请求 Actor；仅未启用认证的本地开发保留默认 Actor。"""
+
+    actor = _request_actor_context.get()
+    if actor is not None:
+        return actor
 
     return CareerRequestActor(
         organization_id=DEFAULT_ORGANIZATION_ID,

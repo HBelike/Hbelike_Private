@@ -1,6 +1,8 @@
 # 不把开发环境、密钥或运行期数据带进生产镜像。
 .git
 .gitignore
+AGENTS.md
+docs
 .idea
 .venv
 __pycache__
@@ -8,6 +10,8 @@ __pycache__
 *.py[cod]
 .env
 .env.*
+.agents
+.codex
 data
 logs
 outputs

@@ -20,15 +20,35 @@ API Key 在页面中显式填写，但仅用于当前测试和服务端加密保
 1. 点击“测试连接”后，服务端发起一次最小真实推理请求，验证地址、模型 ID 和 API Key。
 2. 测试成功才会启用“保存模型连接”。
 3. 保存时会再次验证，避免在测试后修改字段导致不可用连接入库。
-4. Key 通过 PostgreSQL `pgcrypto` 以 AES-256 加密保存；任何列表、读取接口、日志和编辑页都不会返回明文。
+4. Key 在进入 PostgreSQL 前由服务端 `pyca/cryptography` 的 Fernet 加密；任何列表、读取接口、日志和编辑页都不会返回明文。
 
 在 `.env.career-assistant` 中一次性配置：
 
 ```dotenv
-CAREER_CREDENTIAL_MASTER_KEY=replace-with-a-long-random-secret
+CAREER_CREDENTIAL_MASTER_KEY=<Fernet.generate_key() 生成的 URL-safe Base64 值>
 ```
 
-生产环境应使用独立的随机长字符串并放入部署平台的 Secret 管理功能。遗失这个值后，旧 API Key 无法解密，只能从页面重新输入。
+生产环境应使用独立的 Fernet 主密钥并放入部署平台的 Secret 管理功能。不要把任意口令、数据库密码或 API Key 直接填入此变量；可使用下列命令生成一次：
+
+```powershell
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
+遗失或更换这个值后，旧 API Key 无法解密，只能从页面重新输入。
+
+### 旧明文凭据迁移边界
+
+`20260810_08` 以前，本机数据库的 `plaintext_api_key` 可能仍保存了旧 Key。新版本不会再写入该列：只要页面保存了 API Key，数据库会写入 `encryption_scheme=fernet_v1` 和 Fernet token，并把旧明文列清空。
+
+上线前按以下顺序处理：
+
+1. 配置 `CAREER_CREDENTIAL_MASTER_KEY`，并执行 `alembic upgrade head`。
+2. 执行 `python scripts/migrate_career_legacy_credentials.py`；脚本只输出迁移数量，不输出 Key、档案名或组织信息。
+3. 脚本提示剩余旧明文为 `0` 后，确认 `CAREER_ALLOW_LEGACY_PLAINTEXT_CREDENTIALS` 未设置或为 `false`，再启动 API 服务。
+
+本地临时排障时可显式设置 `CAREER_ALLOW_LEGACY_PLAINTEXT_CREDENTIALS=true` 读取旧明文，但它不是生产配置，不能替代迁移。迁移 `20260806_02` 曾预留但未定义格式的历史 `encrypted_api_key` 会标记为 `legacy_unknown`；系统不会将其误当成 Key 使用，必须在页面重新填写并保存。
+
+调用链：`保存模型连接 → CareerModelProfileRepository.upsert_profile() → CredentialCipher.encrypt() → PostgreSQL`；实际对话则通过 `ModelGateway → read_stored_credential() → CredentialCipher.decrypt()` 在进程内短暂读取，随后交给同一个模型调用适配器。Fernet 密钥不存库、不传浏览器，也不进入可观测性日志。
 
 ## 支持范围
 

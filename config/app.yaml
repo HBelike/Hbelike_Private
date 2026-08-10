@@ -10,6 +10,8 @@ schedule:
   production_time: "08:00"
   draft_time: "09:00"
   loop_interval_seconds: 60
+  # API 手动执行和常驻 Scheduler 共用旧 SQLite 时的跨容器互斥锁；六小时内不抢占。
+  pipeline_execution_lock_stale_seconds: 21600
 
 logging:
   level: INFO

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import logging
 import traceback
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 from src.config.config_manager import ConfigManager
@@ -28,7 +29,20 @@ from src.tasks.summary_task import SummaryTask
 from src.tasks.task_context import TaskContext
 from src.tasks.task_result import TaskResult
 from src.career_assistant.web import install_career_assistant_api
-from src.platform_access.web import install_platform_access_api
+from src.career_assistant.web.router import CareerRequestActor, reset_request_actor, set_request_actor
+from src.platform_access.contracts import PlatformRole
+from src.platform_access.web import (
+    get_platform_access_service,
+    install_platform_access_api,
+    platform_auth_required,
+    platform_closed_operator_mode,
+    refresh_platform_session_cookie,
+)
+
+
+logger = logging.getLogger(__name__)
+_PUBLIC_API_PATHS = frozenset({"/api/health"})
+_PUBLIC_API_PREFIXES = ("/api/auth/",)
 
 
 class ContentApprovalRequest(BaseModel):
@@ -181,6 +195,52 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     )
     install_career_assistant_api(app, resolved_project_root)
     install_platform_access_api(app, resolved_project_root)
+
+    @app.middleware("http")
+    async def enforce_platform_access(request: Request, call_next: Any) -> Any:
+        """在生产环境为全部业务 API 建立统一登录与运营者边界。
+
+        登录、初始化和健康检查必须保持公开；其余 API 由服务端校验 Cookie，而不是只
+        依赖 Vue 路由守卫。闭合运营模式额外限制管理员，避免当前尚未细分授权的旧模块
+        被普通账号访问。认证后的身份会同步写入 Career ContextVar，实现会话隔离。
+        """
+
+        request_path = request.url.path
+        should_protect = (
+            platform_auth_required()
+            and request_path.startswith("/api/")
+            and request_path not in _PUBLIC_API_PATHS
+            and not request_path.startswith(_PUBLIC_API_PREFIXES)
+        )
+        if not should_protect:
+            return await call_next(request)
+
+        try:
+            access_service = get_platform_access_service(request)
+            session = access_service.resolve_session(request.cookies.get("platform_session", ""))
+        except HTTPException as exc:
+            return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+        except Exception:
+            logger.exception("平台身份服务初始化失败")
+            return JSONResponse(status_code=503, content={"detail": "身份服务暂不可用，请稍后重试"})
+
+        if session is None:
+            return JSONResponse(status_code=401, content={"detail": "请先登录后继续"})
+        if platform_closed_operator_mode() and not session.user.role.allows(PlatformRole.ADMIN):
+            return JSONResponse(status_code=403, content={"detail": "当前平台仅向管理员开放"})
+
+        actor_token = set_request_actor(
+            CareerRequestActor(
+                organization_id=session.user.organization_id,
+                actor_id=session.user.id,
+            )
+        )
+        try:
+            response = await call_next(request)
+            refresh_platform_session_cookie(response, request, session)
+            return response
+        finally:
+            reset_request_actor(actor_token)
 
     @app.get("/api/health")
     def health() -> dict[str, Any]:

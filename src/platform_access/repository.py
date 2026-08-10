@@ -51,10 +51,18 @@ class PlatformAccessRepository:
         user_id = uuid4()
         normalized_username = normalize_username(username)
         normalized_display_name = display_name.strip() or normalized_username
+        normalized_email = normalize_email(email) if email else None
         if len(normalized_display_name) > 120:
             raise ValueError("显示名称不能超过 120 个字符")
 
         with self._database.transaction() as connection:
+            # PostgreSQL 事务级 advisory lock 将用户检查与后续写入合并为跨 API/CLI 进程的
+            # 唯一 bootstrap 临界区，锁会随事务提交或回滚自动释放。
+            connection.execute(
+                text(
+                    "SELECT pg_advisory_xact_lock(hashtext('career_assistant.create_first_admin')::bigint)",
+                ),
+            )
             if connection.execute(
                 text(
                     """
@@ -66,6 +74,19 @@ class PlatformAccessRepository:
                 ),
             ).scalar_one():
                 raise PermissionError("管理员已初始化，不能再次创建首个管理员")
+
+            if normalized_email and connection.execute(
+                text(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1 FROM career_assistant.platform_users
+                        WHERE email_normalized = :email
+                    )
+                    """,
+                ),
+                {"email": normalized_email},
+            ).scalar_one():
+                raise ValueError("该邮箱已经绑定历史账户，不能用于首次管理员初始化")
 
             connection.execute(
                 text(
@@ -84,8 +105,8 @@ class PlatformAccessRepository:
                     "username": normalized_username,
                     "display_name": normalized_display_name,
                     "password_hash": password_hash,
-                    "email": email.strip() if email else None,
-                    "email_normalized": normalize_email(email) if email else None,
+                    "email": normalized_email,
+                    "email_normalized": normalized_email,
                     "email_verified_at": email_verified_at,
                     "role": PlatformRole.ADMIN.value,
                 },

@@ -12,6 +12,11 @@ from uuid import UUID, uuid4
 from sqlalchemy import RowMapping, text
 
 from src.career_assistant.contracts import ModelCapability
+from src.career_assistant.persistence.credential_cipher import (
+    FERNET_V1_SCHEME,
+    LEGACY_PLAINTEXT_SCHEME,
+    CredentialCipher,
+)
 from src.career_assistant.persistence.database import CareerDatabase
 
 
@@ -62,16 +67,27 @@ class ModelProfileRecord:
 class CareerModelProfileRepository:
     """封装模型档案的增删查与输入校验。
 
-    该仓储只操作 ``career_assistant.model_profiles``，不读取 .env，也不会把 Key 写入
-    数据库。每次调用都独立使用事务，能安全服务于未来的多请求 Web API。
+    该仓储只操作求职助手自己的模型档案与凭据表。API Key 在进入数据库前会由
+    ``CredentialCipher`` 加密；仓储不会向调用方、日志或 Web 响应暴露凭据原文。
+    每次调用都独立使用事务，能安全服务于未来的多请求 Web API。
     """
 
     _PROFILE_KEY_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
-    def __init__(self, database: CareerDatabase) -> None:
-        """保存独立 PostgreSQL 边界，不依赖旧 SQLite 管理器。"""
+    def __init__(
+        self,
+        database: CareerDatabase,
+        credential_cipher: CredentialCipher | None = None,
+    ) -> None:
+        """保存独立 PostgreSQL 边界，并注入不可变的凭据加密器。
+
+        未显式注入时会从服务端环境读取 ``CAREER_CREDENTIAL_MASTER_KEY``。这使
+        Web 请求不必传递主密钥，也让验证脚本可以注入临时 Fernet key。数据库事务
+        仍由每个仓储方法单独管理，避免档案写入和凭据写入出现半提交。
+        """
 
         self._database = database
+        self._credential_cipher = credential_cipher or CredentialCipher.from_environment()
 
     def upsert_profile(
         self,
@@ -80,7 +96,7 @@ class CareerModelProfileRepository:
         *,
         api_key: str | None = None,
     ) -> ModelProfileRecord:
-        """按 profile_key 创建或更新档案，并可原子保存本机 API Key。
+        """按 profile_key 创建或更新档案，并可原子保存加密 API Key。
 
         早期仅使用环境变量的档案可继续不传 ``api_key``。如果传入密钥，档案记录和
         本机凭据会在同一个数据库事务内提交，任何一步失败都会回滚。
@@ -90,6 +106,11 @@ class CareerModelProfileRepository:
         normalized_api_key = api_key.strip() if api_key is not None else None
         if normalized_api_key is not None and not normalized_api_key:
             raise ValueError("API Key 不能为空")
+        encrypted_api_key = (
+            self._credential_cipher.encrypt(normalized_api_key)
+            if normalized_api_key is not None
+            else None
+        )
 
         with self._database.transaction() as connection:
             row = connection.execute(
@@ -140,20 +161,24 @@ class CareerModelProfileRepository:
                 },
             ).mappings().one()
 
-            if normalized_api_key is not None:
+            if encrypted_api_key is not None:
                 connection.execute(
                     text(
                         """
                         INSERT INTO career_assistant.model_profile_credentials (
-                            profile_id, organization_id, plaintext_api_key, last_verified_at
+                            profile_id, organization_id, encrypted_api_key, plaintext_api_key,
+                            encryption_scheme, last_verified_at
                         )
                         VALUES (
-                            :profile_id, :organization_id, :api_key,
+                            :profile_id, :organization_id, :encrypted_api_key, NULL,
+                            :encryption_scheme,
                             NOW()
                         )
                         ON CONFLICT (profile_id) DO UPDATE
                         SET organization_id = EXCLUDED.organization_id,
-                            plaintext_api_key = EXCLUDED.plaintext_api_key,
+                            encrypted_api_key = EXCLUDED.encrypted_api_key,
+                            plaintext_api_key = NULL,
+                            encryption_scheme = EXCLUDED.encryption_scheme,
                             last_verified_at = NOW(),
                             updated_at = NOW()
                         """,
@@ -161,7 +186,8 @@ class CareerModelProfileRepository:
                     {
                         "profile_id": row["id"],
                         "organization_id": organization_id,
-                        "api_key": normalized_api_key,
+                        "encrypted_api_key": encrypted_api_key,
+                        "encryption_scheme": FERNET_V1_SCHEME,
                     },
                 )
 
@@ -183,12 +209,32 @@ class CareerModelProfileRepository:
                         FROM career_assistant.model_profile_credentials
                         WHERE profile_id = :profile_id
                           AND organization_id = :organization_id
-                          AND plaintext_api_key IS NOT NULL
-                          AND BTRIM(plaintext_api_key) <> ''
+                          AND (
+                              (
+                                  encryption_scheme = :fernet_scheme
+                                  AND encrypted_api_key IS NOT NULL
+                                  AND OCTET_LENGTH(encrypted_api_key) > 0
+                              )
+                              OR (
+                                  encryption_scheme = :legacy_plaintext_scheme
+                                  AND plaintext_api_key IS NOT NULL
+                                  AND BTRIM(plaintext_api_key) <> ''
+                              )
+                              OR (
+                                  encryption_scheme = 'legacy_unknown'
+                                  AND encrypted_api_key IS NOT NULL
+                                  AND OCTET_LENGTH(encrypted_api_key) > 0
+                              )
+                          )
                     )
                     """,
                 ),
-                {"profile_id": profile_id, "organization_id": organization_id},
+                {
+                    "profile_id": profile_id,
+                    "organization_id": organization_id,
+                    "fernet_scheme": FERNET_V1_SCHEME,
+                    "legacy_plaintext_scheme": LEGACY_PLAINTEXT_SCHEME,
+                },
             ).scalar_one()
 
     def read_stored_credential(
@@ -202,7 +248,7 @@ class CareerModelProfileRepository:
             row = connection.execute(
                 text(
                     """
-                    SELECT plaintext_api_key AS api_key
+                    SELECT encrypted_api_key, plaintext_api_key, encryption_scheme
                     FROM career_assistant.model_profile_credentials
                     WHERE profile_id = :profile_id
                       AND organization_id = :organization_id
@@ -214,7 +260,110 @@ class CareerModelProfileRepository:
                 },
             ).mappings().one_or_none()
 
-        return str(row["api_key"]) if row is not None else None
+        if row is None:
+            return None
+        return self._credential_cipher.decrypt(
+            encryption_scheme=row["encryption_scheme"],
+            encrypted_api_key=row["encrypted_api_key"],
+            plaintext_api_key=row["plaintext_api_key"],
+        )
+
+    def migrate_legacy_plaintext_credentials(
+        self,
+        *,
+        profile_id: UUID | None = None,
+    ) -> int:
+        """将旧 ``plaintext_api_key`` 原子迁移为 Fernet 密文。
+
+        该方法必须在主密钥已经配置的服务进程中调用。它不会打印 profile、组织或
+        Key 内容；调用方只应向部署日志输出返回的迁移数量。写入完成后旧明文列置空，
+        因而可安全关闭 ``CAREER_ALLOW_LEGACY_PLAINTEXT_CREDENTIALS``。
+        """
+
+        if not self._credential_cipher.can_encrypt:
+            self._credential_cipher.require_encryption_ready()
+
+        profile_filter = "AND profile_id = :profile_id" if profile_id is not None else ""
+        query_parameters: dict[str, object] = {
+            "legacy_plaintext_scheme": LEGACY_PLAINTEXT_SCHEME,
+        }
+        if profile_id is not None:
+            query_parameters["profile_id"] = profile_id
+
+        with self._database.transaction() as connection:
+            legacy_rows = connection.execute(
+                text(
+                    f"""
+                    SELECT profile_id, organization_id, plaintext_api_key
+                    FROM career_assistant.model_profile_credentials
+                    WHERE encryption_scheme = :legacy_plaintext_scheme
+                      AND plaintext_api_key IS NOT NULL
+                      AND BTRIM(plaintext_api_key) <> ''
+                      {profile_filter}
+                    FOR UPDATE
+                    """,
+                ),
+                query_parameters,
+            ).mappings().all()
+            for row in legacy_rows:
+                encrypted_api_key = self._credential_cipher.encrypt(str(row["plaintext_api_key"]))
+                connection.execute(
+                    text(
+                        """
+                        UPDATE career_assistant.model_profile_credentials
+                        SET encrypted_api_key = :encrypted_api_key,
+                            plaintext_api_key = NULL,
+                            encryption_scheme = :encryption_scheme,
+                            updated_at = NOW()
+                        WHERE profile_id = :profile_id
+                          AND organization_id = :organization_id
+                        """,
+                    ),
+                    {
+                        "encrypted_api_key": encrypted_api_key,
+                        "encryption_scheme": FERNET_V1_SCHEME,
+                        "profile_id": row["profile_id"],
+                        "organization_id": row["organization_id"],
+                    },
+                )
+        return len(legacy_rows)
+
+    def count_legacy_plaintext_credentials(self) -> int:
+        """返回待迁移旧明文数量，仅用于部署校验，不读取凭据内容。"""
+
+        with self._database.transaction() as connection:
+            return int(
+                connection.execute(
+                    text(
+                        """
+                        SELECT COUNT(*)
+                        FROM career_assistant.model_profile_credentials
+                        WHERE encryption_scheme = :legacy_plaintext_scheme
+                          AND plaintext_api_key IS NOT NULL
+                          AND BTRIM(plaintext_api_key) <> ''
+                        """,
+                    ),
+                    {"legacy_plaintext_scheme": LEGACY_PLAINTEXT_SCHEME},
+                ).scalar_one(),
+            )
+
+    def count_legacy_unknown_credentials(self) -> int:
+        """返回无法验证格式的历史密文数量，供部署者安排重新录入。"""
+
+        with self._database.transaction() as connection:
+            return int(
+                connection.execute(
+                    text(
+                        """
+                        SELECT COUNT(*)
+                        FROM career_assistant.model_profile_credentials
+                        WHERE encryption_scheme = 'legacy_unknown'
+                          AND encrypted_api_key IS NOT NULL
+                          AND OCTET_LENGTH(encrypted_api_key) > 0
+                        """,
+                    ),
+                ).scalar_one(),
+            )
 
     def list_profiles(
         self,

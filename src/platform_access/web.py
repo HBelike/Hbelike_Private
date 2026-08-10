@@ -26,6 +26,41 @@ SESSION_COOKIE_NAME = "platform_session"
 router = APIRouter(tags=["platform-access"])
 
 
+def platform_auth_required() -> bool:
+    """读取业务 API 是否必须登录的生产开关。
+
+    默认关闭，保证本地既有验收脚本无需先创建账号；生产 Compose 必须显式设为 true。
+    """
+
+    return _read_boolean_environment("PLATFORM_AUTH_REQUIRED", default=False)
+
+
+def platform_closed_operator_mode() -> bool:
+    """判断是否处于单管理员运营模式。
+
+    当前公众号审核、Skill 维护和 Career 多租户细粒度权限尚未完全拆分。公网首发时
+    使用该模式把所有业务 API 限制为管理员，后续再按页面与资源补齐角色授权。
+    """
+
+    return _read_boolean_environment("PLATFORM_CLOSED_OPERATOR_MODE", default=False)
+
+
+def public_registration_enabled() -> bool:
+    """控制是否允许首个管理员之外的公开注册。"""
+
+    return _read_boolean_environment("PLATFORM_PUBLIC_REGISTRATION_ENABLED", default=True)
+
+
+def platform_cli_bootstrap_only() -> bool:
+    """控制首个管理员是否只能通过服务器交互式命令创建。
+
+    公网首发时应开启该开关，避免平台尚无管理员的短暂窗口被陌生邮箱抢先 bootstrap；
+    本地开发默认关闭，继续保留已有邮箱验证码初始化链路。
+    """
+
+    return _read_boolean_environment("PLATFORM_CLI_BOOTSTRAP_ONLY", default=False)
+
+
 class SendRegistrationCodeRequest(BaseModel):
     """注册或 bootstrap 的第一步：投递邮箱验证码。"""
 
@@ -190,12 +225,22 @@ def bootstrap_status(request: Request) -> dict[str, object]:
     """让登录页判断显示初始化还是登录表单。"""
 
     service = get_platform_access_service(request)
-    return {"requires_bootstrap": service.requires_bootstrap()}
+    return {
+        "requires_bootstrap": service.requires_bootstrap(),
+        "public_registration_enabled": public_registration_enabled(),
+        "cli_bootstrap_only": platform_cli_bootstrap_only(),
+    }
 
 
 @router.post("/api/auth/bootstrap/send-code")
 def send_bootstrap_code(payload: SendRegistrationCodeRequest, request: Request) -> dict[str, object]:
     """向首个管理员邮箱投递验证码，验证成功后才创建账号。"""
+
+    if platform_cli_bootstrap_only():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="当前生产环境仅允许通过服务器交互式终端初始化首个管理员",
+        )
 
     try:
         return get_platform_access_service(request).send_registration_code(
@@ -212,6 +257,12 @@ def send_bootstrap_code(payload: SendRegistrationCodeRequest, request: Request) 
 def verify_bootstrap_code(payload: VerifyEmailCodeRequest, request: Request, response: Response) -> dict[str, object]:
     """确认首个管理员邮箱验证码并写入会话。"""
 
+    if platform_cli_bootstrap_only():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="当前生产环境仅允许通过服务器交互式终端初始化首个管理员",
+        )
+
     try:
         session = get_platform_access_service(request).verify_registration_code(
             challenge_id=payload.challenge_id, code=payload.code, bootstrap=True
@@ -225,6 +276,9 @@ def verify_bootstrap_code(payload: VerifyEmailCodeRequest, request: Request, res
 @router.post("/api/auth/register/send-code")
 def send_registration_code(payload: SendRegistrationCodeRequest, request: Request) -> dict[str, object]:
     """公开注册入口：邮箱验证码确认后以 viewer 角色创建账号。"""
+
+    if not public_registration_enabled():
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="当前平台未开放公开注册")
 
     try:
         return get_platform_access_service(request).send_registration_code(
@@ -420,6 +474,16 @@ def _set_session_cookie(response: Response, request: Request, session: Authentic
     _set_cookie(response, request, session.raw_token, session.expires_at)
 
 
+def refresh_platform_session_cookie(
+    response: Response,
+    request: Request,
+    session: SessionResolution,
+) -> None:
+    """供全局业务 API 鉴权中间件续写已验证会话的 Cookie。"""
+
+    _set_cookie(response, request, request.cookies.get(SESSION_COOKIE_NAME, ""), session.expires_at)
+
+
 def _set_cookie(response: Response, request: Request, raw_token: str, expires_at: datetime) -> None:
     """写入与服务端空闲会话过期时间一致的 HttpOnly Cookie。"""
 
@@ -445,3 +509,17 @@ def _load_environment(project_root: Path) -> None:
     except ImportError as exc:
         raise RuntimeError("检测到 .env.career-assistant，但未安装 python-dotenv") from exc
     load_dotenv(dotenv_path=environment_path, override=False)
+
+
+def _read_boolean_environment(name: str, *, default: bool) -> bool:
+    """以严格、可读的方式读取生产安全开关。"""
+
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} 必须是 true 或 false")

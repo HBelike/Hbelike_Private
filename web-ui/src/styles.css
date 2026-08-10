@@ -300,6 +300,29 @@ body {
 .login-submit:hover:not(:disabled) { filter: brightness(1.04); transform: translateY(-1px); }
 .login-submit:disabled { cursor: wait; opacity: 0.66; }
 .login-loading { color: #7f8e72; font-size: 14px; }
+.login-cli-bootstrap {
+  display: grid;
+  gap: 13px;
+  border: 1px solid #d8e7bd;
+  border-radius: 16px;
+  background: linear-gradient(145deg, #f8fcef, #eff7df);
+  padding: 20px;
+  color: #4a6140;
+}
+.login-cli-bootstrap strong { color: #38552e; font-size: 16px; }
+.login-cli-bootstrap p { margin: 0; font-size: 13px; line-height: 1.7; }
+.login-cli-bootstrap code {
+  overflow-wrap: anywhere;
+  border: 1px solid #d5e1bd;
+  border-radius: 10px;
+  background: #fff;
+  padding: 11px;
+  color: #365126;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+}
+.login-cli-bootstrap .login-hint { color: #738364; }
 .login-footer { margin-top: 34px; text-align: center; }
 .login-switches { display: flex; justify-content: center; gap: 14px; margin-top: 16px; }
 .login-switches button { color: #708d37; text-decoration: underline; text-underline-offset: 3px; }

@@ -4,6 +4,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from src.app.pipeline_execution_lock import PipelineAlreadyRunningError, PipelineExecutionLock
 from src.config.config_manager import AppConfig, ConfigManager
 from src.platform_access.runtime_config import apply_pipeline_config
 from src.database.database_manager import DatabaseManager
@@ -97,10 +98,22 @@ class Application:
 
         self.initialize()
         self._run_startup_self_check()
-        return self._run_once_pipeline()
+        return self._run_exclusive_pipeline(
+            owner="manual_pipeline",
+            handler=self._run_once_pipeline_unlocked,
+        )
 
     def _run_once_pipeline(self) -> list[TaskResult]:
         """开发验证模式：按完整顺序执行一次当前所有任务。"""
+
+        return self._run_exclusive_pipeline(
+            owner="once_pipeline",
+            handler=self._run_once_pipeline_unlocked,
+        )
+
+    def _run_once_pipeline_unlocked(self) -> list[TaskResult]:
+        """在已持有流水线锁的前提下按完整顺序执行所有任务。"""
+
         task_classes: tuple[type[BaseTask], ...] = (
             SearchTask, SummaryTask, ShortVideoPromptTask, ImageTask, AudioTask,
             VideoClipPlanTask, StorageTask, SeedanceClipTask, SeedanceClipStatusTask,
@@ -115,6 +128,15 @@ class Application:
 
     def _run_weekly_content_production_job(self) -> None:
         """周五 08:00 内容生产 Job：采集、总结、生成素材、生成审核预览。"""
+
+        self._run_scheduled_pipeline_if_available(
+            owner="weekly_content_production",
+            handler=self._run_weekly_content_production_job_unlocked,
+        )
+
+    def _run_weekly_content_production_job_unlocked(self) -> None:
+        """在已持有流水线锁的前提下执行周五 08:00 内容生产。"""
+
         self._run_task(SearchTask)
         self._run_task(SummaryTask)
         self._run_task(ShortVideoPromptTask)
@@ -129,6 +151,15 @@ class Application:
 
     def _run_weekly_draft_creation_job(self) -> None:
         """周五 09:00 草稿推进 Job：刷新素材状态、排版、创建公众号草稿。"""
+
+        self._run_scheduled_pipeline_if_available(
+            owner="weekly_draft_creation",
+            handler=self._run_weekly_draft_creation_job_unlocked,
+        )
+
+    def _run_weekly_draft_creation_job_unlocked(self) -> None:
+        """在已持有流水线锁的前提下执行周五 09:00 草稿推进。"""
+
         # 兼容旧内容：若 08:00 的审核前音频未生成，在创建草稿前补齐。
         self._run_task(AudioTask)
         self._run_task(StorageTask)
@@ -172,6 +203,36 @@ class Application:
         assert self.logger is not None
         self.logger.info("%s 完成：run_id=%s", result.task_name, result.run_id)
         return result
+
+    def _run_exclusive_pipeline(
+        self,
+        *,
+        owner: str,
+        handler: Any,
+    ) -> Any:
+        """为手动或一次性运行取得跨容器互斥锁；冲突交给调用方记录失败。"""
+
+        lock = self._create_pipeline_execution_lock()
+        with lock.hold(owner):
+            return handler()
+
+    def _run_scheduled_pipeline_if_available(self, *, owner: str, handler: Any) -> None:
+        """调度任务遇到手动运行时安全跳过，保持常驻 Scheduler 进程继续工作。"""
+
+        try:
+            self._run_exclusive_pipeline(owner=owner, handler=handler)
+        except PipelineAlreadyRunningError as exc:
+            assert self.logger is not None
+            self.logger.warning("跳过 %s：%s", owner, exc)
+
+    def _create_pipeline_execution_lock(self) -> PipelineExecutionLock:
+        """把锁文件放在与旧 SQLite 同一共享数据目录，保证跨容器可见。"""
+
+        assert self.config is not None
+        return PipelineExecutionLock(
+            self.config.database_path.parent / ".pipeline-execution.lock",
+            stale_after_seconds=self.config.pipeline_execution_lock_stale_seconds,
+        )
 
     def _create_task(self, task_class: type[BaseTask]) -> BaseTask:
         """创建 Task 实例。"""

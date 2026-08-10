@@ -67,6 +67,12 @@ class AppConfig:
         return int(self.raw["schedule"].get("loop_interval_seconds", 60))
 
     @property
+    def pipeline_execution_lock_stale_seconds(self) -> int:
+        """返回单机跨容器流水线锁的最长保留时间。"""
+
+        return int(self.raw["schedule"].get("pipeline_execution_lock_stale_seconds", 21_600))
+
+    @property
     def github_api_base_url(self) -> str:
         return str(self.raw["github"]["api_base_url"])
 
@@ -839,6 +845,12 @@ class ConfigManager:
 
         if "draft_time" not in raw["schedule"]:
             raise ValueError("config/app.yaml 缺少 schedule.draft_time")
+
+        pipeline_execution_lock_stale_seconds = int(
+            raw["schedule"].get("pipeline_execution_lock_stale_seconds", 21_600),
+        )
+        if pipeline_execution_lock_stale_seconds < 900:
+            raise ValueError("schedule.pipeline_execution_lock_stale_seconds 不能小于 900")
 
         if "api_base_url" not in raw["github"]:
             raise ValueError("config/app.yaml 缺少 github.api_base_url")

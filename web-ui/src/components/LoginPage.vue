@@ -6,6 +6,8 @@ const emit = defineEmits(['authenticated'])
 const loading = ref(true)
 const submitting = ref(false)
 const requiresBootstrap = ref(false)
+const publicRegistrationEnabled = ref(true)
+const cliBootstrapOnly = ref(false)
 const mode = ref('login')
 const verificationStage = ref(false)
 const challengeId = ref('')
@@ -17,8 +19,10 @@ const confirmPassword = ref('')
 const verificationCode = ref('')
 const errorMessage = ref('')
 const successMessage = ref('')
+const requiresCliBootstrap = computed(() => requiresBootstrap.value && cliBootstrapOnly.value)
 
 const panelTitle = computed(() => {
+  if (requiresCliBootstrap.value) return '请先在服务器初始化管理员'
   if (requiresBootstrap.value) return '创建管理员账户'
   if (mode.value === 'register') return verificationStage.value ? '验证邮箱并创建账户' : '创建平台账户'
   if (mode.value === 'reset') return verificationStage.value ? '设置新密码' : '找回登录密码'
@@ -26,6 +30,7 @@ const panelTitle = computed(() => {
 })
 
 const panelDescription = computed(() => {
+  if (requiresCliBootstrap.value) return '为了避免公网首个账户被抢先注册，管理员初始化只能由服务器拥有者在交互式终端完成。完成后刷新此页即可登录。'
   if (requiresBootstrap.value) return '首个账户将获得管理员权限。使用邮箱完成验证后，即可配置成员、角色与平台能力。'
   if (mode.value === 'register') return '注册后默认获得基础访问权限。高级管理功能需由管理员单独授权。'
   if (mode.value === 'reset') return '验证码仅发送到已验证邮箱，用于确认本次密码重置操作。'
@@ -39,7 +44,7 @@ const primaryLabel = computed(() => {
   return '登录并进入平台'
 })
 
-const showAccountTabs = computed(() => !requiresBootstrap.value && !verificationStage.value)
+const showAccountTabs = computed(() => !requiresBootstrap.value && !verificationStage.value && publicRegistrationEnabled.value)
 
 onMounted(loadBootstrapStatus)
 
@@ -54,7 +59,12 @@ async function loadBootstrapStatus() {
     if (!response.ok) throw new Error(await responseError(response, '无法读取账户服务状态'))
     const payload = await response.json()
     requiresBootstrap.value = Boolean(payload.requires_bootstrap)
+    publicRegistrationEnabled.value = payload.public_registration_enabled !== false
+    cliBootstrapOnly.value = Boolean(payload.cli_bootstrap_only)
     if (requiresBootstrap.value) mode.value = 'register'
+    if (!requiresBootstrap.value && !publicRegistrationEnabled.value && mode.value === 'register') {
+      mode.value = 'login'
+    }
   } catch (error) {
     errorMessage.value = readableError(error, '账户服务暂不可用。请确认后端服务和 PostgreSQL 已启动。')
   } finally {
@@ -261,10 +271,18 @@ function readableError(error, fallback) {
 
         <div v-if="loading" class="login-loading" role="status">正在连接账户服务…</div>
         <template v-else>
-          <nav v-if="showAccountTabs" class="login-mode-tabs" aria-label="账户操作">
-            <button :class="{ active: mode === 'login' }" type="button" @click="switchMode('login')">登录</button>
-            <button :class="{ active: mode === 'register' }" type="button" @click="switchMode('register')">注册</button>
-          </nav>
+          <section v-if="requiresCliBootstrap" class="login-cli-bootstrap" aria-live="polite">
+            <strong>管理员尚未初始化</strong>
+            <p>请登录部署服务器后，在项目目录执行：</p>
+            <code>docker compose --env-file .env.production -f docker-compose.production.yml exec -it career-api python scripts/bootstrap_first_admin.py</code>
+            <p class="login-hint">命令会在终端中安全读取邮箱、显示名称和密码；请勿添加 <code>-T</code>，也不要把密码写入命令行。</p>
+          </section>
+
+          <template v-else>
+            <nav v-if="showAccountTabs" class="login-mode-tabs" aria-label="账户操作">
+              <button :class="{ active: mode === 'login' }" type="button" @click="switchMode('login')">登录</button>
+              <button :class="{ active: mode === 'register' }" type="button" @click="switchMode('register')">注册</button>
+            </nav>
 
           <form class="login-form" @submit.prevent="submit">
             <template v-if="mode === 'login' && !requiresBootstrap">
@@ -301,9 +319,11 @@ function readableError(error, fallback) {
             <button v-if="!requiresBootstrap && mode === 'reset'" type="button" @click="switchMode('login')">返回登录</button>
             <button v-if="verificationStage" type="button" @click="switchMode(requiresBootstrap ? 'register' : mode)">修改邮箱或重新发送</button>
           </div>
+          </template>
         </template>
 
-        <p class="login-footer">验证码有效期为 10 分钟；连续 7 天未操作将自动退出，单次登录最长保留 30 天。</p>
+        <p v-if="requiresCliBootstrap" class="login-footer">管理员完成服务器端初始化后，刷新本页并使用初始化邮箱登录。</p>
+        <p v-else class="login-footer">验证码有效期为 10 分钟；连续 7 天未操作将自动退出，单次登录最长保留 30 天。</p>
       </div>
     </section>
   </main>
