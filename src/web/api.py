@@ -177,6 +177,9 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             "fallback_reason": result.fallback_reason,
             "search_scope": result.search_scope,
             "normalized_query": result.normalized_query,
+            "status_message": result.status_message,
+            "cache_hit": result.cache_hit,
+            "elapsed_ms": result.elapsed_ms,
         }
 
     def skill_save_payload(result: SkillSaveResult) -> dict[str, Any]:
@@ -277,7 +280,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
 
     @app.post("/api/skills/search")
     def search_skills(request: SkillSearchRequest) -> dict[str, Any]:
-        """用 DS4Pro + find-skills 思路对本地 Skill 做检索排序。"""
+        """按 find-skills 思路检索 GitHub 开放 Skill，超时回退本地结果。"""
 
         result = skill_library_service.search_skills(query=request.query)
         return skill_search_payload(result)
@@ -342,6 +345,12 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         """读取最新图文、脚本、素材和人工审核状态。"""
 
         return preview_service.build_latest_preview()
+
+    @app.get("/api/media-assets")
+    def media_asset_library(limit: int = 300) -> dict[str, Any]:
+        """读取工作台跨内容的媒体资源库和待生成视频状态。"""
+
+        return preview_service.build_media_library(limit=limit)
 
     @app.get("/api/tasks/recent")
     def recent_tasks(limit: int = 20) -> dict[str, Any]:

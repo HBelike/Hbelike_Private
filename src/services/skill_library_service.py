@@ -3,9 +3,12 @@ from __future__ import annotations
 import hashlib
 import base64
 import json
+import logging
 import os
 import re
-from dataclasses import dataclass, replace
+import time
+from concurrent.futures import Future, ThreadPoolExecutor, wait
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -66,6 +69,13 @@ class SkillSearchResult:
     fallback_reason: str | None
     search_scope: str
     normalized_query: str
+    status_message: str = ""
+    cache_hit: bool = False
+    elapsed_ms: int = 0
+
+
+class SkillSearchBudgetExceeded(RuntimeError):
+    """GitHub 开放 Skill 检索超过页面可接受的时间预算。"""
 
 
 @dataclass(frozen=True)
@@ -92,11 +102,24 @@ class SkillLibraryService:
     _frontmatter_field_pattern_template = r"^{field}:\s*(?P<value>.+?)\s*$"
     _skill_name_pattern = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{1,79}$")
 
+    # WebUI 的搜索请求不能被外部服务拖到几十秒。这里的时间预算覆盖一次查询改写、
+    # GitHub Code Search 和候选 SKILL.md 并行读取；到时立即回退为本地结果。
+    open_skill_search_budget_seconds = 9.0
+    github_code_search_timeout_seconds = 3.5
+    github_file_timeout_seconds = 3.0
+    github_file_fetch_workers = 4
+    github_file_candidate_limit = 8
+    github_result_limit = 8
+    open_skill_cache_ttl = timedelta(minutes=20)
+    open_skill_cache_max_entries = 40
+
     def __init__(self, config: AppConfig) -> None:
         self.config = config
         self.project_skill_root = (self.config.project_root / ".agents" / "skills").resolve()
         self.star_cache_path = (self.config.project_root / "data" / "skill_star_cache.json").resolve()
+        self.open_skill_cache_path = (self.config.project_root / "data" / "skill_search_cache.json").resolve()
         self.star_cache_ttl = timedelta(days=7)
+        self.logger = logging.getLogger(__name__)
 
     def list_skills(self) -> list[SkillSummary]:
         """扫描当前可读的 Skill 目录，并返回去重后的摘要列表。"""
@@ -116,7 +139,8 @@ class SkillLibraryService:
                 path_hint=self._path_hint(skill_path),
                 markdown=markdown,
             )
-            star_snapshot = self._repository_star_snapshot(repository_full_name)
+            # 列表页必须只读本地缓存。Star 的周期刷新不能阻塞首次进入技能库。
+            star_snapshot = self._repository_star_snapshot(repository_full_name, refresh_if_stale=False)
             skill_id = self._skill_id(skill_path)
             summary = SkillSummary(
                 id=skill_id,
@@ -164,7 +188,7 @@ class SkillLibraryService:
             path_hint=path_hint,
             markdown=markdown,
         )
-        star_snapshot = self._repository_star_snapshot(repository_full_name)
+        star_snapshot = self._repository_star_snapshot(repository_full_name, refresh_if_stale=False)
         summary = SkillSummary(
             id=self._skill_id(skill_path),
             name=name,
@@ -185,9 +209,62 @@ class SkillLibraryService:
         )
         return SkillDetail(summary=summary, markdown=markdown)
 
-    def search_skills(self, query: str) -> SkillSearchResult:
-        """用 DS4Pro 对 Skill 列表做意图排序；失败时自动回退本地关键词检索。"""
+    def refresh_stale_star_snapshots(self) -> dict[str, int]:
+        """按周刷新本地 Skill 的 GitHub Star 快照，供独立定时命令调用。
 
+        Web 请求只消费缓存；该方法特意不从 ``list_skills`` 调用，避免用户打开技能库
+        时触发一串 GitHub API 请求。脚本或计划任务可每天运行一次，实际只有过期（七天）
+        的仓库会访问网络。
+        """
+
+        repositories: set[str] = set()
+        for skill_path, _source, _source_label in self._iter_skill_files():
+            try:
+                markdown = self._read_text(skill_path)
+            except OSError:
+                continue
+            homepage_url = self._frontmatter_field(markdown, ["homepage", "url", "repo", "repository", "link"])
+            repository = self._repository_full_name_from_metadata(
+                homepage_url=homepage_url,
+                path_hint=self._path_hint(skill_path),
+                markdown=markdown,
+            )
+            if repository:
+                repositories.add(repository)
+
+        refreshed = 0
+        unchanged = 0
+        failed = 0
+        for repository in sorted(repositories):
+            before = self._repository_star_snapshot(repository, refresh_if_stale=False)
+            try:
+                after = self._repository_star_snapshot(repository, refresh_if_stale=True)
+            except Exception:
+                failed += 1
+                continue
+            if after["stars"] is None and before["stars"] is None:
+                failed += 1
+            elif after["stars_updated_at"] != before["stars_updated_at"]:
+                refreshed += 1
+            else:
+                unchanged += 1
+
+        return {
+            "repositories": len(repositories),
+            "refreshed": refreshed,
+            "unchanged": unchanged,
+            "failed": failed,
+        }
+
+    def search_skills(self, query: str) -> SkillSearchResult:
+        """搜索 GitHub 开放 Skill，并在限定时间内保持页面可用。
+
+        旧实现会在一次 HTTP 请求中串行执行两次 LLM、最多八次文件下载和八次 Star
+        请求。任何一项慢网络都会让浏览器一直转圈。现在的顺序是：先取得本地回退
+        结果和缓存，再在九秒预算内完成真正的 GitHub 搜索；Star 一律只读取周缓存。
+        """
+
+        started_at = time.monotonic()
         normalized_query = query.strip()
         skills = self.list_skills()
         if not normalized_query:
@@ -201,30 +278,77 @@ class SkillLibraryService:
                 fallback_reason=None,
                 search_scope="local_installed",
                 normalized_query="",
+                status_message="已展示本地已安装 Skill。",
+                elapsed_ms=self._elapsed_ms(started_at),
             )
 
+        cached_result = self._read_open_skill_search_cache(normalized_query)
+        if cached_result is not None:
+            return replace(
+                cached_result,
+                cache_hit=True,
+                status_message="已命中最近 20 分钟的 GitHub Skill 搜索缓存；Star 数据来自周缓存。",
+                elapsed_ms=self._elapsed_ms(started_at),
+            )
+
+        deadline = started_at + self.open_skill_search_budget_seconds
         try:
-            open_result = self._search_open_skills(query=normalized_query)
+            open_result = self._search_open_skills(query=normalized_query, deadline=deadline)
+        except SkillSearchBudgetExceeded:
+            return self._local_fallback_result(
+                query=normalized_query,
+                skills=skills,
+                started_at=started_at,
+                reason=f"GitHub 开放 Skill 搜索超过 {self.open_skill_search_budget_seconds:.0f} 秒时间预算，已立即展示本地已安装 Skill。",
+            )
         except Exception as exc:
-            return SkillSearchResult(
-                items=self._search_locally(query=normalized_query, skills=skills),
-                used_llm=False,
-                model=None,
-                fallback_reason=f"GitHub Skill 搜索暂不可用，已临时展示本地已安装结果：{exc.__class__.__name__}",
-                search_scope="fallback_local_installed",
-                normalized_query=normalized_query,
+            self.logger.warning("GitHub 开放 Skill 搜索失败，使用本地回退：%s", exc.__class__.__name__)
+            return self._local_fallback_result(
+                query=normalized_query,
+                skills=skills,
+                started_at=started_at,
+                reason=f"GitHub Skill 搜索暂不可用，已展示本地已安装结果：{exc.__class__.__name__}。",
             )
 
         if open_result.items:
-            return open_result
+            completed_result = replace(
+                open_result,
+                status_message="已完成 GitHub 开放 Skill 搜索；Star 数据从周缓存读取，不阻塞本次检索。",
+                elapsed_ms=self._elapsed_ms(started_at),
+            )
+            self._write_open_skill_search_cache(normalized_query, completed_result)
+            return completed_result
+
+        return self._local_fallback_result(
+            query=normalized_query,
+            skills=skills,
+            started_at=started_at,
+            reason="GitHub 暂未返回可用 Skill，已展示本地已安装结果。",
+            normalized_query=open_result.normalized_query,
+            model=open_result.model,
+        )
+
+    def _local_fallback_result(
+        self,
+        *,
+        query: str,
+        skills: list[SkillSummary],
+        started_at: float,
+        reason: str,
+        normalized_query: str | None = None,
+        model: str | None = None,
+    ) -> SkillSearchResult:
+        """构造可立即显示的本地回退结果。"""
 
         return SkillSearchResult(
-            items=self._search_locally(query=normalized_query, skills=skills),
+            items=self._search_locally(query=query, skills=skills),
             used_llm=False,
-            model=open_result.model,
-            fallback_reason="GitHub 暂未返回可用 Skill，已临时展示本地已安装结果。",
+            model=model,
+            fallback_reason=reason,
             search_scope="fallback_local_installed",
-            normalized_query=open_result.normalized_query,
+            normalized_query=normalized_query or query,
+            status_message="已优先保留本地 Skill 可用性。",
+            elapsed_ms=self._elapsed_ms(started_at),
         )
 
     def save_skill(
@@ -289,11 +413,11 @@ class SkillLibraryService:
         body_start = match.end()
         return f"---\n{frontmatter}\n{additions}\n---\n{markdown[body_start:]}"
 
-    def _search_open_skills(self, query: str) -> SkillSearchResult:
+    def _search_open_skills(self, query: str, deadline: float) -> SkillSearchResult:
         """按 find-skills 思路搜索 GitHub 上的开放 Skill。"""
 
-        normalized_query, model = self._normalize_open_skill_query(query=query)
-        markdown_files = self._search_github_skill_files(query=normalized_query)
+        normalized_query, model = self._normalize_open_skill_query(query=query, deadline=deadline)
+        markdown_files = self._search_github_skill_files(query=normalized_query, deadline=deadline)
         items: list[SkillSearchItem] = []
         seen_names: set[str] = set()
 
@@ -312,7 +436,8 @@ class SkillLibraryService:
 
             html_url = str(item.get("html_url", "")).strip() or None
             repository_full_name = repo_name if "/" in repo_name else None
-            star_snapshot = self._repository_star_snapshot(repository_full_name)
+            # 搜索结果只读已有的周 Star 快照，避免每个候选仓库再同步请求一次 GitHub。
+            star_snapshot = self._repository_star_snapshot(repository_full_name, refresh_if_stale=False)
             summary = SkillSummary(
                 id=f"github-{str(item.get('sha', hashlib.sha256(str(item).encode('utf-8')).hexdigest()))[:16]}",
                 name=name,
@@ -334,10 +459,9 @@ class SkillLibraryService:
             score = max(60, 98 - index * 4)
             reason = f"来自 GitHub 仓库 {repo_name}，匹配开放 Skill 文件 {path}。"
             items.append(SkillSearchItem(skill=summary, score=score, match_reason=reason, markdown=markdown))
-            if len(items) >= 8:
+            if len(items) >= self.github_result_limit:
                 break
 
-        items = self._localize_open_skill_items(query=query, items=items)
         return SkillSearchResult(
             items=items,
             used_llm=model is not None,
@@ -347,8 +471,15 @@ class SkillLibraryService:
             normalized_query=normalized_query,
         )
 
-    def _normalize_open_skill_query(self, query: str) -> tuple[str, str | None]:
-        """用 DS4Pro 把中文搜索意图改写为 GitHub Code Search 更容易命中的英文关键词。"""
+    def _normalize_open_skill_query(self, query: str, deadline: float) -> tuple[str, str | None]:
+        """必要时用 DS4Pro 改写关键词，但绝不超过本次页面时间预算。"""
+
+        # 英文技术关键词本来就适合 GitHub Code Search，跳过 LLM 以减少一次外部调用。
+        if not self._contains_cjk(query):
+            return query[:180], None
+        timeout_seconds = self._remaining_budget(deadline=deadline, maximum=3.5)
+        if timeout_seconds <= 0:
+            raise SkillSearchBudgetExceeded("查询改写已耗尽搜索预算")
 
         provider = DeepSeekProvider(config=self.config, run_name="skills.query_normalize")
         skills = self.list_skills()
@@ -382,7 +513,10 @@ find-skills 的本地说明片段：
             [
                 DeepSeekMessage(role="system", content=system_prompt),
                 DeepSeekMessage(role="user", content=user_prompt.strip()),
-            ]
+            ],
+            timeout_seconds=timeout_seconds,
+            max_tokens=160,
+            retry_empty_content=False,
         )
         parsed = parse_json_object_from_text(response.content)
         normalized_query = str(parsed.get("github_query", "")).strip()
@@ -390,19 +524,22 @@ find-skills 的本地说明片段：
             return query, response.model
         return normalized_query[:180], response.model
 
-    def _search_github_skill_files(self, query: str) -> list[dict[str, Any]]:
-        """调用 GitHub Code Search 查找 SKILL.md，并拉取文件内容。"""
+    def _search_github_skill_files(self, query: str, deadline: float) -> list[dict[str, Any]]:
+        """调用 GitHub Code Search 并有限并行拉取 SKILL.md。"""
 
         search_terms = query.strip() or "agent skills"
         search_query = f"{search_terms} filename:SKILL.md"
+        timeout_seconds = self._remaining_budget(deadline=deadline, maximum=self.github_code_search_timeout_seconds)
+        if timeout_seconds <= 0:
+            raise SkillSearchBudgetExceeded("GitHub Code Search 已耗尽搜索预算")
         response = requests.get(
             "https://api.github.com/search/code",
             headers=self._github_headers(),
             params={
                 "q": search_query,
-                "per_page": 12,
+                "per_page": self.github_file_candidate_limit,
             },
-            timeout=25,
+            timeout=timeout_seconds,
         )
         if not response.ok:
             raise RuntimeError(f"GitHub Code Search 失败：status={response.status_code}")
@@ -415,31 +552,49 @@ find-skills 的本地说明片段：
         if not isinstance(raw_items, list):
             return []
 
-        results: list[dict[str, Any]] = []
-        for raw_item in raw_items:
-            if not isinstance(raw_item, dict):
-                continue
+        candidates = [item for item in raw_items if isinstance(item, dict)][: self.github_file_candidate_limit]
+        if not candidates:
+            return []
+
+        remaining_seconds = self._remaining_budget(deadline=deadline, maximum=self.github_file_timeout_seconds)
+        if remaining_seconds <= 0:
+            raise SkillSearchBudgetExceeded("候选 Skill 文件读取已耗尽搜索预算")
+
+        # Code Search 只返回元数据；候选内容读取使用小规模线程池并发，避免 8 个网络
+        # 往返被串行放大。等待超时后直接回退，不阻塞浏览器继续旋转。
+        executor = ThreadPoolExecutor(max_workers=min(self.github_file_fetch_workers, len(candidates)))
+        futures: dict[Future[str], tuple[int, dict[str, Any]]] = {
+            executor.submit(self._fetch_github_file_text, item, remaining_seconds): (index, item)
+            for index, item in enumerate(candidates)
+        }
+        completed, _pending = wait(futures, timeout=remaining_seconds)
+        executor.shutdown(wait=False, cancel_futures=True)
+
+        fetched: list[tuple[int, dict[str, Any]]] = []
+        for future in completed:
+            index, raw_item = futures[future]
             try:
-                markdown = self._fetch_github_file_text(raw_item)
+                markdown = future.result()
             except Exception:
                 continue
             if not markdown.strip():
                 continue
             enriched = dict(raw_item)
             enriched["markdown"] = markdown
-            results.append(enriched)
-            if len(results) >= 8:
-                break
-        return results
+            fetched.append((index, enriched))
 
-    def _fetch_github_file_text(self, code_search_item: dict[str, Any]) -> str:
+        if not fetched and _pending:
+            raise SkillSearchBudgetExceeded("候选 Skill 文件读取超时")
+        return [item for _index, item in sorted(fetched, key=lambda pair: pair[0])]
+
+    def _fetch_github_file_text(self, code_search_item: dict[str, Any], timeout_seconds: float) -> str:
         """读取 GitHub Code Search 返回的单个文件内容。"""
 
         api_url = str(code_search_item.get("url", "")).strip()
         if not api_url.startswith("https://api.github.com/"):
             raise RuntimeError("GitHub 文件 API 地址无效")
 
-        response = requests.get(api_url, headers=self._github_headers(), timeout=20)
+        response = requests.get(api_url, headers=self._github_headers(), timeout=timeout_seconds)
         if not response.ok:
             raise RuntimeError(f"GitHub 文件读取失败：status={response.status_code}")
 
@@ -454,10 +609,170 @@ find-skills 的本地说明片段：
 
         download_url = str(payload.get("download_url", "")).strip()
         if download_url.startswith("https://"):
-            raw_response = requests.get(download_url, timeout=20)
+            raw_response = requests.get(download_url, timeout=timeout_seconds)
             if raw_response.ok:
                 return raw_response.text
         return content
+
+    def _read_open_skill_search_cache(self, query: str) -> SkillSearchResult | None:
+        """读取仍在有效期内的 GitHub Skill 检索缓存。"""
+
+        cache = self._load_open_skill_search_cache()
+        entries = cache.get("entries", {})
+        if not isinstance(entries, dict):
+            return None
+        record = entries.get(self._open_skill_cache_key(query))
+        if not isinstance(record, dict):
+            return None
+        created_at = self._parse_cache_datetime(record.get("created_at"))
+        if created_at is None or datetime.now(UTC) - created_at >= self.open_skill_cache_ttl:
+            return None
+        result = self._deserialize_open_skill_search_result(record.get("result"))
+        if result is None or not result.items:
+            return None
+        return result
+
+    def _write_open_skill_search_cache(self, query: str, result: SkillSearchResult) -> None:
+        """持久化公开 GitHub 搜索结果，避免短时间重复请求外部 API。"""
+
+        try:
+            cache = self._load_open_skill_search_cache()
+            entries = cache.setdefault("entries", {})
+            if not isinstance(entries, dict):
+                entries = {}
+                cache["entries"] = entries
+            entries[self._open_skill_cache_key(query)] = {
+                "created_at": datetime.now(UTC).isoformat(),
+                "result": self._serialize_open_skill_search_result(result),
+            }
+
+            fresh_entries: list[tuple[str, dict[str, Any]]] = []
+            now = datetime.now(UTC)
+            for key, value in entries.items():
+                if not isinstance(value, dict):
+                    continue
+                created_at = self._parse_cache_datetime(value.get("created_at"))
+                if created_at is None or now - created_at >= self.open_skill_cache_ttl:
+                    continue
+                fresh_entries.append((key, value))
+            fresh_entries.sort(
+                key=lambda item: str(item[1].get("created_at", "")),
+                reverse=True,
+            )
+            cache["entries"] = dict(fresh_entries[: self.open_skill_cache_max_entries])
+            self._save_open_skill_search_cache(cache)
+        except OSError:
+            # 缓存写入失败不能让已经得到的 GitHub 搜索结果变成错误响应。
+            self.logger.warning("Skill 搜索缓存写入失败，已忽略本次缓存")
+
+    def _load_open_skill_search_cache(self) -> dict[str, Any]:
+        """读取 Skill 搜索持久缓存，损坏时视为未命中。"""
+
+        if not self.open_skill_cache_path.exists():
+            return {"entries": {}}
+        try:
+            payload = json.loads(self.open_skill_cache_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {"entries": {}}
+        if not isinstance(payload, dict):
+            return {"entries": {}}
+        if not isinstance(payload.get("entries"), dict):
+            payload["entries"] = {}
+        return payload
+
+    def _save_open_skill_search_cache(self, cache: dict[str, Any]) -> None:
+        """原子写入公开搜索缓存，避免运行中重启留下半截 JSON。"""
+
+        self.open_skill_cache_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path = self.open_skill_cache_path.with_suffix(".tmp")
+        temporary_path.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary_path.replace(self.open_skill_cache_path)
+
+    def _open_skill_cache_key(self, query: str) -> str:
+        """使用归一化查询生成不暴露用户原文的缓存键。"""
+
+        normalized = re.sub(r"\s+", " ", query.strip().casefold())
+        return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+    def _serialize_open_skill_search_result(self, result: SkillSearchResult) -> dict[str, Any]:
+        """将公开 GitHub 结果转换为可持久化 JSON。"""
+
+        return {
+            "items": [
+                {
+                    "skill": asdict(item.skill),
+                    "score": item.score,
+                    "match_reason": item.match_reason,
+                    "markdown": item.markdown,
+                }
+                for item in result.items
+            ],
+            "used_llm": result.used_llm,
+            "model": result.model,
+            "fallback_reason": result.fallback_reason,
+            "search_scope": result.search_scope,
+            "normalized_query": result.normalized_query,
+        }
+
+    def _deserialize_open_skill_search_result(self, raw: Any) -> SkillSearchResult | None:
+        """校验并恢复磁盘缓存，缓存异常不会影响正常搜索。"""
+
+        if not isinstance(raw, dict):
+            return None
+        raw_items = raw.get("items")
+        if not isinstance(raw_items, list):
+            return None
+        items: list[SkillSearchItem] = []
+        for raw_item in raw_items:
+            if not isinstance(raw_item, dict) or not isinstance(raw_item.get("skill"), dict):
+                continue
+            try:
+                skill = SkillSummary(**raw_item["skill"])
+                items.append(
+                    SkillSearchItem(
+                        skill=skill,
+                        score=self._clamp_score(raw_item.get("score")),
+                        match_reason=str(raw_item.get("match_reason", "GitHub 缓存结果。")),
+                        markdown=None if raw_item.get("markdown") is None else str(raw_item.get("markdown")),
+                    )
+                )
+            except (TypeError, ValueError):
+                continue
+        if not items:
+            return None
+        return SkillSearchResult(
+            items=items,
+            used_llm=bool(raw.get("used_llm", False)),
+            model=None if raw.get("model") is None else str(raw.get("model")),
+            fallback_reason=None,
+            search_scope="github_open_skills",
+            normalized_query=str(raw.get("normalized_query", "")),
+        )
+
+    def _parse_cache_datetime(self, value: Any) -> datetime | None:
+        """解析缓存时间，兼容早期无时区的缓存内容。"""
+
+        if not isinstance(value, str) or not value.strip():
+            return None
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=UTC)
+        return parsed
+
+    @staticmethod
+    def _elapsed_ms(started_at: float) -> int:
+        """返回当前操作耗时，供 API 和 UI 显示。"""
+
+        return max(0, int((time.monotonic() - started_at) * 1000))
+
+    @staticmethod
+    def _remaining_budget(*, deadline: float, maximum: float) -> float:
+        """根据总截止时间计算本步骤允许使用的请求超时。"""
+
+        return max(0.0, min(maximum, deadline - time.monotonic()))
 
     def _github_headers(self) -> dict[str, str]:
         """构造 GitHub API 请求头。"""
@@ -603,8 +918,13 @@ GitHub Skill 候选：
             return owner_repo_match.group(2).removesuffix(".git")
         return None
 
-    def _repository_star_snapshot(self, repository_full_name: str | None) -> dict[str, Any]:
-        """读取或按七天周期刷新 GitHub 仓库 Star 快照。"""
+    def _repository_star_snapshot(
+        self,
+        repository_full_name: str | None,
+        *,
+        refresh_if_stale: bool,
+    ) -> dict[str, Any]:
+        """读取 Star 缓存；仅显式刷新任务允许访问 GitHub。"""
 
         empty_snapshot = {
             "stars": None,
@@ -624,6 +944,10 @@ GitHub Skill 候选：
 
         if not self._is_star_record_stale(record, now=now):
             return self._star_payload_from_record(record)
+
+        # WebUI 列表和搜索只读取旧快照或空值；这样 Star API 不会拖慢交互。
+        if not refresh_if_stale:
+            return self._star_payload_from_record(record) if record else empty_snapshot
 
         try:
             latest_stars = self._fetch_repository_stars(repository_full_name)

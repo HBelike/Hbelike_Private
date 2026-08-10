@@ -116,7 +116,7 @@ services:
     expose:
       - "8012"
     tmpfs:
-      - /var/lib/career-temporary-attachments:size=128m,mode=1770
+      - /var/lib/career-temporary-attachments:size=128m,mode=1770,uid=100,gid=101
     volumes:
       - application_data:/app/data
       - application_outputs:/app/outputs
@@ -160,7 +160,7 @@ services:
       CAREER_GOTENBERG_SERVICE_BASE_URL: ${CAREER_GOTENBERG_SERVICE_BASE_URL:-http://career-gotenberg:3000}
     command: ["python", "main.py"]
     tmpfs:
-      - /var/lib/career-temporary-attachments:size=128m,mode=1770
+      - /var/lib/career-temporary-attachments:size=128m,mode=1770,uid=100,gid=101
     volumes:
       - application_data:/app/data
       - application_outputs:/app/outputs

@@ -215,6 +215,45 @@ class VideoClipPlanRepository:
 
         return [self._row_to_record(row) for row in rows]
 
+    def list_recent(self, limit: int = 300) -> list[VideoClipPlanRecord]:
+        """读取最近的视频分片计划，供工作台资源库显示未完成状态。"""
+
+        normalized_limit = min(max(int(limit), 1), 500)
+        with self.database_manager.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    id,
+                    content_id,
+                    storyboard_id,
+                    clip_index,
+                    source_scene_index,
+                    clip_title,
+                    repository_full_name,
+                    planned_duration_seconds,
+                    output_start_second,
+                    output_end_second,
+                    narration,
+                    subtitle,
+                    visual_design,
+                    motion_design,
+                    transition_to_next,
+                    seedance_prompt,
+                    reference_image_asset_ids_json,
+                    provider,
+                    status,
+                    metadata_json,
+                    created_at,
+                    updated_at
+                FROM video_clip_plans
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (normalized_limit,),
+            ).fetchall()
+
+        return [self._row_to_record(row) for row in rows]
+
     def merge_metadata_and_status(
         self,
         clip_plan_id: int,

@@ -7,6 +7,7 @@ import ObservabilityPage from './components/ObservabilityPage.vue'
 import AdminConsolePage from './components/AdminConsolePage.vue'
 
 const preview = ref(null)
+const mediaLibrary = ref({ items: [], pending_video_clips: [], summary: {} })
 const tasks = ref([])
 const healthSummary = ref(null)
 const loading = ref(false)
@@ -81,6 +82,9 @@ const content = computed(() => preview.value?.content ?? null)
 const articleLayout = computed(() => preview.value?.article_layout ?? null)
 const approval = computed(() => preview.value?.approval ?? null)
 const mediaAssets = computed(() => preview.value?.media_assets ?? [])
+const mediaLibraryAssets = computed(() => mediaLibrary.value?.items ?? [])
+const pendingVideoClips = computed(() => mediaLibrary.value?.pending_video_clips ?? [])
+const mediaLibrarySummary = computed(() => mediaLibrary.value?.summary ?? {})
 const videoStoryboard = computed(() => preview.value?.video_storyboard ?? null)
 const videoClipPlans = computed(() => preview.value?.video_clip_plans ?? [])
 const imagePrompts = computed(() => content.value?.image_prompts ?? [])
@@ -93,7 +97,7 @@ const githubImageAssets = computed(() =>
 const audioAssets = computed(() => mediaAssets.value.filter((asset) => asset.asset_type === 'audio'))
 const videoAssets = computed(() =>
   mediaAssets.value.filter((asset) =>
-    ['video', 'video_task', 'video_clip_task'].includes(asset.asset_type)
+    ['video', 'video_clip', 'video_task', 'video_clip_task'].includes(asset.asset_type)
   )
 )
 const overviewImageAssets = computed(() => imageAssets.value.slice(0, requiredImageCount.value))
@@ -331,17 +335,20 @@ async function refreshDashboard() {
 
   try {
     const cacheBuster = Date.now()
-    const [previewResponse, tasksResponse, healthResponse] = await Promise.all([
+    const [previewResponse, tasksResponse, healthResponse, mediaLibraryResponse] = await Promise.all([
       fetch(`/api/preview/latest?_=${cacheBuster}`, { cache: 'no-store' }),
       fetch(`/api/tasks/recent?limit=80&_=${cacheBuster}`, { cache: 'no-store' }),
-      fetch(`/api/system/health-summary?_=${cacheBuster}`, { cache: 'no-store' })
+      fetch(`/api/system/health-summary?_=${cacheBuster}`, { cache: 'no-store' }),
+      fetch(`/api/media-assets?limit=300&_=${cacheBuster}`, { cache: 'no-store' })
     ])
 
     if (!previewResponse.ok) throw new Error(`预览接口异常：${previewResponse.status}`)
     if (!tasksResponse.ok) throw new Error(`任务接口异常：${tasksResponse.status}`)
     if (!healthResponse.ok) throw new Error(`健康摘要接口异常：${healthResponse.status}`)
+    if (!mediaLibraryResponse.ok) throw new Error(`媒体资源库接口异常：${mediaLibraryResponse.status}`)
 
     preview.value = normalizePreviewPayload(await previewResponse.json())
+    mediaLibrary.value = await mediaLibraryResponse.json()
     const taskPayload = await tasksResponse.json()
     tasks.value = taskPayload.items ?? []
     healthSummary.value = await healthResponse.json()
@@ -419,7 +426,7 @@ async function loadSkillDetail(skillId) {
 async function searchSkills() {
   skillSearchLoading.value = true
   skillErrorMessage.value = ''
-  skillMessage.value = ''
+  skillMessage.value = '正在搜索 GitHub 开放 Skill；若外部服务超时，会自动展示本地已安装结果。'
 
   try {
     const response = await fetch('/api/skills/search', {
@@ -437,8 +444,11 @@ async function searchSkills() {
     }
 
     skillSearchResults.value = payload.items ?? []
+    const elapsed = Number.isFinite(payload.elapsed_ms) ? `（${(payload.elapsed_ms / 1000).toFixed(1)} 秒）` : ''
     if (payload.fallback_reason) {
-      skillMessage.value = payload.fallback_reason
+      skillMessage.value = `${payload.fallback_reason}${elapsed}`
+    } else if (payload.status_message) {
+      skillMessage.value = `${payload.status_message}${elapsed}`
     } else if (payload.used_llm) {
       skillMessage.value = `已使用 ${payload.model ?? 'DS4Pro'} 改写查询，并搜索 GitHub Skill：${payload.normalized_query || skillSearchQuery.value}`
     } else {
@@ -625,10 +635,36 @@ function mediaTypeLabel(assetType) {
     image: '图片',
     audio: '音频',
     video: '视频',
+    video_clip: '视频片段',
     video_task: '视频任务',
-    video_clip_task: '分段视频任务'
+    video_clip_task: '分段视频任务',
+    video_clip_plan: '待生成视频片段'
   }
   return mapping[assetType] ?? assetType
+}
+
+function mediaStatusText(status) {
+  const mapping = {
+    created: '已生成',
+    uploaded: '已保存',
+    planned: '等待提交生成',
+    submitted: '已提交生成',
+    processing: '生成中',
+    completed: '已完成',
+    failed: '生成失败',
+    replaced: '已替换'
+  }
+  return mapping[status] ?? (status || '状态未知')
+}
+
+function isPlayableVideoAsset(asset) {
+  return ['video', 'video_clip'].includes(asset?.asset_type) && Boolean(asset?.preview_url)
+}
+
+function mediaFailureReason(asset) {
+  const metadata = asset?.metadata ?? {}
+  const value = metadata.error_message ?? metadata.error ?? metadata.failure_reason ?? metadata.last_error
+  return typeof value === 'string' && value.trim() ? value.trim() : ''
 }
 
 function approvalText(decision) {
@@ -1347,25 +1383,59 @@ onBeforeUnmount(() => {
               <p class="eyebrow">Assets</p>
               <h2>媒体素材</h2>
             </div>
-            <span class="asset-count">{{ mediaAssets.length }} 个资源 · 仓库图 {{ githubImageAssets.length }}</span>
+            <span class="asset-count">
+              实际文件 {{ mediaLibrarySummary.total_asset_count ?? 0 }} ·
+              图片 {{ mediaLibrarySummary.image_count ?? 0 }} ·
+              音频 {{ mediaLibrarySummary.audio_count ?? 0 }} ·
+              视频 {{ mediaLibrarySummary.video_count ?? 0 }}
+            </span>
           </div>
-          <div v-if="!mediaAssets.length" class="empty-media">图片、音频、视频还没有真实生成。</div>
+          <div v-if="!mediaLibraryAssets.length" class="empty-media">
+            目前还没有可预览的实际媒体文件。下方会单独显示已经规划、正在生成或失败的视频片段。
+          </div>
           <div v-else class="media-grid">
-            <article v-for="asset in mediaAssets" :key="asset.id" class="media-card">
+            <article v-for="asset in mediaLibraryAssets" :key="asset.id" class="media-card">
               <div class="media-preview">
                 <img v-if="asset.asset_type === 'image' && asset.preview_url" :src="asset.preview_url" :alt="`asset-${asset.id}`" />
                 <audio v-else-if="asset.asset_type === 'audio' && asset.preview_url" controls :src="asset.preview_url"></audio>
-                <video v-else-if="asset.asset_type === 'video' && asset.preview_url" controls :src="asset.preview_url"></video>
+                <video v-else-if="isPlayableVideoAsset(asset)" controls :src="asset.preview_url"></video>
                 <span v-else>{{ mediaTypeLabel(asset.asset_type) }}</span>
               </div>
               <div class="media-meta">
                 <strong>{{ mediaTypeLabel(asset.asset_type) }} #{{ asset.id }}</strong>
-                <small>{{ asset.provider }} · {{ asset.status }}</small>
+                <small>{{ asset.provider }} · {{ mediaStatusText(asset.status) }}</small>
                 <small v-if="asset.metadata?.repository_full_name">{{ asset.metadata.repository_full_name }}</small>
+                <small v-if="asset.status === 'failed' && mediaFailureReason(asset)" class="media-failure">
+                  失败原因：{{ mediaFailureReason(asset) }}
+                </small>
                 <a v-if="asset.preview_url" :href="asset.preview_url" target="_blank" rel="noreferrer">打开预览</a>
               </div>
             </article>
           </div>
+
+          <section v-if="pendingVideoClips.length" class="pending-video-section">
+            <div class="panel-header compact-panel-header">
+              <div>
+                <p class="eyebrow">Video generation</p>
+                <h3>尚未产出文件的视频片段</h3>
+              </div>
+              <span class="asset-count">{{ pendingVideoClips.length }} 段</span>
+            </div>
+            <div class="pending-video-list">
+              <article v-for="clip in pendingVideoClips" :key="`pending-video-${clip.id}`" class="pending-video-card">
+                <div>
+                  <strong>片段 {{ clip.clip_index }} · {{ clip.clip_title }}</strong>
+                  <small>{{ clip.provider }} · 计划 {{ clip.planned_duration_seconds }} 秒</small>
+                </div>
+                <div class="pending-video-status">
+                  <span class="status-pill" :class="statusClass(clip.status)">{{ mediaStatusText(clip.status) }}</span>
+                  <small v-if="clip.status === 'planned'">尚未提交视频生成，因此当前没有可预览文件。</small>
+                  <small v-else-if="clip.status === 'failed'">生成失败；请在任务流程中查看失败原因后重试。</small>
+                  <small v-else>正在等待视频文件写入资源库。</small>
+                </div>
+              </article>
+            </div>
+          </section>
         </section>
       </template>
 

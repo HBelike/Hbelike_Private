@@ -11,12 +11,15 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
 
 SKILL_FILE_NAME = "SKILL.md"
+_FRONTMATTER_NAME_PATTERN = re.compile(r"^name:\s*(?P<value>.+?)\s*$", re.MULTILINE)
+_PORTABLE_SKILL_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$")
 
 
 @dataclass(frozen=True)
@@ -98,9 +101,9 @@ def export_skill_trees(
 ) -> SkillPortabilityResult:
     """将指定本地 Skill 根目录导出为可提交的项目种子。
 
-    ``source_roots`` 按顺序处理；同一路径已被先前来源导出时，后续来源默认跳过。
-    这让本地 ``~/.agents/skills`` 可以优先于其他可选来源，并且不会意外覆盖已经人工
-    审查过的 ``deploy/skill-seeds`` 内容。
+    ``source_roots`` 按顺序处理，并根据 SKILL.md 的 ``name`` 同名去重。导出路径统一
+    规整为 ``<skill-name>/SKILL.md``，不把开发机的插件版本、缓存层级或绝对路径带进
+    Git。先传入的来源优先，且默认不覆盖项目里已审查的种子。
     """
 
     if not source_roots:
@@ -109,23 +112,32 @@ def export_skill_trees(
     resolved_destination_root = _prepare_destination_root(destination_root)
     copied: list[Path] = []
     skipped: list[Path] = []
+    seen_names: set[str] = set()
     for source_root in source_roots:
         resolved_source_root = _require_directory(source_root, label="Skill 来源目录")
         for source_path, relative_path in _iter_safe_skill_files(resolved_source_root):
+            skill_name = _portable_skill_name(source_path, fallback=relative_path.parent.name)
+            name_key = skill_name.casefold()
+            if name_key in seen_names:
+                skipped.append(relative_path)
+                continue
+            seen_names.add(name_key)
+
+            destination_relative_path = Path(skill_name) / SKILL_FILE_NAME
             destination_path = _safe_destination_path(
                 destination_root=resolved_destination_root,
-                relative_path=relative_path,
+                relative_path=destination_relative_path,
             )
             if destination_path.exists() or destination_path.is_symlink():
                 if not overwrite:
-                    skipped.append(relative_path)
+                    skipped.append(destination_relative_path)
                     continue
                 if destination_path.is_symlink():
-                    raise ValueError(f"拒绝覆盖指向外部的 Skill 符号链接：{relative_path}")
+                    raise ValueError(f"拒绝覆盖指向外部的 Skill 符号链接：{destination_relative_path}")
 
             destination_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source_path, destination_path)
-            copied.append(relative_path)
+            copied.append(destination_relative_path)
 
     return SkillPortabilityResult(copied=tuple(copied), skipped=tuple(skipped))
 
@@ -176,6 +188,20 @@ def _safe_destination_path(*, destination_root: Path, relative_path: Path) -> Pa
     except ValueError as exc:
         raise ValueError(f"Skill 目标路径越界：{relative_path}") from exc
     return resolved_candidate
+
+
+def _portable_skill_name(skill_path: Path, *, fallback: str) -> str:
+    """读取 frontmatter 的 name 并转换为稳定、安全的种子目录名。"""
+
+    try:
+        markdown = skill_path.read_text(encoding="utf-8-sig")
+    except OSError as exc:
+        raise ValueError(f"无法读取 Skill 文件：{skill_path}") from exc
+    name_match = _FRONTMATTER_NAME_PATTERN.search(markdown)
+    raw_name = name_match.group("value").strip().strip("\"'") if name_match else fallback.strip()
+    if not _PORTABLE_SKILL_NAME_PATTERN.fullmatch(raw_name):
+        raise ValueError(f"Skill name 不适合作为可移植目录名：{raw_name}")
+    return raw_name
 
 
 def _change_owner_tree(root: Path, owner: str) -> None:

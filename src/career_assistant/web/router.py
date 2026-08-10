@@ -733,6 +733,9 @@ async def submit_intake_with_materials(
             inbound_message,
             result,
         )
+    except OSError as exc:
+        services.temporary_attachment_store.cleanup(tuple(attachments))
+        raise _temporary_attachment_service_unavailable(exc) from exc
     except (LookupError, ValueError, RuntimeError) as exc:
         services.temporary_attachment_store.cleanup(tuple(attachments))
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -813,6 +816,9 @@ async def stream_intake_with_materials(
                     _upload_kind(job_description_file, is_resume=False),
                 ),
             )
+    except OSError as exc:
+        services.temporary_attachment_store.cleanup(tuple(attachments))
+        raise _temporary_attachment_service_unavailable(exc) from exc
     except (LookupError, ValueError, RuntimeError) as exc:
         services.temporary_attachment_store.cleanup(tuple(attachments))
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -1143,6 +1149,8 @@ async def parse_interview_experience_file(
                 "warnings": warnings,
             },
         }
+    except OSError as exc:
+        raise _temporary_attachment_service_unavailable(exc) from exc
     except (LookupError, RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:  # pragma: no cover - 防止临时文件解析错误被前端压成无意义 500
@@ -1306,6 +1314,8 @@ async def import_interview_experience_file(
             ),
             trigger_type=IngestionTriggerType.MANUAL_UPLOAD,
         )
+    except OSError as exc:
+        raise _temporary_attachment_service_unavailable(exc) from exc
     except (LookupError, RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     finally:
@@ -1972,6 +1982,16 @@ def _upload_kind(upload: UploadFile, *, is_resume: bool) -> AttachmentKind:
         )
     raise ValueError(
         "附件类型不受支持；支持 PDF、Word（DOC/DOCX）、Excel（XLS/XLSX）、JPG、PNG、WebP、BMP 或 TIFF",
+    )
+
+
+def _temporary_attachment_service_unavailable(exc: OSError) -> HTTPException:
+    """把临时附件目录故障转换为不暴露宿主路径的服务不可用响应。"""
+
+    logger.warning("临时附件服务不可用：%s", type(exc).__name__)
+    return HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail="附件临时处理服务暂时不可用，请稍后重试；原始文件未被保存。",
     )
 
 

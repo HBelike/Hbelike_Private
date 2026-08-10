@@ -1,0 +1,287 @@
+{
+  "format": 1,
+  "description": "仅包含可部署 SKILL.md 的名称、相对路径与 SHA-256；不包含本机绝对路径、缓存或凭据。",
+  "total": 56,
+  "skills": [
+    {
+      "name": "88api-nano-banana",
+      "path": "88api-nano-banana/SKILL.md",
+      "sha256": "3edff8cf5ae854c2d4323a3aadad7316ea17645e0e2004c1e0fbb18239e9e229"
+    },
+    {
+      "name": "ai-image-generation",
+      "path": "ai-image-generation/SKILL.md",
+      "sha256": "4b33dd283f4cd244e51199d66f2218cd9d149f72c6a63420aeca47b600de014c"
+    },
+    {
+      "name": "artifact-template-analytics-dashboard",
+      "path": "artifact-template-analytics-dashboard/SKILL.md",
+      "sha256": "cf5360fd8b197673bb237c52c603c97fa319c875c3dfa2cd8efff52d4422f513"
+    },
+    {
+      "name": "artifact-template-business-review",
+      "path": "artifact-template-business-review/SKILL.md",
+      "sha256": "27721fc1d67d1b41949caa75ac8f94f81952ff124406878af6524047929e60d2"
+    },
+    {
+      "name": "artifact-template-design-report",
+      "path": "artifact-template-design-report/SKILL.md",
+      "sha256": "563722f53854e606f8a9f87e37e72d7ef70a22d46d5836b8e4d6abfb1b79e9e0"
+    },
+    {
+      "name": "artifact-template-experiment-analysis",
+      "path": "artifact-template-experiment-analysis/SKILL.md",
+      "sha256": "0b05effc47df0a14f8e0c3e3597e6722224747435546385d38a2cae279bd20b9"
+    },
+    {
+      "name": "artifact-template-financial-budget",
+      "path": "artifact-template-financial-budget/SKILL.md",
+      "sha256": "c0b6b7a62a15597aaf2b1ec679e21da48f533b756127f0aef957cdfe9f3da738"
+    },
+    {
+      "name": "artifact-template-investment-committee-memo",
+      "path": "artifact-template-investment-committee-memo/SKILL.md",
+      "sha256": "68abd08cfe5e073e3c446a3f675f44c5bf98f57434dba679e8acd8a763379a8b"
+    },
+    {
+      "name": "artifact-template-legal-memorandum",
+      "path": "artifact-template-legal-memorandum/SKILL.md",
+      "sha256": "51fb9d21baf6119c4ccb1903638a6bac0e859210de63460fffa7025d52e997e0"
+    },
+    {
+      "name": "artifact-template-market-trends-report",
+      "path": "artifact-template-market-trends-report/SKILL.md",
+      "sha256": "d58d019b89cb6f292ac3ab991d561489eef477ff53ce05fb024a0c936f5af26a"
+    },
+    {
+      "name": "artifact-template-minimal-letterhead",
+      "path": "artifact-template-minimal-letterhead/SKILL.md",
+      "sha256": "880ef094d4d0c89a7bde5ce9bbe4086625c186651e9e6efc8ba8bdd7cc77f9d5"
+    },
+    {
+      "name": "artifact-template-operating-calendar",
+      "path": "artifact-template-operating-calendar/SKILL.md",
+      "sha256": "33bb660791a0b9a21628a42c34934932220203b6aabd84e98cb1b45327d0384c"
+    },
+    {
+      "name": "artifact-template-operating-review",
+      "path": "artifact-template-operating-review/SKILL.md",
+      "sha256": "6d63c5cd025ffe936e7bab5db3023672bbaec26af55c2bb8b057d38c202c9c32"
+    },
+    {
+      "name": "artifact-template-project-kickoff",
+      "path": "artifact-template-project-kickoff/SKILL.md",
+      "sha256": "aa893ebd89e7c8d1db4261d01cc2b1add35d78d00785871ccaaa5fc8db783ec9"
+    },
+    {
+      "name": "artifact-template-project-tracker",
+      "path": "artifact-template-project-tracker/SKILL.md",
+      "sha256": "d97d5be20189b7f53dd269b6e1c5f694eaf53e5a72f6559fcb1578911b7cda82"
+    },
+    {
+      "name": "artifact-template-sales-pipeline",
+      "path": "artifact-template-sales-pipeline/SKILL.md",
+      "sha256": "15cfeeedf440021f16ed3f3ad8c7c1ef6d48898b9447741e223d2fb41cfc9800"
+    },
+    {
+      "name": "artifact-template-simple-dark-mode",
+      "path": "artifact-template-simple-dark-mode/SKILL.md",
+      "sha256": "b7c8d0c05f75878b9bc21e56a57c41ec1aa29700aca0a24822be0f9f1bd53207"
+    },
+    {
+      "name": "artifact-template-simple-light-mode",
+      "path": "artifact-template-simple-light-mode/SKILL.md",
+      "sha256": "7c68430c6cf57b55b457d4735dbd1a46b889bef135a32222902dd0848b6e1752"
+    },
+    {
+      "name": "artifact-template-strategy-memorandum",
+      "path": "artifact-template-strategy-memorandum/SKILL.md",
+      "sha256": "51d7882ac94e8e57b323394825728c33925af878806e37277217c2dc12a912e5"
+    },
+    {
+      "name": "artifact-template-system-design",
+      "path": "artifact-template-system-design/SKILL.md",
+      "sha256": "87f7b7ed1b0d8410f5e5971cd7f7db9a4165e2f37069e97e52dbfb469b75a57c"
+    },
+    {
+      "name": "artifact-template-team-alignment",
+      "path": "artifact-template-team-alignment/SKILL.md",
+      "sha256": "26d7cafdcd1899a937b325c5d02ac57c162d45002153be33a934d35f81eb6110"
+    },
+    {
+      "name": "artifact-template-three-statement-forecast",
+      "path": "artifact-template-three-statement-forecast/SKILL.md",
+      "sha256": "74f4a5cccec0107b861548b157e04c51d9b58ec13a990c86394b4c529b8ecf41"
+    },
+    {
+      "name": "baoyu-url-to-markdown",
+      "path": "baoyu-url-to-markdown/SKILL.md",
+      "sha256": "40913749b0e95165b02771bdf17bb8ed9fa0a72787d3e09571341ab7148359d0"
+    },
+    {
+      "name": "control-in-app-browser",
+      "path": "control-in-app-browser/SKILL.md",
+      "sha256": "056e790e807d00d8f48308093c81caa75f2563bb1dde0e51a72a237a9a5bd1b2"
+    },
+    {
+      "name": "documents",
+      "path": "documents/SKILL.md",
+      "sha256": "7190a38f1e66ecf2f2c60304c05ca556b3ce1dcbafaa15675a87030b991807c0"
+    },
+    {
+      "name": "excel-live-control",
+      "path": "excel-live-control/SKILL.md",
+      "sha256": "0f39bcdd71196888dcf5e68b16968a353bb5dd69e761caa4c1ebbc31ab8981a8"
+    },
+    {
+      "name": "find-skills",
+      "path": "find-skills/SKILL.md",
+      "sha256": "da9da83ee749a17caad32a8c814973a2d7f066cfad6b9f12134921c5d828510d"
+    },
+    {
+      "name": "frontend-design",
+      "path": "frontend-design/SKILL.md",
+      "sha256": "1608ea77fbb6fc30d13a97d12cfa8ebf31358d40f0dd97beed24829d6b3f45dd"
+    },
+    {
+      "name": "grill-me",
+      "path": "grill-me/SKILL.md",
+      "sha256": "9c71927d4f0fd32d815247b4ca1fc782d4c5f2f3c1d6d023d188d4a7e0299b21"
+    },
+    {
+      "name": "imagegen",
+      "path": "imagegen/SKILL.md",
+      "sha256": "613f892ba9259cbfcb44ee74e81587cc7ce288de86ae2f1eab5eacb190e34f58"
+    },
+    {
+      "name": "lieflat-charts",
+      "path": "lieflat-charts/SKILL.md",
+      "sha256": "51ccea3c6165115ffeb35b7ebf74f53b25c06461eaf51ca90b47108514bf6085"
+    },
+    {
+      "name": "netlify-ai-gateway",
+      "path": "netlify-ai-gateway/SKILL.md",
+      "sha256": "f5424f5a4eb755c82d27e29bbb57947f32c8afda0a18beed197b603ef1449e0a"
+    },
+    {
+      "name": "netlify-blobs",
+      "path": "netlify-blobs/SKILL.md",
+      "sha256": "8a0bd4d8c27ec332fb36537a6937f3723666ddc655b7fb0c59bcaa500a026789"
+    },
+    {
+      "name": "netlify-caching",
+      "path": "netlify-caching/SKILL.md",
+      "sha256": "2d8d4358454ef49c25668c1f549b3ea25f708365026a13e92160071ccdf762b2"
+    },
+    {
+      "name": "netlify-cli-and-deploy",
+      "path": "netlify-cli-and-deploy/SKILL.md",
+      "sha256": "dccc4b22dc4a5ddec35a10b93588dd34ecb655a30d6e63e598c1a5e47d0411f0"
+    },
+    {
+      "name": "netlify-config",
+      "path": "netlify-config/SKILL.md",
+      "sha256": "bcc297f4f93407a235b74025404ae81f2c8082edfa40313946cc8b385735bb0d"
+    },
+    {
+      "name": "netlify-deploy",
+      "path": "netlify-deploy/SKILL.md",
+      "sha256": "8d39dd6d03415fcab770a28fba303cf23c995ea7b8be372a9d1587381a912f04"
+    },
+    {
+      "name": "netlify-edge-functions",
+      "path": "netlify-edge-functions/SKILL.md",
+      "sha256": "c30e744bea2eb68de5995bf1e8e4cbee1849f4b319dd04df79f54262d034124d"
+    },
+    {
+      "name": "netlify-forms",
+      "path": "netlify-forms/SKILL.md",
+      "sha256": "f26fc3198010fff39d9d12113e2bd13f5278ba749c52cb90f5cea5c7e0ef9aa5"
+    },
+    {
+      "name": "netlify-frameworks",
+      "path": "netlify-frameworks/SKILL.md",
+      "sha256": "070401df9fe367cdc2fe5b9cc58984e2d0d093706a2bcf969d1895331fb00856"
+    },
+    {
+      "name": "netlify-functions",
+      "path": "netlify-functions/SKILL.md",
+      "sha256": "b1f56e7099ce4b703a0c0b29a0e7cde03837d58fdefc3544f7de0d511fac0caa"
+    },
+    {
+      "name": "netlify-identity",
+      "path": "netlify-identity/SKILL.md",
+      "sha256": "9fe64c30bb0296442571b9e681b975e5f31903a81f04e8722cf2178b7d184311"
+    },
+    {
+      "name": "netlify-image-cdn",
+      "path": "netlify-image-cdn/SKILL.md",
+      "sha256": "d1ab2617d55e4d63e21fd442a48c86391def1a35ae238abcabcd82914b5970ba"
+    },
+    {
+      "name": "og-image-design",
+      "path": "og-image-design/SKILL.md",
+      "sha256": "218eaa393173915d16854919d0ade0c0ca2e4ca710066e24df72aed9cf74fcc6"
+    },
+    {
+      "name": "openai-docs",
+      "path": "openai-docs/SKILL.md",
+      "sha256": "f9bc031e9bd54a4659379b3fb0c09f0d8f81135d0770982febbe91836ef9ef03"
+    },
+    {
+      "name": "pdf",
+      "path": "pdf/SKILL.md",
+      "sha256": "be18be0cf948719b52cc1cf358073bf26ed57b7bb4e09b407506749a5dd0c082"
+    },
+    {
+      "name": "plugin-creator",
+      "path": "plugin-creator/SKILL.md",
+      "sha256": "40354d99ca66f16a8bd92b0e6b315b4cd773ebcb8a6348a70398a4b787b86213"
+    },
+    {
+      "name": "Presentations",
+      "path": "Presentations/SKILL.md",
+      "sha256": "b3e351e714f2ae832e822e62c98639a8fb1f35ba7ed3560335d28a5da58e12b3"
+    },
+    {
+      "name": "review-agent",
+      "path": "review-agent/SKILL.md",
+      "sha256": "bb46315f6bc4b7051c05f807d19b1689b20418ac6c42590406d805c10fa2fd1a"
+    },
+    {
+      "name": "sites-building",
+      "path": "sites-building/SKILL.md",
+      "sha256": "b96b18fb76c01f1e8305e88e99c79c899a08b4f8ff85838bfbabb39359369308"
+    },
+    {
+      "name": "sites-hosting",
+      "path": "sites-hosting/SKILL.md",
+      "sha256": "a0af21aae4ef2e675c0423ba928151e3967823883f20fc63ac891e54e7df9a96"
+    },
+    {
+      "name": "skill-creator",
+      "path": "skill-creator/SKILL.md",
+      "sha256": "2940e08d49e5197453e58a4387d14cb07101b97911c992ef75c8289e0a1734c0"
+    },
+    {
+      "name": "skill-installer",
+      "path": "skill-installer/SKILL.md",
+      "sha256": "2892d8b2fb11631132118f340aed80ae17e59d5a571fc2c4f4a4a7e73f139d52"
+    },
+    {
+      "name": "Spreadsheets",
+      "path": "Spreadsheets/SKILL.md",
+      "sha256": "de6dae26c7e282dc620180c7c944274abcc30085167dece62df040a2d0e6ffec"
+    },
+    {
+      "name": "template-creator",
+      "path": "template-creator/SKILL.md",
+      "sha256": "894e7bd9ae5f5de28aa140ef684e4b9514e9eadfb1ec0cceed6a5d0c494d7581"
+    },
+    {
+      "name": "visualize",
+      "path": "visualize/SKILL.md",
+      "sha256": "c540927abe6725c8443ca80a0f847d6d8ee8c3596af8513fac7dbc5975a6c590"
+    }
+  ]
+}

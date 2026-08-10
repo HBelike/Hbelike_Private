@@ -48,8 +48,19 @@ class DeepSeekProvider:
         self.run_name = run_name
         self.logger = logging.getLogger(__name__)
 
-    def chat(self, messages: list[DeepSeekMessage]) -> DeepSeekChatResponse:
-        """发送请求，并记录不含正文的 LangSmith 生命周期 Trace。"""
+    def chat(
+        self,
+        messages: list[DeepSeekMessage],
+        *,
+        timeout_seconds: float | None = None,
+        max_tokens: int | None = None,
+        retry_empty_content: bool = True,
+    ) -> DeepSeekChatResponse:
+        """发送请求，并记录不含正文的 LangSmith 生命周期 Trace。
+
+        绝大多数业务沿用全局模型配置。少数交互式轻量请求（例如 Skill 搜索关键词
+        改写）可以收紧超时和输出长度，避免一个辅助 LLM 调用拖住整个页面。
+        """
 
         return trace_llm_call(
             run_name=self.run_name,
@@ -57,13 +68,27 @@ class DeepSeekProvider:
             model=self.config.llm_model,
             message_count=len(messages),
             input_characters=sum(len(message.content) for message in messages),
-            execute=lambda: self._chat_without_trace(messages),
+            execute=lambda: self._chat_without_trace(
+                messages,
+                timeout_seconds=timeout_seconds,
+                max_tokens=max_tokens,
+                retry_empty_content=retry_empty_content,
+            ),
             summarize=self._trace_summary,
         )
 
-    def _chat_without_trace(self, messages: list[DeepSeekMessage]) -> DeepSeekChatResponse:
+    def _chat_without_trace(
+        self,
+        messages: list[DeepSeekMessage],
+        *,
+        timeout_seconds: float | None,
+        max_tokens: int | None,
+        retry_empty_content: bool,
+    ) -> DeepSeekChatResponse:
         """执行原始模型请求；调用方不会将正文交给观测系统。"""
         api_key = self._read_api_key()
+        request_timeout = self.config.llm_timeout_seconds if timeout_seconds is None else max(0.1, timeout_seconds)
+        requested_max_tokens = self.config.llm_max_tokens if max_tokens is None else max(1, max_tokens)
         payload = {
             "model": self.config.llm_model,
             "messages": [
@@ -74,19 +99,19 @@ class DeepSeekProvider:
                 for message in messages
             ],
             "temperature": self.config.llm_temperature,
-            "max_tokens": self.config.llm_max_tokens,
+            "max_tokens": requested_max_tokens,
         }
         if self.config.llm_response_format_json:
             payload["response_format"] = {"type": "json_object"}
 
         last_error: DeepSeekApiError | None = None
-        total_attempts = 1 + self.empty_content_retry_count
+        total_attempts = 1 + (self.empty_content_retry_count if retry_empty_content else 0)
         for attempt_number in range(1, total_attempts + 1):
             response = requests.post(
                 self._build_chat_url(),
                 headers=self._build_headers(api_key),
                 json=payload,
-                timeout=self.config.llm_timeout_seconds,
+                timeout=request_timeout,
             )
             response_payload = self._parse_json_response(response)
             try:

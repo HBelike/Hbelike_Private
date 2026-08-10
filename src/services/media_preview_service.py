@@ -137,6 +137,70 @@ class MediaPreviewService:
             "media_assets": [self._asset_to_preview_payload(asset) for asset in media_assets],
         }
 
+    def build_media_library(self, limit: int = 300) -> dict[str, Any]:
+        """构建跨内容的工作台媒体资源库。
+
+        审核预览只关心最新文章，而“媒体素材”入口需要能查看所有真实生成的
+        图片、音频和视频。因此这里单独读取媒体资产，并把尚未产出文件的视频
+        分片计划返回给前端，避免把“尚未生成”误显示成“资源丢失”。
+        """
+
+        normalized_limit = min(max(int(limit), 1), 500)
+        media_asset_repository = MediaAssetRepository(database_manager=self.database_manager)
+        clip_plan_repository = VideoClipPlanRepository(database_manager=self.database_manager)
+
+        media_assets = media_asset_repository.list_recent(limit=normalized_limit)
+        clip_plans = clip_plan_repository.list_recent(limit=normalized_limit)
+        clip_plan_ids_with_asset = self._clip_plan_ids_with_asset(media_assets)
+        pending_video_clips = [
+            self._video_clip_plan_to_library_payload(clip_plan)
+            for clip_plan in clip_plans
+            if clip_plan.id not in clip_plan_ids_with_asset
+        ]
+
+        playable_video_types = {"video", "video_clip"}
+        return {
+            "items": [self._asset_to_preview_payload(asset) for asset in media_assets],
+            "pending_video_clips": pending_video_clips,
+            "summary": {
+                "total_asset_count": len(media_assets),
+                "image_count": sum(asset.asset_type == "image" for asset in media_assets),
+                "audio_count": sum(asset.asset_type == "audio" for asset in media_assets),
+                "video_count": sum(asset.asset_type in playable_video_types for asset in media_assets),
+                "pending_video_count": len(pending_video_clips),
+                "failed_asset_count": sum(asset.status == "failed" for asset in media_assets),
+                "failed_video_plan_count": sum(item["status"] == "failed" for item in pending_video_clips),
+            },
+        }
+
+    def _clip_plan_ids_with_asset(self, media_assets: list[MediaAssetRecord]) -> set[int]:
+        """找出已经创建任务或已下载文件的视频分片计划。"""
+
+        clip_plan_ids: set[int] = set()
+        for asset in media_assets:
+            raw_clip_plan_id = asset.metadata.get("clip_plan_id")
+            try:
+                clip_plan_id = int(raw_clip_plan_id)
+            except (TypeError, ValueError):
+                continue
+            if clip_plan_id > 0:
+                clip_plan_ids.add(clip_plan_id)
+        return clip_plan_ids
+
+    def _video_clip_plan_to_library_payload(self, clip_plan: Any) -> dict[str, Any]:
+        """将没有对应媒体文件的视频计划转换为资源库状态项。"""
+
+        return {
+            "id": clip_plan.id,
+            "content_id": clip_plan.content_id,
+            "clip_index": clip_plan.clip_index,
+            "clip_title": clip_plan.clip_title,
+            "planned_duration_seconds": clip_plan.planned_duration_seconds,
+            "provider": clip_plan.provider,
+            "status": clip_plan.status,
+            "metadata": self._safe_metadata(clip_plan.metadata),
+        }
+
     def _build_transient_article_layout(
         self,
         content: Any,
@@ -218,7 +282,9 @@ class MediaPreviewService:
             "status": asset.status,
             "remote_url": remote_url,
             "local_url": local_url,
-            "preview_url": remote_url or local_url,
+            # 已保存到 outputs 的文件优先走本站预览接口，避免模型供应商的临时 URL
+            # 过期后让工作台误以为媒体文件不可查看。
+            "preview_url": local_url or remote_url,
             "metadata": self._safe_metadata(asset.metadata),
         }
 

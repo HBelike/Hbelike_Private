@@ -197,6 +197,41 @@ class MediaAssetRepository:
             for row in rows
         ]
 
+    def list_recent(self, limit: int = 300) -> list[MediaAssetRecord]:
+        """读取资源库中最近写入的实际媒体资产。
+
+        工作台的“媒体素材”是跨内容的资源库，不应只展示当前最新文章的资产。
+        ``replaced`` 是被新素材替换的历史版本，不再作为可用资源展示；失败、生成中
+        和已完成的记录都会保留，供界面明确呈现任务状态。
+        """
+
+        normalized_limit = min(max(int(limit), 1), 500)
+        with self.database_manager.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, content_id, asset_type, provider, path, mime_type, status, metadata_json
+                FROM media_assets
+                WHERE status != 'replaced'
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (normalized_limit,),
+            ).fetchall()
+
+        return [
+            MediaAssetRecord(
+                id=int(row["id"]),
+                content_id=None if row["content_id"] is None else int(row["content_id"]),
+                asset_type=str(row["asset_type"]),
+                provider=str(row["provider"]),
+                path=str(row["path"]),
+                mime_type=None if row["mime_type"] is None else str(row["mime_type"]),
+                status=str(row["status"]),
+                metadata=loads_json_or_empty(row["metadata_json"]),
+            )
+            for row in rows
+        ]
+
     def list_upload_candidates(self, asset_types: list[str]) -> list[MediaAssetRecord]:
         """读取还没有 remote_url 的媒体资产。"""
         normalized_types = [asset_type.strip() for asset_type in asset_types if asset_type.strip()]

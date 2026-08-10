@@ -1485,6 +1485,76 @@ pre {
   text-decoration: none;
 }
 
+.media-failure {
+  color: #bd5558 !important;
+}
+
+.pending-video-section {
+  margin-top: 24px;
+  border-top: 1px solid #edf0e7;
+  padding-top: 20px;
+}
+
+.compact-panel-header {
+  margin-bottom: 12px;
+}
+
+.compact-panel-header h3 {
+  margin: 4px 0 0;
+  color: #344033;
+  font-size: 17px;
+}
+
+.pending-video-list {
+  display: grid;
+  gap: 10px;
+}
+
+.pending-video-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border: 1px solid #edf0e7;
+  border-radius: 14px;
+  background: #fbfcf8;
+  padding: 14px 16px;
+}
+
+.pending-video-card strong,
+.pending-video-card small {
+  display: block;
+}
+
+.pending-video-card strong {
+  color: #344033;
+}
+
+.pending-video-card small {
+  margin-top: 5px;
+  color: #7b826f;
+  font-size: 12px;
+}
+
+.pending-video-status {
+  display: grid;
+  justify-items: end;
+  gap: 4px;
+  text-align: right;
+}
+
+@media (max-width: 720px) {
+  .pending-video-card {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .pending-video-status {
+    justify-items: start;
+    text-align: left;
+  }
+}
+
 .storyboard-grid,
 .prompt-grid {
   display: grid;
@@ -1609,6 +1679,8 @@ pre {
   display: grid;
   flex: 1;
   min-height: 0;
+  align-content: start;
+  grid-auto-rows: max-content;
   gap: 8px;
   overflow-y: auto;
   padding-right: 4px;

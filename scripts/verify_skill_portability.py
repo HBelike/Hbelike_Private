@@ -30,12 +30,16 @@ def main() -> int:
         volume_root = root / "volume"
 
         write_skill(source_root / "find-skills" / "SKILL.md", "find-skills", "发现开放 Skill。")
+        secondary_source_root = root / "secondary-source"
+        write_skill(secondary_source_root / "duplicate" / "SKILL.md", "find-skills", "后续来源的同名版本。")
         export_result = export_skill_trees(
-            source_roots=[source_root],
+            source_roots=[source_root, secondary_source_root],
             destination_root=seed_root,
         )
         assert export_result.copied_count == 1
+        assert export_result.skipped_count == 1
         assert (seed_root / "find-skills" / "SKILL.md").is_file()
+        assert "发现开放 Skill" in (seed_root / "find-skills" / "SKILL.md").read_text(encoding="utf-8")
 
         first_seed_result = seed_skill_tree(seed_root=seed_root, destination_root=volume_root)
         assert first_seed_result.copied_count == 1
