@@ -154,3 +154,13 @@
 - 可观测性：`/api/health` 增加不含敏感信息的 `career_runtime_revision`。开发环境必须通过 `preview_server.py` 启动唯一的 Uvicorn 自动重载实例；它用于发现端口仍指向旧服务的情况。
 - 前端配置：`web-ui/vite.config.js` 固定从自身目录读取 `.env.local`，并将开发代理统一到 `18080`；解决了从项目根目录启动 npm 时 Vite 回退到旧端口、页面实际调用旧 API 的问题。
 - 验证：`scripts/verify_career_image_intake.py` 与 `scripts/verify_career_model_gateway.py` 在真实 PostgreSQL 和服务器环境变量下通过；使用已保存 DeepSeek 档案的真实 Chat Completions 非流式与流式最小调用均返回有效内容。另以真实图片简历通过开发后端联调，结果为 `cloud_vision` / `qwen3.6-flash`、提取文本 3437 字、`deepseek-v4-pro` 生成 787 字回复，Turn 状态为 `succeeded`。所有验证会话均在验证结束后永久删除。
+
+### 2026-08-11：本机 Docling 直连与 CUDA 运行修复
+
+- 目标：修复页面“附件已上传但文档解析服务异常”的实际阻断，让本机 RTX 5070 的 Docling GPU 服务稳定处理 PDF、Word 等材料。
+- 根因与取舍：FastAPI 进程中的 `httpx` 默认继承系统代理，导致指向 `127.0.0.1` 的 Docling/Gotenberg 请求被错误转发；历史 CUDA 日志也来自未带正确 GPU 请求的旧容器状态。修复后不更换业务链路，仍使用同一个 Docling 服务和同一份 Markdown 输出；仅让本机内网客户端显式绕过代理，并让 Compose 默认申请 GPU。CPU 仍可通过 `DOCLING_DEVICE=cpu` 作为明确、临时的故障降级，而不是主链路替代。
+- 实现：`DoclingServiceDocumentParser` 和 `GotenbergOfficeConverter` 创建 `httpx.Client` 时设置 `trust_env=False`；`docker-compose.document-processing.yml` 使用 `docling-serve-cu128`、`DOCLING_DEVICE=${DOCLING_DEVICE:-cuda}` 与 `gpus: all`。
+- 调用链：浏览器上传 → FastAPI `AttachmentParser` → `DoclingServiceDocumentParser`（直连 `127.0.0.1:5001`）→ Docling CUDA OCR/版面恢复 → Markdown → `ResumeNormalizer` → 当前 Turn 的模型上下文。
+- 依赖：Docker Desktop 的 NVIDIA runtime、RTX 5070 驱动、Docling Serve `v1.21.0`；不新增云服务、模型额度或持久化原始附件。
+- 验证：正式 GPU 容器中 `torch.cuda.is_available()` 返回 `true`；`scripts/verify_career_docling_live_service.py` 以匿名中文扫描 PDF 返回 `docling-serve / success`；`/api/career/interview-library/parse-file` 经本地 18080 API 返回 200 且识别器为 `docling_ocr`；文档解析契约与降级回归脚本均通过。
+- 边界：此修复不保存原始文件、不改变历史对话、模型连接或线上部署。若未来 Docker GPU runtime 不可用，应先显式设置 `DOCLING_DEVICE=cpu` 并重建该单一服务，而不是让浏览器端静默失败。

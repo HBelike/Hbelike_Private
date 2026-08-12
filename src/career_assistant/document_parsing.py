@@ -102,6 +102,9 @@ class DoclingServiceDocumentParser:
         self._owns_client = client is None
         self._client = client or httpx.Client(
             timeout=httpx.Timeout(settings.request_timeout_seconds),
+            # Docling 是宿主机或 Docker 内网服务。不能继承系统代理，否则本机
+            # 127.0.0.1 请求会被错误转发到代理并表现为 502。
+            trust_env=False,
         )
 
     def close(self) -> None:

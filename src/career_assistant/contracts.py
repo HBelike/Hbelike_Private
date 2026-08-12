@@ -13,6 +13,7 @@ class AttachmentKind(StrEnum):
     RESUME_PDF = "resume_pdf"
     RESUME_DOCUMENT = "resume_document"
     RESUME_IMAGE = "resume_image"
+    INTERVIEW_EVIDENCE_IMAGE = "interview_evidence_image"
     JOB_DESCRIPTION_IMAGE = "job_description_image"
     JOB_DESCRIPTION_FILE = "job_description_file"
 

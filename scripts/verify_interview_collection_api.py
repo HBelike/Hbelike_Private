@@ -40,7 +40,8 @@ def main() -> None:
             platforms = client.get("/api/career/interview-library/collection-platforms")
             assert platforms.status_code == 200, platforms.text
             platform_items = {item["key"]: item for item in platforms.json()["items"]}
-            assert platform_items["xiaohongshu"]["can_run_keyword_search"] is False
+            assert platform_items["xiaohongshu"]["can_run_keyword_search"] is True
+            assert platform_items["xiaohongshu"]["connector_kind"] == "url_import"
             assert platform_items["public_url"]["connector_kind"] == "url_import"
 
             created = client.post(
@@ -54,9 +55,10 @@ def main() -> None:
             assert created.status_code == 201, created.text
             payload = created.json()
             job_id = UUID(payload["id"])
-            assert payload["status"] == "needs_user_interaction"
-            assert payload["connector_kind"] == "user_authorized_browser"
-            assert payload["error_message"]
+            assert payload["status"] in {"queued", "running", "succeeded", "failed"}
+            assert payload["connector_kind"] == "url_import"
+            assert payload["metadata"]["source_kind"] == "xiaohongshu_keyword_search"
+            assert "search_result" in payload["metadata"]["source_url"]
 
             detail = client.get(f"/api/career/interview-library/collection-jobs/{job_id}")
             assert detail.status_code == 200, detail.text

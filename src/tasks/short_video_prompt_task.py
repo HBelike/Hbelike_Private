@@ -8,6 +8,7 @@ from typing import Any
 from src.providers.deepseek_provider import DeepSeekMessage, DeepSeekProvider, parse_json_object_from_text
 from src.repositories.generated_content_repository import GeneratedContentForStoryboard, GeneratedContentRepository
 from src.repositories.video_storyboard_repository import VideoStoryboardInput, VideoStoryboardRepository
+from src.services.media_creative_brief_service import MediaCreativeBriefService
 from src.tasks.base_task import BaseTask
 from src.tasks.task_context import TaskContext
 
@@ -130,6 +131,12 @@ class ShortVideoPromptTask(BaseTask):
             {
                 "index": index,
                 "repository_full_name": item["repository_full_name"],
+                "summary_text": str(item.get("summary_text", "") or item.get("project_summary_text", "")).strip(),
+                "project_evidence_card": self._project_evidence_card(
+                    str(item.get("project_analysis_markdown", ""))
+                ),
+                "visual_brief": item.get("visual_brief", {}),
+                "video_brief": item.get("video_brief", {}),
             }
             for index, item in enumerate(content.image_prompts, start=1)
         ]
@@ -146,7 +153,7 @@ class ShortVideoPromptTask(BaseTask):
 字段必须包含：
 video_title: 36字以内
 opening_line: 80字以内
-project_summaries: {project_count}项数组，每项包含 repository_full_name、spoken_text、architecture_focus
+project_summaries: {project_count}项数组，每项包含 repository_full_name、spoken_text、architecture_focus、scene_goal、motion_beat、transition_intent
 closing_line: 90字以内
 progressive_script: 900字以内，按“本周 GitHub 热门项目来了，第一是...第二是...”逐个讲，逻辑递进
 
@@ -154,14 +161,16 @@ progressive_script: 900字以内，按“本周 GitHub 热门项目来了，第�
 - 只输出 JSON，不要 Markdown。
 - project_summaries 顺序必须与输入项目一致。
 - 第 i 个 spoken_text 要适合约 {per_project_duration[0] if per_project_duration else 10} 秒口播；总时长目标为 60 秒。
-- architecture_focus 要说明这张图重点表现什么机制，但不要要求图片里出现文字、仓库名、代码、数字、标题或 logo。
+- architecture_focus 要说明这张图重点表现什么机制；scene_goal 要说明该段结束时观众理解了什么；motion_beat 要描述一个能执行的教学动画动作；transition_intent 要描述如何自然进入下一段。不要要求图片或视频里出现仓库名、长字幕、代码、数字或 logo。
+- 不要把五段项目讲解写成同一套“输入—核心—输出”模板；必须尊重输入里的 visual_brief / video_brief，形成不同的结构、动作和阅读顺序。
+- project_evidence_card 是对应项目的长文事实摘要。只从其中提炼一个适合 10 秒讲清的判断与机制，不要把整段长文机械念出来，也不要忽略后面项目的证据。
+- 视频画面只服务教学关系，旁白和中文字幕由后续单独轨道处理；不要要求模型生成口型、旁白或内嵌长字幕。
 - 不要编造项目能力；不确定时用“从仓库描述看”。
 {self._build_runtime_instruction_section("管理员视频策略", video_instruction)}
 
 标题：{content.title}
 摘要：{content.digest}
-文章正文：
-{content.article_markdown[:1800]}
+本周主线摘录：{self._article_mainline_excerpt(content.article_markdown)}
 
 项目：
 {json.dumps(project_payload, ensure_ascii=False)}
@@ -178,13 +187,24 @@ progressive_script: 900字以内，按“本周 GitHub 热门项目来了，第�
     ) -> list[DeepSeekMessage]:
         """构造更短的口播 JSON 重试请求。"""
 
-        project_names = [item["repository_full_name"] for item in content.image_prompts]
+        project_payload = [
+            {
+                "repository_full_name": item["repository_full_name"],
+                "summary_text": str(item.get("summary_text", "") or item.get("project_summary_text", "")).strip(),
+                "project_evidence_card": self._project_evidence_card(
+                    str(item.get("project_analysis_markdown", ""))
+                ),
+                "visual_brief": item.get("visual_brief", {}),
+                "video_brief": item.get("video_brief", {}),
+            }
+            for item in content.image_prompts
+        ]
         system_prompt = "你只输出合法 JSON 对象。不要 Markdown，不要解释。"
         user_prompt = f"""
 生成 60 秒 GitHub 热门项目技术科普口播 JSON。
 字段：video_title、opening_line、project_summaries、closing_line、progressive_script。
-project_summaries 正好 {len(project_names)} 项，每项含 repository_full_name、spoken_text、architecture_focus。
-项目顺序：{json.dumps(project_names, ensure_ascii=False)}
+project_summaries 正好 {len(project_payload)} 项，每项含 repository_full_name、spoken_text、architecture_focus、scene_goal、motion_beat、transition_intent。
+项目与创作合同：{json.dumps(project_payload, ensure_ascii=False)}
 主题：{content.title}
 摘要：{content.digest}
 {self._build_runtime_instruction_section("管理员视频策略", video_instruction)}
@@ -202,6 +222,11 @@ project_summaries 正好 {len(project_names)} 项，每项含 repository_full_na
         """规范化模型产出的短口播 JSON。"""
 
         project_names = [str(item["repository_full_name"]) for item in content.image_prompts]
+        project_items_by_name = {
+            str(item["repository_full_name"]): item
+            for item in content.image_prompts
+            if str(item.get("repository_full_name", "")).strip()
+        }
         raw_project_summaries = parsed.get("project_summaries", [])
         if not isinstance(raw_project_summaries, list):
             raw_project_summaries = []
@@ -228,17 +253,35 @@ project_summaries 正好 {len(project_names)} 项，每项含 repository_full_na
                 spoken_text = spoken_text.replace(raw_repository_name, project_name)
             if not spoken_text:
                 spoken_text = f"第 {index} 个项目是 {project_name}，它代表了本周技术趋势里的一个关键方向。"
+            source_item = project_items_by_name.get(project_name, {})
             architecture_focus = str(raw_item.get("architecture_focus", "")).strip()
             if raw_repository_name:
                 architecture_focus = architecture_focus.replace(raw_repository_name, project_name)
             if not architecture_focus:
-                architecture_focus = "展示输入、核心模块、处理流程、输出和适用场景。"
+                visual_brief = source_item.get("visual_brief", {})
+                architecture_focus = str(
+                    visual_brief.get("visual_thesis", "") if isinstance(visual_brief, dict) else ""
+                ).strip() or "展示该项目最关键的工程关系与阅读路径。"
+            scene_goal = str(raw_item.get("scene_goal", "")).strip()
+            motion_beat = str(raw_item.get("motion_beat", "")).strip()
+            transition_intent = str(raw_item.get("transition_intent", "")).strip()
             project_summaries.append(
                 {
                     "project_index": index,
                     "repository_full_name": project_name,
                     "spoken_text": spoken_text[:220],
                     "architecture_focus": architecture_focus[:220],
+                    "scene_goal": scene_goal[:160],
+                    "motion_beat": motion_beat[:180],
+                    "transition_intent": transition_intent[:160],
+                    "project_summary_text": str(
+                        source_item.get("summary_text", "") or source_item.get("project_summary_text", "")
+                    ).strip()[:180],
+                    "project_analysis_markdown": self._project_evidence_card(
+                        str(source_item.get("project_analysis_markdown", ""))
+                    ),
+                    "visual_brief": source_item.get("visual_brief", {}),
+                    "video_brief": source_item.get("video_brief", {}),
                 }
             )
 
@@ -272,6 +315,11 @@ project_summaries 正好 {len(project_names)} 项，每项含 repository_full_na
                     str(item["architecture_focus"]),
                     repository_aliases,
                 ),
+                "scene_goal": self._replace_repository_aliases(str(item["scene_goal"]), repository_aliases),
+                "motion_beat": self._replace_repository_aliases(str(item["motion_beat"]), repository_aliases),
+                "transition_intent": self._replace_repository_aliases(
+                    str(item["transition_intent"]), repository_aliases
+                ),
             }
             for item in project_summaries
         ]
@@ -280,7 +328,7 @@ project_summaries 正好 {len(project_names)} 项，每项含 repository_full_na
         opening_line = self._replace_repository_aliases(opening_line, repository_aliases)
         project_count = len(project_summaries)
         if not opening_line:
-            opening_line = f"本周 GitHub 热门项目 Top {project_count} 来了，我们不只看 star，也看这些项目背后的技术趋势。"
+            opening_line = f"本周 GitHub Top {project_count} 的变化并不只在 star 数，它们共同指向更具体的工程工作流。"
         closing_line = self._replace_repository_aliases(closing_line, repository_aliases)
         if not closing_line:
             closing_line = f"这 {project_count} 个项目放在一起看，说明 AI 工具正在从单点自动化走向更完整的工程工作流。"
@@ -303,26 +351,58 @@ project_summaries 正好 {len(project_names)} 项，每项含 repository_full_na
     ) -> dict[str, Any]:
         """根据短口播确定性生成开场、项目段与结尾分镜及 Seedance 主 prompt。"""
 
-        project_summaries = script_payload["project_summaries"]
+        creative_brief_service = MediaCreativeBriefService()
+        project_summaries: list[dict[str, Any]] = []
+        for item in script_payload["project_summaries"]:
+            repository_full_name = str(item["repository_full_name"])
+            visual_brief = creative_brief_service.normalize_visual_brief(
+                raw_brief=item.get("visual_brief"),
+                repository_full_name=repository_full_name,
+                fallback_text=str(item.get("architecture_focus", "") or item.get("spoken_text", "")),
+                project_index=int(item["project_index"]),
+            )
+            video_brief = creative_brief_service.normalize_video_brief(
+                raw_brief=item.get("video_brief"),
+                visual_brief=visual_brief,
+                project_summary_text=str(item.get("project_summary_text", "") or item.get("spoken_text", "")),
+                repository_full_name=repository_full_name,
+                project_index=int(item["project_index"]),
+            )
+            project_summaries.append({**item, "visual_brief": visual_brief, "video_brief": video_brief})
+
         architecture_prompts = [
             {
                 "project_index": item["project_index"],
                 "repository_full_name": item["repository_full_name"],
-                "project_summary_text": item["spoken_text"],
+                "project_summary_text": item["project_summary_text"] or item["spoken_text"],
+                "project_analysis_markdown": item.get("project_analysis_markdown", ""),
                 "architecture_prompt": self._normalize_architecture_prompt(
                     repository_full_name=item["repository_full_name"],
-                    prompt=(
-                        "生成一张单项目技术教学架构图。"
-                        f"重点表现：{item['architecture_focus']} "
-                        "画面结构为左侧输入节点、中心核心模块、右侧输出节点、底部场景节点，节点与箭头关系清晰。"
-                    ),
+                    prompt=str(item["architecture_focus"]),
                 ),
+                "visual_brief": item["visual_brief"],
+                "video_brief": item["video_brief"],
+                "prompt_stage": "storyboard_visual_intent_v2",
             }
             for item in project_summaries
         ]
 
         project_count = len(project_summaries)
         scene_durations = self._scene_durations(project_count)
+        opening_contract = {
+            "entry_state": "浅纸本教学画面从留白进入，五个趋势符号尚未展开",
+            "beats": [
+                "0-2 秒：中心出现本期趋势总览的抽象主轴",
+                f"2-{max(3, scene_durations[0] - 1)} 秒：{project_count} 个项目方向依次以卡片和主线出现",
+                f"{max(3, scene_durations[0] - 1)}-{scene_durations[0]} 秒：镜头沿第一条主流程线推入项目一",
+            ],
+            "exit_state": "第一条主流程线填满画面中心，保留可承接的右向运动",
+            "camera": "稳定广角总览后缓慢推近，不使用旋转或突发闪切",
+            "transition": "第一条主流程线延伸，擦拭进入项目一",
+            "audio_directive": "不生成旁白、口型或内嵌字幕；保留轻微节拍空间",
+            "negative_constraints": ["不要蓝绿霓虹满屏", "不要乱码或长英文", "不要图库人物或产品广告感"],
+            "reference_image_role": "none",
+        }
         scenes: list[dict[str, Any]] = [
             {
                 "scene_index": 1,
@@ -332,14 +412,54 @@ project_summaries 正好 {len(project_names)} 项，每项含 repository_full_na
                 "repository_full_name": None,
                 "narration": script_payload["opening_line"],
                 "subtitle": f"本周 GitHub Top {project_count} 技术趋势",
-                "visual_design": f"{project_count} 个项目卡片围绕 GitHub 周榜中心形成清晰的教学总览图，白色纸张背景、深蓝标题与蓝色流程箭头。",
-                "motion_design": f"镜头从总览卡片平滑推进，{project_count} 个项目节点按顺序高亮。",
-                "transition_to_next": "中心雷达节点拉近，切入项目 1 的架构图。",
-                "seedance_scene_prompt": f"开场趋势总览，{project_count} 个项目节点形成知识雷达，镜头缓慢推进，科技教学风。",
+                "visual_design": f"{project_count} 个项目方向围绕一条本周工程趋势主线排布；保持浅纸本教学图质感，重点是可读的结构关系，不是产品海报。",
+                "motion_design": "趋势节点按阅读顺序出现，第一条流程线放大并引导下一段。",
+                "transition_to_next": opening_contract["transition"],
+                "scene_contract": opening_contract,
+                "seedance_scene_prompt": self._build_seedance_scene_prompt(
+                    duration_seconds=scene_durations[0],
+                    purpose="开场，本周趋势总览",
+                    narration=script_payload["opening_line"],
+                    visual_brief={
+                        "diagram_type": "hub_spoke",
+                        "teaching_goal": "用总览说明本周项目并非孤立热点，而是围绕工程工作流演进",
+                        "visual_thesis": f"{project_count} 个项目共同指向可组合、可解释、可落地的工程能力",
+                        "nodes": [],
+                        "relationships": [],
+                        "reading_order": [],
+                        "chinese_labels": ["本周趋势", "工程能力", "项目方向"],
+                        "palette_key": "paper_navy_orange",
+                        "negative_constraints": opening_contract["negative_constraints"],
+                    },
+                    video_brief={
+                        "motion_metaphor": "趋势节点围绕中心主线依次展开",
+                        "camera": opening_contract["camera"],
+                        "transition": opening_contract["transition"],
+                        "audio_directive": opening_contract["audio_directive"],
+                    },
+                    scene_contract=opening_contract,
+                ),
             }
         ]
         for item in project_summaries:
             scene_index = int(item["project_index"]) + 1
+            motion_design = str(item.get("motion_beat", "")).strip() or str(item["video_brief"]["motion_metaphor"])
+            transition_to_next = str(item.get("transition_intent", "")).strip() or str(item["video_brief"]["transition"])
+            scene_contract = {
+                "entry_state": "承接上一段离场的主流程线，从画面左侧或中心进入",
+                "beats": self._project_scene_beats(
+                    duration_seconds=scene_durations[scene_index - 1],
+                    visual_brief=item["visual_brief"],
+                    motion_design=motion_design,
+                ),
+                "exit_state": "当前关键关系收束为一条清晰主线，并留下进入下一段的方向",
+                "camera": str(item["video_brief"]["camera"]),
+                "transition": transition_to_next,
+                "audio_directive": str(item["video_brief"]["audio_directive"]),
+                "negative_constraints": list(item["visual_brief"]["negative_constraints"]),
+                "reference_image_role": "none",
+                "scene_goal": str(item.get("scene_goal", "")).strip() or str(item["video_brief"]["reader_gain"]),
+            }
             scenes.append(
                 {
                     "scene_index": scene_index,
@@ -352,21 +472,36 @@ project_summaries 正好 {len(project_names)} 项，每项含 repository_full_na
                     "repository_full_name": item["repository_full_name"],
                     "narration": item["spoken_text"],
                     "subtitle": item["repository_full_name"],
-                    "visual_design": (
-                        f"{item['repository_full_name']} 的技术架构图，占据画面中心；"
-                        "输入、核心模块、流程箭头、输出依次排列，像高质量技术 PPT。"
-                    ),
-                    "motion_design": self._project_motion_design(
-                        project_index=int(item["project_index"]),
-                        project_count=project_count,
-                    ),
-                    "transition_to_next": "用发光流程线横向滑动，衔接下一个项目。",
-                    "seedance_scene_prompt": (
-                        f"{item['repository_full_name']} 技术架构讲解，{item['architecture_focus']} "
-                        f"{self._project_motion_design(project_index=int(item['project_index']), project_count=project_count)}"
+                    "visual_design": self._describe_visual_design(item["visual_brief"]),
+                    "motion_design": motion_design,
+                    "transition_to_next": transition_to_next,
+                    "scene_contract": scene_contract,
+                    "seedance_scene_prompt": self._build_seedance_scene_prompt(
+                        duration_seconds=scene_durations[scene_index - 1],
+                        purpose=self._project_scene_purpose(
+                            project_index=int(item["project_index"]), project_count=project_count
+                        ),
+                        narration=item["spoken_text"],
+                        visual_brief=item["visual_brief"],
+                        video_brief=item["video_brief"],
+                        scene_contract=scene_contract,
                     ),
                 }
             )
+        closing_contract = {
+            "entry_state": "五个项目的主流程线从边缘回收，保留各自色彩线索",
+            "beats": [
+                "0-2 秒：五条主线汇入同一张趋势图",
+                "2-4 秒：工程启发以三个中文短标签落位",
+                "4-5 秒：画面干净留白并淡出",
+            ],
+            "exit_state": "趋势图完整静止在画面中央，留出片尾结束空间",
+            "camera": "中景稳定收束，最后轻微拉远",
+            "transition": "柔和淡出结束",
+            "audio_directive": "不生成旁白、人物口型或内嵌字幕；只保留结尾提示音空间",
+            "negative_constraints": ["不要强行出现关注按钮", "不要乱码或长英文", "不要抽象霓虹粒子"],
+            "reference_image_role": "none",
+        }
         scenes.append(
             {
                 "scene_index": project_count + 2,
@@ -375,11 +510,34 @@ project_summaries 正好 {len(project_names)} 项，每项含 repository_full_na
                 "purpose": "结尾 CTA",
                 "repository_full_name": None,
                 "narration": script_payload["closing_line"],
-                "subtitle": "关注本周开源技术趋势",
-                "visual_design": f"{project_count} 张架构图缩略卡汇聚成一张总趋势图，中心是 AI Agent、代码理解、工程教育三个关键词。",
-                "motion_design": f"{project_count} 个项目卡片向中心聚合，最后定格在趋势总结卡片。",
-                "transition_to_next": "视频结束。",
-                "seedance_scene_prompt": f"结尾总结，{project_count} 个项目卡片汇聚成技术趋势图，干净收束。",
+                "subtitle": "本周工程启发",
+                "visual_design": f"{project_count} 个项目的结构线索回收为一张总趋势图，突出可组合、可解释、可验证三类工程启发。",
+                "motion_design": "多条主线向中心归并，形成一个干净的趋势图后留白结束。",
+                "transition_to_next": closing_contract["transition"],
+                "scene_contract": closing_contract,
+                "seedance_scene_prompt": self._build_seedance_scene_prompt(
+                    duration_seconds=scene_durations[-1],
+                    purpose="结尾 CTA",
+                    narration=script_payload["closing_line"],
+                    visual_brief={
+                        "diagram_type": "comparison",
+                        "teaching_goal": "把五个项目回收为可带走的工程判断",
+                        "visual_thesis": "热点并非孤立工具，而是工程流程中可组合的能力模块",
+                        "nodes": [],
+                        "relationships": [],
+                        "reading_order": [],
+                        "chinese_labels": ["可组合", "可解释", "可验证"],
+                        "palette_key": "paper_violet_coral",
+                        "negative_constraints": closing_contract["negative_constraints"],
+                    },
+                    video_brief={
+                        "motion_metaphor": "多条流程线回收成一张完整趋势图",
+                        "camera": closing_contract["camera"],
+                        "transition": closing_contract["transition"],
+                        "audio_directive": closing_contract["audio_directive"],
+                    },
+                    scene_contract=closing_contract,
+                ),
             }
         )
 
@@ -395,11 +553,18 @@ project_summaries 正好 {len(project_names)} 项，每项含 repository_full_na
             "architecture_image_prompts": architecture_prompts,
             "scenes": scenes,
             "seedance_master_prompt": seedance_prompt,
+            "hyperframes_blueprint": creative_brief_service.build_hyperframes_blueprint(
+                title=script_payload["video_title"],
+                scenes=scenes,
+                total_duration_seconds=sum(scene_durations),
+            ),
             "quality_constraints": [
                 "视频是一个连续教学讲解，不是多张图硬切。",
                 "每段画面必须跟随对应项目的旁白逐步展开。",
-                "少用随机抽象画面，多用流程图、架构图、代码卡片、模块高亮。",
+                "每个项目必须遵守各自的视觉合同，不能全部套用同一色板或三栏结构。",
+                "少用随机抽象画面，多用流程图、架构图、模块高亮和可解释的运动。",
                 "不要生成乱码文字、错误 UI 或无意义代码。",
+                "Seedance 只生成动态视觉片段；旁白、中文字幕、转场由 HyperFrames 蓝图在审核后确定性装配。",
             ],
             "source": {
                 "content_id": content.id,
@@ -408,95 +573,183 @@ project_summaries 正好 {len(project_names)} 项，每项含 repository_full_na
             },
         }
 
-    def _build_fallback_storyboard(self, content: GeneratedContentForStoryboard) -> dict[str, Any]:
-        """DeepSeek 不稳定时生成一份确定性的基础视频蓝图。"""
+    @staticmethod
+    def _project_evidence_card(project_analysis_markdown: str) -> str:
+        """把长文项目拆解压成分镜可用的事实卡，避免截断整篇文章前半段。"""
 
-        project_names = [str(item["repository_full_name"]) for item in content.image_prompts]
-        project_lines = [
-            f"第 {index} 个项目是 {project_name}，它代表了本周 GitHub 技术趋势里的一个关键方向。"
-            for index, project_name in enumerate(project_names, start=1)
-        ]
-        project_count = len(project_names)
-        progressive_script = (
-            f"本周 GitHub 热门项目 Top {project_count} 来了。我们不只看 star 数，而是看这些项目背后的技术趋势。"
-            + "".join(project_lines)
-            + f"把这 {project_count} 个项目放在一起看，你会发现开发者工具正在从单点自动化，走向更完整的知识组织、代码理解和工程学习工作流。"
-        )
-        architecture_prompts = [
-            {
-                "project_index": index,
-                "repository_full_name": project_name,
-                "project_summary_text": f"{project_name} 的核心价值和工程使用场景。",
-                "architecture_prompt": self._normalize_architecture_prompt(
-                    repository_full_name=project_name,
-                    prompt=(
-                        "生成一张科技教学风架构图："
-                        "白色或浅灰纸张背景、深蓝标题色块、蓝色流程箭头，展示输入、核心模块、处理流程、输出和适用场景，"
-                        "像高质量技术课件，构图清晰；只允许极少量中文短标签，不要出现仓库名、英文、数字、代码、logo 或水印。"
-                    ),
-                ),
-            }
-            for index, project_name in enumerate(project_names, start=1)
-        ]
-        scenes = []
-        scene_durations = self._scene_durations(project_count)
-        for index, duration in enumerate(scene_durations, start=1):
-            repository_name = self._scene_repository_name(index, content, project_count)
-            is_opening = index == 1
-            is_closing = index == len(scene_durations)
-            purpose = (
-                "开场趋势总览"
-                if is_opening
-                else "结尾 CTA"
-                if is_closing
-                else self._project_scene_purpose(index - 1, project_count)
+        normalized = re.sub(r"\s+", " ", project_analysis_markdown or "").strip()
+        return normalized[:900]
+
+    @staticmethod
+    def _article_mainline_excerpt(article_markdown: str) -> str:
+        """提取文章主线供开场口播使用，不让后续项目被全文前缀截断。"""
+
+        match = re.search(r"###\s*本周主线\s*(.*?)(?=\n###\s+|\Z)", article_markdown or "", flags=re.DOTALL)
+        text = match.group(1) if match else article_markdown
+        return re.sub(r"\s+", " ", text or "").strip()[:650]
+
+    def _build_fallback_storyboard(self, content: GeneratedContentForStoryboard) -> dict[str, Any]:
+        """DeepSeek 不稳定时仍复用同一份结构化创作合同，避免回退旧蓝白模板。"""
+
+        project_summaries: list[dict[str, Any]] = []
+        for index, item in enumerate(content.image_prompts, start=1):
+            repository_full_name = str(item["repository_full_name"])
+            summary_text = str(item.get("summary_text", "") or item.get("project_summary_text", "")).strip()
+            project_evidence_card = self._project_evidence_card(
+                str(item.get("project_analysis_markdown", ""))
             )
-            narration = (
-                "本周 GitHub 热榜的关键词，是 AI Agent、代码理解和工程教育。"
-                if is_opening
-                else f"这 {project_count} 个项目共同说明：真正有价值的 AI 工具，必须把自动化、可解释性和工程实践连接起来。"
-                if is_closing
-                else f"第 {index - 1} 个项目是 {repository_name}，我们用一张架构图看清它解决的问题、核心模块和使用场景。"
-            )
-            scenes.append(
+            project_summaries.append(
                 {
-                    "scene_index": index,
-                    "time_range": self._time_range_for_scene(index, scene_durations),
-                    "duration_seconds": duration,
-                    "purpose": purpose,
-                    "repository_full_name": repository_name,
-                    "narration": narration,
-                    "subtitle": purpose,
-                    "visual_design": "白色纸张质感背景、深蓝标题色块、蓝色流程箭头的信息图，技术教学 PPT 动画式构图。",
-                    "motion_design": "镜头缓慢推进，节点依次点亮，流程线平滑移动。",
-                    "transition_to_next": "用发光连线和轻微推镜衔接下一段。",
-                    "seedance_scene_prompt": f"{purpose}，画面与旁白同步推进，信息层级清晰。",
+                    "project_index": index,
+                    "repository_full_name": repository_full_name,
+                    "spoken_text": summary_text
+                    or f"第 {index} 个项目是 {repository_full_name}，重点不是堆叠功能，而是把一个具体工程环节组织得更清楚。",
+                    "architecture_focus": project_evidence_card
+                    or str(item.get("prompt", "")).strip()
+                    or "解释项目如何把输入、关键处理和结果串成可理解的工程机制。",
+                    "scene_goal": "让观众看懂该项目解决的是哪一段工程问题。",
+                    "motion_beat": "关键节点按阅读顺序依次出现，主流程线只突出一条。",
+                    "transition_intent": "当前主流程线向右延伸，带入下一项目的起点。",
+                    "project_summary_text": summary_text,
+                    "project_analysis_markdown": project_evidence_card,
+                    "visual_brief": item.get("visual_brief", {}),
+                    "video_brief": item.get("video_brief", {}),
                 }
             )
 
-        seedance_prompt = self._build_seedance_prompt_from_scenes(
-            title=content.title,
-            progressive_script=progressive_script,
-            scenes=scenes,
+        project_count = len(project_summaries)
+        opening_line = (
+            f"本周 GitHub Top {project_count} 的变化不只在 star 数，"
+            "更值得看的，是开发者如何把 Agent、知识与工具拼进真实工作流。"
         )
-        return {
-            "video_title": content.title,
-            "total_duration_seconds": sum(scene_durations),
-            "progressive_script": progressive_script,
-            "architecture_image_prompts": architecture_prompts,
-            "scenes": scenes,
-            "seedance_master_prompt": seedance_prompt,
-            "quality_constraints": [
-                "画面必须跟随旁白逐步展开，不要随机跳转主题。",
-                "不要生成乱码文字、错误 UI 或无意义代码。",
-                "整体像科技教学 PPT 动画，而不是图片硬切 slideshow。",
-            ],
-            "source": {
-                "content_id": content.id,
-                "week_end": content.week_end,
-                "summary_title": content.title,
+        closing_line = (
+            f"这 {project_count} 个项目放在一起，留下的工程启发是：先看信息如何流动，"
+            "再决定工具应该放在哪一层。"
+        )
+        return self._build_storyboard_from_script_payload(
+            content=content,
+            script_payload={
+                "video_title": content.title,
+                "opening_line": opening_line,
+                "project_summaries": project_summaries,
+                "closing_line": closing_line,
+                "progressive_script": opening_line
+                + "".join(item["spoken_text"] for item in project_summaries)
+                + closing_line,
             },
+        )
+
+    def _project_scene_beats(
+        self,
+        duration_seconds: int,
+        visual_brief: dict[str, Any],
+        motion_design: str,
+    ) -> list[str]:
+        """把项目视觉合同拆成连续的三拍教学动作。"""
+
+        labels = [str(label) for label in visual_brief.get("chinese_labels", []) if str(label).strip()]
+        first_label = labels[0] if labels else "关键输入"
+        middle_label = labels[min(1, len(labels) - 1)] if labels else "核心机制"
+        last_label = labels[-1] if labels else "工程结果"
+        first_end = max(2, duration_seconds // 3)
+        second_end = max(first_end + 2, duration_seconds - 2)
+        return [
+            f"0-{first_end} 秒：{first_label} 与主问题先落位，建立阅读起点",
+            f"{first_end}-{second_end} 秒：{middle_label} 展开并沿主关系线推进；{motion_design}",
+            f"{second_end}-{duration_seconds} 秒：{last_label} 收束为可带走的结果，保留下一段的主线方向",
+        ]
+
+    def _describe_visual_design(self, visual_brief: dict[str, Any]) -> str:
+        """将结构化视觉合同压缩为审核台可读的画面说明。"""
+
+        labels = "、".join(str(label) for label in visual_brief.get("chinese_labels", [])[:6]) or "关键节点"
+        relationships = visual_brief.get("relationships", [])
+        relationship_count = len(relationships) if isinstance(relationships, list) else 0
+        return (
+            f"采用 {visual_brief.get('diagram_type', 'structural_breakdown')} 教学图布局，"
+            f"以“{visual_brief.get('visual_thesis', '工程机制')}”为核心，"
+            f"展示 {labels} 等短标签与 {relationship_count} 条主要关系；"
+            f"使用 {self._palette_description(str(visual_brief.get('palette_key', '')))} 的浅纸本信息图风格。"
+        )
+
+    def _build_seedance_scene_prompt(
+        self,
+        duration_seconds: int,
+        purpose: str,
+        narration: str,
+        visual_brief: dict[str, Any],
+        video_brief: dict[str, Any],
+        scene_contract: dict[str, Any],
+    ) -> str:
+        """将单个结构化合同编译成真实提交给 Seedance 的动态片段 Prompt。
+
+        该函数刻意不使用 @引用：当前配置关闭参考图输入。视频模型只负责连续动态
+        教学画面，旁白与字幕由后续 HyperFrames 蓝图统一装配，避免生成乱码或口型错位。
+        """
+
+        nodes = visual_brief.get("nodes", [])
+        node_text = "、".join(
+            f"{node.get('label', '节点')}（{node.get('role', '关键节点')}）"
+            for node in nodes[:6]
+            if isinstance(node, dict)
+        ) or "少量关键节点"
+        relationships = visual_brief.get("relationships", [])
+        relationship_text = "；".join(
+            f"{relation.get('from', '起点')}→{relation.get('to', '终点')}（{relation.get('label', '流转')}）"
+            for relation in relationships[:7]
+            if isinstance(relation, dict)
+        ) or "沿一条明确主流程线推进"
+        labels = "、".join(str(label) for label in visual_brief.get("chinese_labels", [])[:8]) or "输入、核心、结果"
+        beats = "；".join(str(beat) for beat in scene_contract.get("beats", [])[:3])
+        negative_constraints = "；".join(
+            str(item) for item in scene_contract.get("negative_constraints", [])[:6]
+        )
+        palette = self._palette_description(str(visual_brief.get("palette_key", "")))
+        layout = self._diagram_layout_description(str(visual_brief.get("diagram_type", "")))
+
+        prompt_parts = [
+            f"生成 {duration_seconds} 秒横版 16:9 中文技术教学动态片段，这是连续科普视频的一个章节：{purpose}。",
+            "目标不是广告海报或静态图片轮播，而是一段围绕一个工程机制逐步展开的 PPT 式信息图动画。",
+            f"教学目标：{visual_brief.get('teaching_goal', '让观众看懂工程机制')}。",
+            f"核心判断：{visual_brief.get('visual_thesis', '用画面解释关键关系')}。",
+            f"版式：{layout}。色彩：{palette}。背景使用浅纸张、浅灰纤维或克制网格肌理，留白充足。",
+            f"画面节点：{node_text}。主要关系：{relationship_text}。允许出现的中文短标签仅限：{labels}。",
+            f"镜头与动作：{video_brief.get('camera', '稳定中景缓推')}；{video_brief.get('motion_metaphor', '关键节点依次高亮')}。",
+            f"分时动作：{beats}。",
+            f"进入状态：{scene_contract.get('entry_state', '从前一段主线进入')}；结尾衔接：{scene_contract.get('exit_state', '保留主线方向')}；转场：{scene_contract.get('transition', '平滑衔接')}。",
+            f"口播语义仅用于确定节奏，不要把口播逐字写在画面中：{narration[:240]}。",
+            "严格要求：不生成任何旁白、人物口型、字幕条或大段文字；不展示仓库名、网址、logo、代码、终端截图或产品界面；中文标签必须短而清晰。",
+            f"负面约束：{negative_constraints or '不要乱码、伪文字、密集小字、抽象霓虹、杂乱网线、快节奏跳切或无意义粒子特效'}。",
+            "运镜稳定、信息层级由低到高，元素只在讲到时出现；结尾保留与下一段相同的主线方向，实现无阻断衔接。",
+        ]
+        return "\n".join(part for part in prompt_parts if str(part).strip())[:2200]
+
+    @staticmethod
+    def _palette_description(palette_key: str) -> str:
+        """将稳定色板键转换为图像模型能理解的可控配色。"""
+
+        palettes = {
+            "paper_cobalt_amber": "米白纸本底、钴蓝主结构、琥珀橙强调、石墨灰文字",
+            "paper_violet_coral": "暖白纸本底、靛紫主结构、珊瑚橙强调、炭灰文字",
+            "paper_teal_tangerine": "浅灰纸本底、深青蓝主结构、橘橙强调、墨灰文字",
+            "paper_ink_lime": "象牙白纸本底、墨绿主结构、青柠强调、石墨灰文字",
+            "paper_navy_orange": "雾白纸本底、海军蓝主结构、橙色强调、深灰文字",
         }
+        return palettes.get(palette_key, palettes["paper_navy_orange"])
+
+    @staticmethod
+    def _diagram_layout_description(diagram_type: str) -> str:
+        """选择可读性优先的镜头内信息图布局。"""
+
+        layouts = {
+            "structural_breakdown": "中心模块拆解成四至六个有序部件，主关系从中间向外展开",
+            "linear_progression": "从左向右的单条主流程，步骤依次点亮且每步只出现一个短标签",
+            "circular_flow": "环形闭环显示触发、处理、反馈和回流，避免过多分支",
+            "hub_spoke": "一个中心能力连接三到五个外围能力点，先展开再收回主路径",
+            "layered_system": "自下而上的三层能力结构，层间用少量垂直关系线连接",
+            "comparison": "左右对照或前后对照，仅突出一个改造点和一个结果差异",
+        }
+        return layouts.get(diagram_type, layouts["structural_breakdown"])
 
     def _build_seedance_prompt_from_scenes(
         self,
@@ -504,20 +757,20 @@ project_summaries 正好 {len(project_names)} 项，每项含 repository_full_na
         progressive_script: str,
         scenes: list[dict[str, Any]],
     ) -> str:
-        """从分镜拼出 Seedance 主 prompt。"""
+        """生成审核用的全片叙事总览，不替代各段真实 Seedance Prompt。"""
 
         scene_text = "\n".join(
-            f"{scene['time_range']}：{scene['purpose']}。画面：{scene['visual_design']} 动作：{scene['motion_design']} 旁白：{scene['narration']}"
+            f"{scene['time_range']}：{scene['purpose']}。画面：{scene['visual_design']} 动作：{scene['motion_design']} 衔接：{scene['transition_to_next']}"
             for scene in scenes
         )
         return (
-            "生成一段 60 秒科技教学短视频，风格类似高质量技术科普栏目。"
-            "白色或浅灰纸张质感背景，深蓝标题胶囊、蓝色流程箭头、清楚的中文短标签，PPT 动画式信息图，镜头平滑推进。"
-            "视频必须按照时间顺序层层递进，旁白与画面同步，不要变成多张图片硬切。"
-            f"标题：{title}。"
-            f"完整口播：{progressive_script}"
-            f"分镜结构：\n{scene_text}"
-        )[:1400]
+            "这是 60 秒中文技术教学视频的审核总览，实际生成应以每段 seedance_scene_prompt 为准。\n"
+            f"标题：{title}。\n"
+            "结构原则：七段由共享流程线连续衔接；每段依据自己的视觉合同，不套用单一蓝绿色模板；"
+            "Seedance 只生成无旁白、无内嵌字幕的动态教学画面，HyperFrames 后续装配字幕、转场与旁白。\n"
+            f"完整口播语义：{progressive_script}\n"
+            f"分镜总览：\n{scene_text}"
+        )[:2200]
 
     def _normalize_architecture_prompt(self, repository_full_name: str, prompt: str) -> str:
         """补齐架构图 prompt 的强约束。"""
@@ -525,13 +778,11 @@ project_summaries 正好 {len(project_names)} 项，每项含 repository_full_na
         base_prompt = prompt or "生成技术架构概览图。"
         base_prompt = base_prompt.replace(repository_full_name, "这个项目")
         constraints = (
-            "统一科技教学风，白色或浅灰背景、深蓝标题块、蓝色流程箭头，清晰节点流程图；"
-            "主体最多 6 个节点，最多 2 条主箭头，中心核心模块清楚，四周留白；"
-            "只允许少量中文短标签表达节点用途；不要生成英文、字母、数字、代码、仓库名、logo、水印；"
-            "允许圆角矩形、简洁图标、色块和细线箭头；"
-            "不要仓库截图，不要 UI 截图，不要复杂网络乱线，不要齿轮、灯泡、握手、拼图等陈词滥调。"
+            "这只是视觉意图，不指定统一色板；最终美术由 visual_brief 决定。"
+            "主体最多 6 个节点与 7 条关系；只允许少量中文短标签表达节点用途；"
+            "不要仓库地址、长英文、代码、logo、水印、截图、复杂乱线、陈词滥调图标。"
         )
-        return f"{base_prompt} {constraints}"[:650]
+        return f"{base_prompt} {constraints}"[:720]
 
     def _find_item_by_repository(self, items: list[Any], repository_full_name: str) -> dict[str, Any]:
         """按 repository_full_name 在模型输出数组里找项目项。"""

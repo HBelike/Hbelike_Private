@@ -13,4 +13,4 @@
 9. **调度边界**：周五 08:00 生产、09:00 建微信草稿；Scheduler 与人工流水线共享文件锁，生产只能单实例运行。视频付费提交仍默认关闭；审核通过前不进入 `ArticleLayoutTask` / `DeliverTask`。
 10. **上线修复**：`eba2f08` 为生产 Nginx 增加静态 `root /usr/share/nginx/html` 与 `index index.html`；服务器已通过标准 Git 拉取、重建 Web/Caddy，`career-web` 健康检查恢复正常。
 11. **已验证**：前端构建、Python 编译/pip check、凭据加密/模型网关/API/登录访问控制/管理员 bootstrap/调度锁/Skill 便携性测试、Compose 静态校验均已通过；公网 `https://xingxingtech.cn/api/health` 返回 200，Caddy 已取得 Let’s Encrypt 证书。真实周榜测试已成功完成 Search、Summary、短视频蓝图、Seedream 五图、Edge TTS、存储和预览；GitHub API 与微信公众号 access token 均已连通。
-12. **媒体公开与下一步**：`8fb4d96` 让 Caddy 只读服务命名卷内的 `outputs/public`，生产媒体地址为 `https://xingxingtech.cn/media/*`；五张真实图片已验证公网 200，当前内容仍为 `created`、无草稿记录。下一步由用户在 `/review` 核验素材与文案，确认后才测试“通过 → 微信草稿箱”；随后配置备份与轮换生产凭据。
+12. **当前修复/下一步**：面经库仍按“公开正文/图片 OCR → `InterviewEvidenceAnalyzer` 清洗 → 用户确认 → 手动入库”执行。2026-08-12 手动完整流水线已修复：请求状态在启动线程前同步写入 `running`，并修正 PostgreSQL `metadata_json` 更新的参数类型歧义；过期 `queued` 会显式标记失败。最新真实运行已完成启动和 Search，但 Summary 因千分位数字格式误判失败；现已兼容精确的千分位展示、仍拒绝近似数。下一次运行需从工作台重新提交并观察终态。

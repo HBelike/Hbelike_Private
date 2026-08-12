@@ -32,8 +32,21 @@ class VideoClipPlanTask(BaseTask):
             raise RuntimeError(f"content_id={content.id} 没有 video_storyboards，请先运行 ShortVideoPromptTask")
 
         scenes = self._storyboard_scenes(storyboard)
-        if len(scenes) != 7:
-            raise RuntimeError(f"storyboard_id={storyboard.id} scenes 必须正好 7 段，当前 {len(scenes)} 段")
+        # 视频任务读取的是精简内容快照，不携带图片 Prompt；分镜自身的架构图
+        # 列表才是这里唯一可靠的项目数量来源。这样不会因仓储投影字段不同而
+        # 在生成计划前抛出 AttributeError。
+        architecture_prompts = storyboard.storyboard.get("architecture_image_prompts", [])
+        expected_project_count = (
+            len(architecture_prompts)
+            if isinstance(architecture_prompts, list) and architecture_prompts
+            else max(0, len(scenes) - 2)
+        )
+        expected_scene_count = expected_project_count + 2
+        if len(scenes) != expected_scene_count:
+            raise RuntimeError(
+                f"storyboard_id={storyboard.id} scenes 必须为项目数加开场和结尾共 {expected_scene_count} 段，"
+                f"当前 {len(scenes)} 段"
+            )
 
         image_assets = media_asset_repository.list_by_content_id(content.id, "image")
         image_assets_by_repository = self._active_image_assets_by_repository(image_assets)
@@ -113,6 +126,8 @@ class VideoClipPlanTask(BaseTask):
             motion_design = str(scene.get("motion_design", "")).strip()
             transition_to_next = str(scene.get("transition_to_next", "")).strip()
             purpose = str(scene.get("purpose", "")).strip() or f"第 {clip_index} 段"
+            seedance_scene_prompt = str(scene.get("seedance_scene_prompt", "")).strip()
+            scene_contract = scene.get("scene_contract") if isinstance(scene.get("scene_contract"), dict) else {}
 
             clip_plans.append(
                 VideoClipPlanInput(
@@ -143,6 +158,8 @@ class VideoClipPlanTask(BaseTask):
                         transition_to_next=transition_to_next,
                         repository_full_name=repository_full_name,
                         clip_duration=clip_duration,
+                        seedance_scene_prompt=seedance_scene_prompt,
+                        scene_contract=scene_contract,
                     ),
                     reference_image_asset_ids=reference_image_asset_ids,
                     provider=context.config.video_provider,
@@ -161,6 +178,11 @@ class VideoClipPlanTask(BaseTask):
                         "resolution": context.config.video_resolution,
                         "aspect_ratio": context.config.video_aspect_ratio,
                         "model": context.config.video_model,
+                        "scene_contract": scene_contract,
+                        "seedance_scene_prompt_source": "storyboard" if seedance_scene_prompt else "legacy_composed",
+                        "hyperframes_blueprint_version": str(
+                            storyboard.storyboard.get("hyperframes_blueprint", {}).get("version", "")
+                        ),
                     },
                 )
             )
@@ -195,8 +217,34 @@ class VideoClipPlanTask(BaseTask):
         transition_to_next: str,
         repository_full_name: str | None,
         clip_duration: int,
+        seedance_scene_prompt: str,
+        scene_contract: dict[str, Any],
     ) -> str:
-        """生成单段 Seedance prompt，保持所有 clip 风格统一。"""
+        """生成单段 Seedance Prompt，优先使用 storyboard 的完整场景合同。
+
+        `seedance_scene_prompt` 是 ShortVideoPromptTask 根据 Seedance2 规范生成的可执行
+        分镜。这里不能再把它压缩成泛化模板，否则高质量镜头、转场和负面约束会在真正
+        提交到视频模型前丢失。
+        """
+
+        if seedance_scene_prompt:
+            continuity_parts = [
+                f"这是完整教学视频第 {clip_index}/{total_clip_count} 段，时长严格为 {clip_duration} 秒。",
+                f"前后连续性：{context.config.video_clip_prompt_continuity_rule}",
+                f"本段退出状态：{scene_contract.get('exit_state', transition_to_next)}。",
+                f"本段转场：{scene_contract.get('transition', transition_to_next)}。",
+                "当前配置未启用参考图片：不得使用任何素材引用标记或伪造图片引用。",
+                "视频片段不生成旁白、人物口型、内嵌字幕或长文字；不展示仓库名、网址、Logo、代码或终端截图。",
+            ]
+            if context.config.video_clip_prompt_negative_prompt:
+                continuity_parts.append(context.config.video_clip_prompt_negative_prompt)
+            # 先为连续性合同预留字数。旧实现在长分镜后面直接追加再截断，导致
+            # 最关键的离场状态、转场和负面约束可能被裁掉。
+            continuity_suffix = "\n".join(continuity_parts)
+            max_length = context.config.video_clip_prompt_max_length
+            base_limit = max(160, max_length - len(continuity_suffix) - 1)
+            base_prompt = seedance_scene_prompt[:base_limit].rstrip(" ，,；;。")
+            return "\n".join([base_prompt, continuity_suffix])[:max_length]
 
         repository_hint = ""
         if repository_full_name:
@@ -219,7 +267,7 @@ class VideoClipPlanTask(BaseTask):
         ]
         if context.config.video_reference_images_enabled:
             prompt_parts.append(context.config.video_clip_prompt_reference_image_rule)
-        prompt = "".join(part for part in prompt_parts if str(part).strip())
+        prompt = "\n".join(part for part in prompt_parts if str(part).strip())
         return prompt[: context.config.video_clip_prompt_max_length]
 
     def _reference_image_asset_ids_for_scene(

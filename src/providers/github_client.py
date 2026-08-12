@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import base64
 import os
+import re
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Any
@@ -77,6 +79,45 @@ class GitHubSearchResponse:
     items: list[GitHubRepositoryItem]
     rate_limit_remaining: str | None
     rate_limit_reset: str | None
+
+
+@dataclass(frozen=True)
+class GitHubRepositoryEvidence:
+    """为技术长文准备的仓库公开证据。
+
+    这个对象只保留 GitHub 仓库元数据和 README 的有限摘录。它不负责推断项目
+    能力，也不会写入业务表；SummaryTask 将它作为模型写作时可回溯的事实材料。
+    """
+
+    full_name: str
+    description: str | None
+    topics: tuple[str, ...]
+    default_branch: str | None
+    license_name: str | None
+    readme_excerpt: str
+    evidence_status: str
+    source_errors: tuple[str, ...] = ()
+
+    def prompt_payload(self) -> dict[str, Any]:
+        """返回适合提供给摘要模型的精简事实材料。"""
+
+        return {
+            "description": self.description or "",
+            "topics": list(self.topics),
+            "default_branch": self.default_branch or "",
+            "license": self.license_name or "",
+            "readme_excerpt": self.readme_excerpt,
+            "evidence_status": self.evidence_status,
+        }
+
+    def audit_payload(self) -> dict[str, Any]:
+        """返回可写入生成记录原始响应的审计材料，不包含鉴权信息。"""
+
+        return {
+            **self.prompt_payload(),
+            "full_name": self.full_name,
+            "source_errors": list(self.source_errors),
+        }
 
 
 class GitHubClient:
@@ -184,6 +225,106 @@ class GitHubClient:
             rate_limit_reset=rate_limit_reset,
         )
 
+    def fetch_repository_evidence(
+        self,
+        repository_full_name: str,
+        *,
+        fallback_description: str | None = None,
+        max_readme_characters: int = 3200,
+    ) -> GitHubRepositoryEvidence:
+        """读取单个入榜仓库的公开元数据与 README 摘录。
+
+        SummaryTask 只会对已入榜的少数项目调用本方法。README 缺失、仓库暂时
+        不可访问或网络波动都不会中断整期内容生成，而是降级为已有周榜描述；这样
+        长文不会为了凑字数而凭空补全技术细节。
+        """
+
+        normalized_name = repository_full_name.strip()
+        if not self._is_valid_repository_full_name(normalized_name):
+            raise ValueError(f"GitHub 仓库全名不合法：{repository_full_name}")
+
+        errors: list[str] = []
+        repository_payload: dict[str, Any] | None = None
+        try:
+            payload = self._fetch_json_path(
+                path=f"/repos/{normalized_name}",
+                not_found_is_none=True,
+            )
+            if isinstance(payload, dict):
+                repository_payload = payload
+            elif payload is not None:
+                errors.append("repository_payload_invalid")
+        except GitHubApiError as exc:
+            errors.append(f"repository_request_failed:{exc.status_code}")
+
+        description = fallback_description
+        topics: tuple[str, ...] = ()
+        default_branch: str | None = None
+        license_name: str | None = None
+        if repository_payload is not None:
+            description = str(repository_payload.get("description") or fallback_description or "").strip() or None
+            raw_topics = repository_payload.get("topics")
+            if isinstance(raw_topics, list):
+                topics = tuple(str(item).strip() for item in raw_topics if str(item).strip())[:12]
+            default_branch = str(repository_payload.get("default_branch") or "").strip() or None
+            raw_license = repository_payload.get("license")
+            if isinstance(raw_license, dict):
+                license_name = (
+                    str(raw_license.get("spdx_id") or raw_license.get("name") or "").strip() or None
+                )
+
+        readme_excerpt = ""
+        try:
+            readme_payload = self._fetch_json_path(
+                path=f"/repos/{normalized_name}/readme",
+                not_found_is_none=True,
+            )
+            if isinstance(readme_payload, dict):
+                readme_text = self._decode_readme_content(readme_payload)
+                readme_excerpt = self._clean_readme_excerpt(
+                    readme_text,
+                    max_characters=max_readme_characters,
+                )
+            elif readme_payload is not None:
+                errors.append("readme_payload_invalid")
+        except GitHubApiError as exc:
+            errors.append(f"readme_request_failed:{exc.status_code}")
+
+        if readme_excerpt:
+            evidence_status = "readme"
+        elif repository_payload is not None:
+            evidence_status = "metadata"
+        else:
+            evidence_status = "basic"
+
+        return GitHubRepositoryEvidence(
+            full_name=normalized_name,
+            description=description,
+            topics=topics,
+            default_branch=default_branch,
+            license_name=license_name,
+            readme_excerpt=readme_excerpt,
+            evidence_status=evidence_status,
+            source_errors=tuple(errors),
+        )
+
+    def fetch_repository_evidence_batch(
+        self,
+        repositories: list[tuple[str, str | None]],
+        *,
+        max_readme_characters: int = 3200,
+    ) -> list[GitHubRepositoryEvidence]:
+        """按输入顺序补充多个入榜仓库的公开证据。"""
+
+        return [
+            self.fetch_repository_evidence(
+                repository_full_name=full_name,
+                fallback_description=description,
+                max_readme_characters=max_readme_characters,
+            )
+            for full_name, description in repositories
+        ]
+
     def _build_query(self, current: datetime) -> str:
         """根据配置生成 GitHub Search 查询语句。"""
         query_parts = [
@@ -202,6 +343,81 @@ class GitHubClient:
         base_url = self.config.github_api_base_url.rstrip("/")
         endpoint = self.config.github_search_endpoint.lstrip("/")
         return f"{base_url}/{endpoint}"
+
+    def _fetch_json_path(self, path: str, *, not_found_is_none: bool) -> dict[str, Any] | None:
+        """调用 GitHub REST API，并在 Token 无效时一次性降级为匿名请求。"""
+
+        url = f"{self.config.github_api_base_url.rstrip('/')}/{path.lstrip('/')}"
+        token = self._read_token()
+        try:
+            response = requests.get(
+                url,
+                headers=self._build_headers(token),
+                timeout=self.config.github_timeout_seconds,
+            )
+            if response.status_code == 401 and token:
+                response = requests.get(
+                    url,
+                    headers=self._build_headers(token=None),
+                    timeout=self.config.github_timeout_seconds,
+                )
+        except requests.RequestException as exc:
+            raise GitHubApiError(0, f"网络请求失败：{exc.__class__.__name__}") from exc
+
+        if response.status_code == 404 and not_found_is_none:
+            return None
+        return self._parse_json_response(response)
+
+    @staticmethod
+    def _decode_readme_content(readme_payload: dict[str, Any]) -> str:
+        """从 README API 的 base64 内容中还原 UTF-8 文本。"""
+
+        content = readme_payload.get("content")
+        encoding = str(readme_payload.get("encoding") or "").lower()
+        if not isinstance(content, str) or encoding != "base64":
+            return ""
+        try:
+            return base64.b64decode("".join(content.split())).decode("utf-8", errors="replace")
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise GitHubApiError(200, "README base64 内容无法解码") from exc
+
+    @staticmethod
+    def _clean_readme_excerpt(text: str, *, max_characters: int) -> str:
+        """去掉 README 的链接、图片、代码块与徽章，保留可用于事实判断的说明。"""
+
+        if not text:
+            return ""
+
+        cleaned = re.sub(r"```[\s\S]*?```", " ", text)
+        cleaned = re.sub(r"!\[[^\]]*]\([^)]*\)", " ", cleaned)
+        cleaned = re.sub(r"\[([^\]]+)]\([^)]*\)", r"\1", cleaned)
+        cleaned = re.sub(r"<[^>]+>", " ", cleaned)
+        cleaned = re.sub(r"https?://\S+", " ", cleaned, flags=re.IGNORECASE)
+
+        lines: list[str] = []
+        for raw_line in cleaned.splitlines():
+            line = raw_line.strip()
+            if not line or "shields.io" in line.lower():
+                continue
+            line = re.sub(r"^(?:#{1,6}|[-*+]\s+|\d+[.)]\s+)", "", line).strip()
+            line = re.sub(r"\s+", " ", line)
+            if len(line) >= 2:
+                lines.append(line)
+
+        excerpt = "\n".join(lines)
+        bounded_length = max(400, int(max_characters))
+        if len(excerpt) > bounded_length:
+            excerpt = excerpt[:bounded_length].rstrip("，,；;。:： ") + "。"
+        return excerpt
+
+    @staticmethod
+    def _is_valid_repository_full_name(repository_full_name: str) -> bool:
+        """校验 owner/name 形式，避免把异常字符串拼进 REST 路径。"""
+
+        if repository_full_name.count("/") != 1:
+            return False
+        owner, name = repository_full_name.split("/", 1)
+        return bool(owner.strip() and name.strip())
 
     def _build_headers(self, token: str | None) -> dict[str, str]:
         """构造 GitHub API 请求头，避免把密钥写入日志。"""

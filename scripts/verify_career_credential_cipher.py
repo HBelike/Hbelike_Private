@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from tempfile import TemporaryDirectory
 from pathlib import Path
 
 from cryptography.fernet import Fernet
@@ -18,6 +19,8 @@ from src.career_assistant.persistence.credential_cipher import (
     LEGACY_UNKNOWN_SCHEME,
     CredentialCipher,
     CredentialCipherError,
+    MASTER_KEY_ENV_NAME,
+    ensure_credential_master_key,
 )
 
 
@@ -96,6 +99,32 @@ def main() -> None:
         assert "格式无效" in str(exc)
     else:
         raise AssertionError("格式错误的主密钥不得降级为明文写入")
+
+    with TemporaryDirectory() as temporary_directory:
+        temporary_root = Path(temporary_directory)
+        first_environment: dict[str, str] = {}
+        managed_key_path = ensure_credential_master_key(
+            temporary_root,
+            environment=first_environment,
+        )
+        assert managed_key_path == temporary_root / "data" / "career_credential_master.key"
+        assert managed_key_path.is_file()
+        assert CredentialCipher.from_environment(first_environment).can_encrypt
+
+        second_environment: dict[str, str] = {}
+        second_key_path = ensure_credential_master_key(
+            temporary_root,
+            environment=second_environment,
+        )
+        assert second_key_path == managed_key_path
+        assert second_environment[MASTER_KEY_ENV_NAME] == first_environment[MASTER_KEY_ENV_NAME]
+
+        explicit_environment = {MASTER_KEY_ENV_NAME: Fernet.generate_key().decode("ascii")}
+        assert ensure_credential_master_key(
+            temporary_root / "explicit",
+            environment=explicit_environment,
+        ) is None
+        assert not (temporary_root / "explicit" / "data").exists()
 
     print("career_credential_cipher_offline_ok")
 

@@ -3,7 +3,8 @@
 本模块只处理 API Key 在进入 PostgreSQL 前的加密和读取时的解密：
 
 * 新写入统一使用 ``cryptography.fernet.Fernet``；
-* 主密钥只从服务端环境变量 ``CAREER_CREDENTIAL_MASTER_KEY`` 读取；
+* 主密钥优先从服务端环境变量 ``CAREER_CREDENTIAL_MASTER_KEY`` 读取，未配置时由
+  服务端持久化目录自动托管；
 * 旧版 ``plaintext_api_key`` 仅能在显式开启兼容开关时读取；
 * 模块绝不记录、序列化或返回任何凭据原文。
 
@@ -15,12 +16,16 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from typing import Mapping
+from pathlib import Path
+from time import sleep
+from typing import Mapping, MutableMapping
 
 from cryptography.fernet import Fernet, InvalidToken
 
 
 MASTER_KEY_ENV_NAME = "CAREER_CREDENTIAL_MASTER_KEY"
+MANAGED_MASTER_KEY_FILE_ENV_NAME = "CAREER_CREDENTIAL_KEY_FILE"
+DEFAULT_MANAGED_MASTER_KEY_FILENAME = "career_credential_master.key"
 LEGACY_PLAINTEXT_FLAG_ENV_NAME = "CAREER_ALLOW_LEGACY_PLAINTEXT_CREDENTIALS"
 FERNET_V1_SCHEME = "fernet_v1"
 LEGACY_PLAINTEXT_SCHEME = "legacy_plaintext"
@@ -33,6 +38,35 @@ class CredentialCipherError(ValueError):
     该异常不包含 Key、密文或主密钥，Web API 可以安全地转换为用户可理解的 422
     响应；调用方不应将原始异常内容记入日志。
     """
+
+
+def ensure_credential_master_key(
+    project_root: Path,
+    *,
+    environment: MutableMapping[str, str] | None = None,
+) -> Path | None:
+    """确保页面模型连接拥有一个可跨重启复用的 Fernet 主密钥。
+
+    显式配置的 ``CAREER_CREDENTIAL_MASTER_KEY`` 始终优先，方便后续迁移到
+    云 Secret 管理服务。个人平台未配置时，则首次启动自动在项目 ``data`` 目录
+    生成主密钥，并在后续本地启动及 Docker 容器重建时复用同一个文件。
+
+    这个函数只写服务端持久化目录、从不写入浏览器，也不记录主密钥原文。返回
+    ``None`` 表示使用了显式环境变量；否则返回实际使用的本地密钥文件路径。
+    """
+
+    source = os.environ if environment is None else environment
+    configured_key = str(source.get(MASTER_KEY_ENV_NAME, "")).strip()
+    if configured_key:
+        # 保留用户或部署平台显式注入的 Secret，不以自动生成的文件覆盖它。
+        CredentialCipher.from_master_key(configured_key)
+        return None
+
+    key_file_path = _resolve_managed_master_key_path(project_root, source)
+    managed_key = _read_or_create_managed_master_key(key_file_path)
+    CredentialCipher.from_master_key(managed_key)
+    source[MASTER_KEY_ENV_NAME] = managed_key
+    return key_file_path
 
 
 @dataclass(frozen=True)
@@ -171,3 +205,65 @@ def _parse_bool(value: object) -> bool:
     """解析环境中的布尔开关，非法值按关闭处理以保持默认安全。"""
 
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _resolve_managed_master_key_path(
+    project_root: Path,
+    environment: Mapping[str, str],
+) -> Path:
+    """解析托管主密钥文件位置，相对路径统一落在项目根目录。"""
+
+    configured_path = str(environment.get(MANAGED_MASTER_KEY_FILE_ENV_NAME, "")).strip()
+    if configured_path:
+        candidate = Path(configured_path)
+        return candidate if candidate.is_absolute() else project_root / candidate
+    return project_root / "data" / DEFAULT_MANAGED_MASTER_KEY_FILENAME
+
+
+def _read_or_create_managed_master_key(key_file_path: Path) -> str:
+    """原子创建或读取主密钥文件，避免并发启动时生成两把不同的密钥。"""
+
+    try:
+        existing_key = _read_managed_master_key(key_file_path)
+    except FileNotFoundError:
+        existing_key = ""
+    except (OSError, UnicodeError) as exc:
+        raise CredentialCipherError("无法读取模型凭据主密钥文件，请检查其所在目录权限") from exc
+
+    if existing_key:
+        return existing_key
+
+    try:
+        key_file_path.parent.mkdir(parents=True, exist_ok=True)
+        generated_key = Fernet.generate_key().decode("ascii")
+        with key_file_path.open("x", encoding="ascii", newline="\n") as file:
+            file.write(f"{generated_key}\n")
+        # Linux 容器可确保仅运行用户可读；Windows 会安全地忽略该 POSIX 权限语义。
+        try:
+            os.chmod(key_file_path, 0o600)
+        except OSError:
+            pass
+        return generated_key
+    except FileExistsError:
+        # API 与一次性迁移脚本可能同时启动。等待创建方完成最小写入后再读取同一文件。
+        for _ in range(5):
+            sleep(0.05)
+            try:
+                existing_key = _read_managed_master_key(key_file_path)
+            except FileNotFoundError:
+                continue
+            except (OSError, UnicodeError) as exc:
+                raise CredentialCipherError(
+                    "无法读取模型凭据主密钥文件，请检查其所在目录权限",
+                ) from exc
+            if existing_key:
+                return existing_key
+        raise CredentialCipherError("模型凭据主密钥文件初始化未完成，请稍后重试")
+    except (OSError, UnicodeError) as exc:
+        raise CredentialCipherError("无法创建模型凭据主密钥文件，请检查其所在目录权限") from exc
+
+
+def _read_managed_master_key(key_file_path: Path) -> str:
+    """读取非空主密钥；格式校验由调用方统一交给 Fernet 完成。"""
+
+    return key_file_path.read_text(encoding="ascii").strip()

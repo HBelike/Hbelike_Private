@@ -1,177 +1,232 @@
 from __future__ import annotations
 
 import re
+from typing import Any
 
 from src.config.config_manager import AppConfig
+from src.services.media_creative_brief_service import MediaCreativeBriefService
 
 
 class ImagePromptDesignService:
-    """把业务语义 prompt 转成更稳定的 Seedream 技术课件图 prompt。
+    """把内容简报编译成可直接交给 Seedream 的中文技术教学图提示词。
 
-    这层服务不直接调用生图模型，只负责把 SummaryTask 产出的业务描述
-    改写成适合图片模型理解的“画面导演指令”。
+    SummaryTask 只负责给出项目价值与 ``visual_brief``；本服务不猜测某个项目应当
+    使用固定蓝色流程图，而是根据 diagram_type、节点、关系、阅读顺序和调色板生成
+    一张独立的教学图。该服务不调用外部 API、不写数据库，也不做本地叠字，最终图像
+    始终由火山方舟原始生成。
     """
 
     _whitespace_pattern = re.compile(r"\s+")
-    _url_pattern = re.compile(r"https?://\S+")
+    _url_pattern = re.compile(r"https?://\S+", re.IGNORECASE)
     _repo_pattern = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+
+    _palette_instructions = {
+        "paper_cobalt_amber": (
+            "暖白纸张与浅石墨纹理背景，主色为钴蓝，强调色为琥珀橙，"
+            "辅以深灰文字和极浅蓝灰连线；颜色只用于信息层级，不铺满背景。"
+        ),
+        "paper_violet_coral": (
+            "象牙白纸本背景，主色为深紫，强调色为珊瑚橙，辅以暖灰线条；"
+            "整体克制、像编辑过的技术专栏配图。"
+        ),
+        "paper_teal_tangerine": (
+            "米白纸张与细微网格背景，主色为深青绿，强调色为橘黄，辅以石墨灰；"
+            "禁止蓝绿色霓虹和大面积渐变。"
+        ),
+        "paper_ink_lime": (
+            "浅灰纸张背景，主色为墨黑与深灰，强调色为黄绿色，辅以低饱和蓝灰；"
+            "像严谨的工程课程讲义，不要赛博科技海报。"
+        ),
+        "paper_navy_orange": (
+            "暖白或浅米灰纸张背景，主色为海军蓝，强调色为工程橙，辅以灰蓝连线；"
+            "色彩有明确功能分工，画面明亮但不过度装饰。"
+        ),
+    }
+
+    _diagram_layouts = {
+        "structural_breakdown": (
+            "采用由整体到局部的结构拆解图：中心放核心机制，周围放少量支撑模块，"
+            "以分组框和短箭头表达归属、调用或依赖；避免模板化的三栏输入—核心—输出布局。"
+        ),
+        "linear_progression": (
+            "采用单条主流程的横向或斜向推进图：按阅读顺序逐个展开节点，"
+            "每个节点只表达一个动作，流程线是视觉主角，辅助关系退到第二层。"
+        ),
+        "circular_flow": (
+            "采用清晰的环形闭环图：核心节点可居中，环上节点按顺时针读序排布，"
+            "回流箭头必须明确指向反馈或修正，不能画成随机旋转装饰。"
+        ),
+        "hub_spoke": (
+            "采用中心辐射图：一个中心能力节点连接有限的周边能力点，"
+            "用不同线型区分主路径和辅助连接，中心与周边之间保留足够留白。"
+        ),
+        "layered_system": (
+            "采用分层堆栈图：按自下而上或自上而下的系统层级排布，"
+            "层内模块对齐，层间用少量垂直箭头说明支撑或调用关系。"
+        ),
+        "comparison": (
+            "采用左右对照的改造图：左边是旧做法或问题，右边是改造后的机制或结果，"
+            "中间只放一个关键变化箭头，突出工程取舍，不能做成两张无关海报。"
+        ),
+    }
 
     def __init__(self, config: AppConfig) -> None:
         self.config = config
+        self._brief_service = MediaCreativeBriefService()
 
     def build_project_architecture_prompt(
         self,
         repository_full_name: str,
         focus_prompt: str,
         project_summary_text: str = "",
+        visual_brief: dict[str, Any] | None = None,
+        project_index: int = 1,
     ) -> str:
-        """生成单个 GitHub 项目的技术教学风架构图 prompt。
+        """生成一段可直接提交给 Ark Seedream 的最终架构图提示词。
 
-        输入：
-        - repository_full_name：GitHub 仓库全名，只用于识别项目类型，不直接画到图里。
-        - focus_prompt：SummaryTask 生成的项目视觉重点。
-        - project_summary_text：项目概要，用于辅助确定画面模块。
+        输入：项目名仅用于清理文本和确定性兜底；``visual_brief`` 给出图表类型、节点、
+        关系与配色，``focus_prompt``/``project_summary_text`` 用于补充工程语义。
 
-        输出：
-        - 一段适合 Seedream 的中文生图 prompt。
+        输出：长度受 ``image.prompt.max_length`` 控制的中文提示词。
 
-        失败处理：
-        - 本函数不访问外部资源，不抛业务异常；未知项目会走通用课件模板。
-
-        线程安全：
-        - 无共享可变状态，线程安全。
-
-        任务监控：
-        - 不直接更新任务状态，由调用它的 ImageTask 记录任务运行结果。
+        失败处理：不访问网络；不完整的简报由 ``MediaCreativeBriefService`` 补全。
+        线程安全：不持有跨请求可变状态。
         """
 
-        known_project_brief = self._known_project_visual_brief(repository_full_name)
-        if known_project_brief:
-            project_brief = known_project_brief
-        else:
-            project_brief = self._build_generic_project_brief(
-                repository_full_name=repository_full_name,
-                focus_prompt=focus_prompt,
-                project_summary_text=project_summary_text,
-            )
-
-        parts = [
-            "生成一张16:9横版技术博客架构图，画面要像源码阅读文章里嵌入的工程结构图，而不是抽象插画或宣传海报。",
-            f"视觉系统：{self.config.image_prompt_visual_system}",
-            f"构图规则：{self.config.image_prompt_composition_rule}",
-            f"文字规则：{self.config.image_prompt_text_rule}",
-            f"安全区：{self.config.image_prompt_safe_zone_rule}",
-            f"本项目画面方案：{project_brief}",
-            f"风格指令：{self.config.image_prompt_style_rule}",
-            f"反向约束：{self.config.image_prompt_negative_prompt}",
-            "特别强调：标签必须短、大、清楚；宁可减少标签，也不要生成乱码、小字、伪文字或无法辨认的字符。",
-        ]
-
-        prompt = " ".join(part for part in parts if part.strip())
-        return self._limit_text(prompt, max_length=self.config.image_prompt_max_length)
-
-    def _known_project_visual_brief(self, repository_full_name: str) -> str:
-        """为已知周榜项目提供明确的课件式版式。
-
-        这里不使用仓库地址和长项目名，避免图片里出现难看的英文长串。
-        """
-
-        repo = repository_full_name.lower()
-        if repo == "mattpocock/skills":
-            return (
-                "白色背景，顶部居中蓝色胶囊标题“技能分层加载”。"
-                "左侧三层浅蓝线框模块：元数据层、指令层、资源层。"
-                "中间放一个大圆角容器“Skill Runtime”，内部模块为“名称”“描述”“SKILL.md”“Reference”“Script”。"
-                "右侧放两个蓝色状态卡：“始终加载”“按需加载”。"
-                "用蓝色箭头表现从元数据到指令再到资源的渐进披露关系。"
-            )
-        if repo == "graphify-labs/graphify":
-            return (
-                "白色背景，顶部蓝色胶囊标题“代码图谱生成”。"
-                "左侧三张输入卡：代码、文档、数据库。"
-                "中间大卡片写“解析引擎”，内部三步为“抽取实体”“识别关系”“建立索引”。"
-                "右侧输出卡写“可查询图谱”，旁边只画6到8个蓝色节点和少量连线。"
-                "箭头从输入流向解析引擎，再流向图谱。"
-            )
-        if repo == "codecrafters-io/build-your-own-x":
-            return (
-                "白色背景，顶部蓝色胶囊标题“从零构建技术”。"
-                "中间是一条横向学习流水线：经典系统、拆解、实现、测试、理解底层。"
-                "每一步都是蓝色线框圆角卡片，卡片内放简洁图标和短中文标签。"
-                "底部用浅蓝虚线补充“练习项目”“反馈修正”两个输入，不要画成杂乱工具箱。"
-            )
-        if repo == "nousresearch/hermes-agent":
-            return (
-                "白色背景，顶部蓝色胶囊标题“可成长Agent”。"
-                "中心是蓝色卡片“策略更新”，外圈画清晰循环箭头。"
-                "循环节点依次为：任务、计划、执行、反馈、记忆。"
-                "右侧输出卡写“能力成长”。"
-                "整体像 agent loop 架构图，不要画成人形机器人海报。"
-            )
-        if repo == "anomalyco/opencode":
-            return (
-                "白色背景，顶部蓝色胶囊标题“开放编码代理”。"
-                "左侧输入卡为：代码上下文、用户目标、运行反馈。"
-                "中间大卡片写“代理决策”，内部三步为“理解”“修改”“验证”。"
-                "右侧输出卡写“可控补丁”。"
-                "用蓝色箭头表现上下文进入代理决策，再输出补丁和反馈闭环。"
-            )
-        return ""
-
-    def _build_generic_project_brief(
-        self,
-        repository_full_name: str,
-        focus_prompt: str,
-        project_summary_text: str,
-    ) -> str:
-        """未知项目的通用课件图方案。
-
-        通用方案会保留 SummaryTask 的核心机制，但去掉仓库名、URL 和过长文本，
-        防止模型把地址、英文长串或代码画进图片。
-        """
-
-        focus = self._sanitize_visual_text(focus_prompt, repository_full_name, max_length=180)
-        summary = self._sanitize_visual_text(project_summary_text, repository_full_name, max_length=160)
-        source_text = focus or summary or "围绕项目的输入、核心处理模块和输出价值，做一张三段式技术架构图。"
-
-        return (
-            "顶部使用蓝色胶囊标题，标题写项目的核心机制名，不要使用仓库名。"
-            "左侧放2到3个浅蓝输入/问题卡，中间放2到3个蓝色线框核心模块，"
-            "右侧放1个结果/价值卡；用清晰蓝色箭头连接。"
-            f"画面内容依据：{source_text}"
+        cleaned_focus = self._sanitize_visual_text(focus_prompt, repository_full_name, max_length=260)
+        cleaned_summary = self._sanitize_visual_text(project_summary_text, repository_full_name, max_length=260)
+        brief = self._brief_service.normalize_visual_brief(
+            raw_brief=visual_brief,
+            repository_full_name=repository_full_name,
+            fallback_text=cleaned_focus or cleaned_summary,
+            project_index=project_index,
         )
 
-    def _sanitize_visual_text(self, text: str, repository_full_name: str, max_length: int) -> str:
-        """清理不适合进入图片 prompt 的文本。
+        diagram_type = str(brief.get("diagram_type", "structural_breakdown"))
+        palette_key = str(brief.get("palette_key", "paper_cobalt_amber"))
+        layout_instruction = self._diagram_layouts.get(
+            diagram_type,
+            self._diagram_layouts["structural_breakdown"],
+        )
+        palette_instruction = self._palette_instructions.get(
+            palette_key,
+            self._palette_instructions["paper_cobalt_amber"],
+        )
 
-        只去掉 URL、仓库全名、代码符号和多余空白，不再把所有文字都抹掉，
-        因为当前目标是生成带短中文标签的教学课件图。
-        """
+        node_instruction = self._format_nodes(brief.get("nodes"))
+        relationship_instruction = self._format_relationships(brief.get("relationships"), brief.get("nodes"))
+        reading_instruction = self._format_reading_order(brief.get("reading_order"), brief.get("nodes"))
+        label_instruction = self._format_labels(brief.get("chinese_labels"))
+        negative_constraints = self._format_negative_constraints(brief.get("negative_constraints"))
+        semantic_focus = cleaned_focus or cleaned_summary or str(brief.get("visual_thesis", "")).strip()
+
+        parts = [
+            "任务：生成一张 16:9 横版、面向中文技术读者的工程教学信息图。它是技术文章中的原生插图，不是抽象插画、产品广告、网页截图或电影海报。",
+            f"教学目标：{brief.get('teaching_goal', '用一张图说明项目的工程机制与信息流向')}。",
+            f"核心判断：{brief.get('visual_thesis', semantic_focus)}。",
+            f"视觉体系：{self.config.image_prompt_visual_system}",
+            f"本张图调色：{palette_instruction}",
+            f"版式类型：{diagram_type}。{layout_instruction}",
+            f"结构关系：{self.config.image_prompt_composition_rule}",
+            f"节点设计：{node_instruction}",
+            f"连接关系：{relationship_instruction}",
+            f"阅读路径：{reading_instruction}",
+            f"文字规范：{self.config.image_prompt_text_rule} 可出现的标签仅为：{label_instruction}。",
+            f"构图与留白：{self.config.image_prompt_safe_zone_rule}",
+            f"图形语言：{self.config.image_prompt_style_rule}",
+            "生成方式约束：直接由火山方舟 Seedream 生成完整原始图像；禁止任何本地叠字、遮罩、拼贴、二次覆盖或后期把文字压到图上。",
+            "可读性优先级：先让读者一眼看懂主关系，再呈现次级模块；标签使用 2 到 6 个汉字的短词，必要英文技术词只能作为短补充，不能出现长英文、仓库名、网址或代码段。",
+            f"反向约束：{self.config.image_prompt_negative_prompt} {negative_constraints}",
+        ]
+
+        prompt = " ".join(part for part in parts if str(part).strip())
+        return self._limit_text(prompt, max_length=self.config.image_prompt_max_length)
+
+    def _format_nodes(self, raw_nodes: Any) -> str:
+        if not isinstance(raw_nodes, list):
+            return "仅保留 3 到 6 个语义明确的模块，模块大小按重要性分级。"
+        nodes: list[str] = []
+        for index, raw_node in enumerate(raw_nodes[:6], start=1):
+            if not isinstance(raw_node, dict):
+                continue
+            label = self._short_text(raw_node.get("label"), 8)
+            role = self._short_text(raw_node.get("role"), 24)
+            if label:
+                nodes.append(f"{index}号「{label}」{f'（{role}）' if role else ''}")
+        return "、".join(nodes) or "仅保留 3 到 6 个语义明确的模块，模块大小按重要性分级。"
+
+    def _format_relationships(self, raw_relationships: Any, raw_nodes: Any) -> str:
+        if not isinstance(raw_relationships, list) or not isinstance(raw_nodes, list):
+            return "只保留主链路与必要反馈箭头，避免复杂蜘蛛网连线。"
+        label_map = {
+            str(node.get("id", "")).strip(): self._short_text(node.get("label"), 8)
+            for node in raw_nodes
+            if isinstance(node, dict)
+        }
+        relationships: list[str] = []
+        for raw_relation in raw_relationships[:7]:
+            if not isinstance(raw_relation, dict):
+                continue
+            source = label_map.get(str(raw_relation.get("from", "")).strip(), "")
+            target = label_map.get(str(raw_relation.get("to", "")).strip(), "")
+            label = self._short_text(raw_relation.get("label"), 8) or "流转"
+            if source and target:
+                relationships.append(f"「{source}」经「{label}」指向「{target}」")
+        return "；".join(relationships) or "只保留主链路与必要反馈箭头，避免复杂蜘蛛网连线。"
+
+    def _format_reading_order(self, raw_order: Any, raw_nodes: Any) -> str:
+        if not isinstance(raw_order, list) or not isinstance(raw_nodes, list):
+            return "按主关系从左到右、从上到下或顺时针读取，不能让读者猜测起点。"
+        label_map = {
+            str(node.get("id", "")).strip(): self._short_text(node.get("label"), 8)
+            for node in raw_nodes
+            if isinstance(node, dict)
+        }
+        labels = [label_map.get(str(node_id).strip(), "") for node_id in raw_order]
+        labels = [label for label in labels if label]
+        if not labels:
+            return "按主关系从左到右、从上到下或顺时针读取，不能让读者猜测起点。"
+        return " → ".join(labels)
+
+    def _format_labels(self, raw_labels: Any) -> str:
+        if not isinstance(raw_labels, list):
+            return "仅使用节点中的短中文标签，不额外制造长标题。"
+        labels = [self._short_text(item, 8) for item in raw_labels[:8]]
+        labels = [label for label in labels if label]
+        return "、".join(labels) if labels else "仅使用节点中的短中文标签，不额外制造长标题。"
+
+    def _format_negative_constraints(self, raw_constraints: Any) -> str:
+        if not isinstance(raw_constraints, list):
+            return "不要伪文字、乱码、长英文、网址、仓库名或真实品牌标识。"
+        constraints = [self._compact_text(str(item), 80) for item in raw_constraints[:6]]
+        constraints = [item for item in constraints if item]
+        return "；".join(constraints) or "不要伪文字、乱码、长英文、网址、仓库名或真实品牌标识。"
+
+    def _sanitize_visual_text(self, text: str, repository_full_name: str, max_length: int) -> str:
+        """清理不适合进入图像提示词的 URL、仓库名和格式噪声。"""
 
         normalized = text or ""
         normalized = self._url_pattern.sub("", normalized)
         normalized = normalized.replace(repository_full_name, "该项目")
-        repository_parts = repository_full_name.split("/", 1)
-        if len(repository_parts) == 2:
-            owner, repo = repository_parts
-            normalized = normalized.replace(owner, "")
-            normalized = normalized.replace(repo, "")
+        for part in repository_full_name.split("/", 1):
+            if len(part) >= 3:
+                normalized = normalized.replace(part, "")
         normalized = self._repo_pattern.sub("该项目", normalized)
         normalized = normalized.replace("`", "").replace("*", "").replace("#", "")
         normalized = normalized.replace("<", "").replace(">", "")
-        normalized = self._compact_text(normalized, max_length=max_length)
-        return normalized.strip(" ，,。；;：:")
+        return self._compact_text(normalized, max_length=max_length).strip(" ，,。；;：:")
+
+    def _short_text(self, value: Any, max_length: int) -> str:
+        return self._compact_text(str(value or ""), max_length=max_length).strip(" ，,。；;：:")
 
     def _compact_text(self, text: str, max_length: int) -> str:
-        """压缩空白并截断文本，避免超长 prompt 稀释关键视觉约束。"""
-
         compacted = self._whitespace_pattern.sub(" ", text.replace("\r", " ").replace("\n", " ")).strip()
         return self._limit_text(compacted, max_length=max_length)
 
     def _limit_text(self, text: str, max_length: int) -> str:
-        """按配置长度截断 prompt，截断时尽量保留完整语义。"""
+        """按配置长度截断提示词，避免运行时附加规则稀释核心约束。"""
 
         normalized = text.strip()
         if len(normalized) <= max_length:
             return normalized
-        return normalized[: max_length - 1].rstrip(" ，,；;。") + "。"
+        return normalized[: max(1, max_length - 1)].rstrip(" ，,；;。") + "。"

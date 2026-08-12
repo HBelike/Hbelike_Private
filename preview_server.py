@@ -11,6 +11,7 @@ from src.web.api import create_app
 # 无论从终端、IDE 还是后台进程启动，都以该脚本所在目录作为项目根目录。
 # 不能依赖当前工作目录，否则本地私有配置（例如 .env.career-assistant）可能无法被读取。
 PROJECT_ROOT = Path(__file__).resolve().parent
+# 本地私有配置由求职助手路由在应用启动时读取；开发热重载也会监听该环境文件。
 app = create_app(project_root=PROJECT_ROOT)
 
 
@@ -34,8 +35,10 @@ if __name__ == "__main__":
         host="127.0.0.1",
         port=port,
         reload=reload_enabled,
-        reload_dirs=[str(PROJECT_ROOT / "src"), str(PROJECT_ROOT / "config")]
+        # 监听项目根目录，才能捕获 .env.career-assistant；include 仍限定为源码、
+        # 配置和该私有环境文件，不会因数据库或前端构建产物触发重启。
+        reload_dirs=[str(PROJECT_ROOT)] if reload_enabled else None,
+        reload_includes=["*.py", "*.yaml", ".env.career-assistant"]
         if reload_enabled
         else None,
-        reload_includes=["*.py", "*.yaml"] if reload_enabled else None,
     )

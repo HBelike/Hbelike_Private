@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import json
 import math
-from datetime import date
-from typing import Iterable
+from datetime import date, datetime
+from typing import Iterable, Mapping
 from uuid import UUID, uuid4
 
 from sqlalchemy import RowMapping, text
@@ -36,6 +36,8 @@ from src.career_assistant.persistence.database import CareerDatabase
 
 class InterviewLibraryRepository:
     """管理公司树、面经正文、切片和入库任务的事务边界。"""
+
+    _MAX_COLLECTION_METADATA_BYTES = 64 * 1024
 
     def __init__(self, database: CareerDatabase) -> None:
         self._database = database
@@ -629,12 +631,19 @@ class InterviewLibraryRepository:
         requested_limit: int,
         connector_kind: CollectionConnectorKind,
         policy_decision: str,
+        metadata_json: Mapping[str, object] | None = None,
     ) -> InterviewCollectionJobRecord:
         """创建资料发现任务，不执行外部抓取也不保存任何第三方登录凭证。"""
 
         normalized_platform = self._normalize_text(platform_key, "平台标识", 50).lower()
-        normalized_keyword = self._normalize_text(keyword, "检索关键词", 180)
+        # 关键词任务通常很短，但用户主动粘贴的公开 URL 最长可达 2000 字符；
+        # 该列为 PostgreSQL TEXT，不能因为复用同一任务表而截断可访问的来源链接。
+        normalized_keyword = self._normalize_text(keyword, "检索关键词或来源链接", 2_000)
         normalized_policy = self._normalize_text(policy_decision, "采集策略说明", 500)
+        normalized_metadata = self._normalize_metadata_json(
+            metadata_json,
+            "采集任务元数据",
+        ) or {}
         if not 1 <= requested_limit <= 50:
             raise ValueError("候选资料数量必须在 1 到 50 之间")
 
@@ -644,14 +653,15 @@ class InterviewLibraryRepository:
                     """
                     INSERT INTO career_assistant.interview_collection_jobs (
                         id, organization_id, platform_key, keyword, requested_limit,
-                        connector_kind, policy_decision
+                        connector_kind, policy_decision, metadata_json
                     ) VALUES (
                         :id, :organization_id, :platform_key, :keyword, :requested_limit,
-                        :connector_kind, :policy_decision
+                        :connector_kind, :policy_decision, CAST(:metadata_json AS jsonb)
                     )
                     RETURNING id, organization_id, platform_key, keyword, requested_limit,
                               connector_kind, status, policy_decision, error_code,
-                              error_message, started_at, completed_at, created_at, updated_at
+                              error_message, metadata_json, started_at, completed_at,
+                              created_at, updated_at
                     """,
                 ),
                 {
@@ -662,6 +672,7 @@ class InterviewLibraryRepository:
                     "requested_limit": requested_limit,
                     "connector_kind": connector_kind.value,
                     "policy_decision": normalized_policy,
+                    "metadata_json": self._serialize_metadata_json(normalized_metadata),
                 },
             ).mappings().one()
         return self._to_collection_job(row)
@@ -679,9 +690,46 @@ class InterviewLibraryRepository:
                     """
                     SELECT id, organization_id, platform_key, keyword, requested_limit,
                            connector_kind, status, policy_decision, error_code,
-                           error_message, started_at, completed_at, created_at, updated_at
+                           error_message, metadata_json, started_at, completed_at,
+                           created_at, updated_at
                     FROM career_assistant.interview_collection_jobs
                     WHERE id = :job_id AND organization_id = :organization_id
+                    """,
+                ),
+                {"job_id": job_id, "organization_id": organization_id},
+            ).mappings().one_or_none()
+        return self._to_collection_job(row) if row is not None else None
+
+    def claim_collection_job(
+        self,
+        organization_id: UUID,
+        job_id: UUID,
+    ) -> InterviewCollectionJobRecord | None:
+        """原子抢占一个排队中的采集任务，避免同一任务被多个后台调用重复执行。
+
+        FastAPI ``BackgroundTasks`` 可能因为重试、重复请求或多 worker 部署而重复触发同一个
+        ``job_id``。仅允许从 ``queued`` 进入 ``running`` 的调用取得任务；已经被抢占或已终态
+        的任务返回 ``None``，调用方应直接退出而不是重新抓取、重新 OCR 或重复入库。
+        """
+
+        with self._database.transaction() as connection:
+            row = connection.execute(
+                text(
+                    """
+                    UPDATE career_assistant.interview_collection_jobs
+                    SET status = 'running',
+                        error_code = NULL,
+                        error_message = NULL,
+                        started_at = COALESCE(started_at, NOW()),
+                        completed_at = NULL,
+                        updated_at = NOW()
+                    WHERE id = :job_id
+                      AND organization_id = :organization_id
+                      AND status = 'queued'
+                    RETURNING id, organization_id, platform_key, keyword, requested_limit,
+                              connector_kind, status, policy_decision, error_code,
+                              error_message, metadata_json, started_at, completed_at,
+                              created_at, updated_at
                     """,
                 ),
                 {"job_id": job_id, "organization_id": organization_id},
@@ -696,11 +744,17 @@ class InterviewLibraryRepository:
         status: CollectionJobStatus,
         error_code: str | None = None,
         error_message: str | None = None,
+        metadata_json: Mapping[str, object] | None = None,
+        merge_metadata: bool = True,
     ) -> InterviewCollectionJobRecord:
         """原子更新采集任务状态，并在结束状态记录完成时间。"""
 
         normalized_code = self._normalize_optional_text(error_code, "错误代码", 80)
         normalized_message = self._normalize_optional_text(error_message, "错误说明", 1_000)
+        normalized_metadata = self._normalize_metadata_json(
+            metadata_json,
+            "采集任务元数据",
+        )
         terminal = status in {
             CollectionJobStatus.SUCCEEDED,
             CollectionJobStatus.FAILED,
@@ -714,6 +768,11 @@ class InterviewLibraryRepository:
                     SET status = :status,
                         error_code = :error_code,
                         error_message = :error_message,
+                        metadata_json = CASE
+                            WHEN CAST(:metadata_json AS text) IS NULL THEN metadata_json
+                            WHEN :merge_metadata THEN metadata_json || CAST(:metadata_json AS jsonb)
+                            ELSE CAST(:metadata_json AS jsonb)
+                        END,
                         started_at = CASE
                             WHEN :status = 'running' AND started_at IS NULL THEN NOW()
                             ELSE started_at
@@ -723,7 +782,8 @@ class InterviewLibraryRepository:
                     WHERE id = :job_id AND organization_id = :organization_id
                     RETURNING id, organization_id, platform_key, keyword, requested_limit,
                               connector_kind, status, policy_decision, error_code,
-                              error_message, started_at, completed_at, created_at, updated_at
+                              error_message, metadata_json, started_at, completed_at,
+                              created_at, updated_at
                     """,
                 ),
                 {
@@ -732,6 +792,8 @@ class InterviewLibraryRepository:
                     "status": status.value,
                     "error_code": normalized_code,
                     "error_message": normalized_message,
+                    "metadata_json": self._serialize_metadata_json(normalized_metadata),
+                    "merge_metadata": merge_metadata,
                     "terminal": terminal,
                 },
             ).mappings().one_or_none()
@@ -749,11 +811,13 @@ class InterviewLibraryRepository:
         source_platform: str,
         title: str | None = None,
         snippet: str | None = None,
+        published_at: datetime | None = None,
         extracted_markdown: str | None = None,
         content_hash: str | None = None,
         status: CollectionCandidateStatus = CollectionCandidateStatus.DISCOVERED,
         error_code: str | None = None,
         error_message: str | None = None,
+        metadata_json: Mapping[str, object] | None = None,
     ) -> InterviewCollectionCandidateRecord:
         """保存候选的必要文本与元数据，拒绝写入原始 HTML 或会话凭证。"""
 
@@ -764,12 +828,18 @@ class InterviewLibraryRepository:
         normalized_platform = self._normalize_text(source_platform, "来源平台", 80)
         normalized_title = self._normalize_optional_text(title, "候选标题", 300)
         normalized_snippet = self._normalize_optional_text(snippet, "候选摘要", 4_000)
+        if published_at is not None and not isinstance(published_at, datetime):
+            raise ValueError("候选发布时间必须是 datetime 或 None")
         normalized_markdown = self._normalize_optional_markdown(
             extracted_markdown,
             "候选正文",
             300_000,
         )
         normalized_hash = self._normalize_hash(content_hash) if content_hash else None
+        normalized_metadata = self._normalize_metadata_json(
+            metadata_json,
+            "候选资料元数据",
+        ) or {}
 
         with self._database.transaction() as connection:
             row = connection.execute(
@@ -777,12 +847,13 @@ class InterviewLibraryRepository:
                     """
                     INSERT INTO career_assistant.interview_collection_candidates (
                         id, collection_job_id, source_url, canonical_url, source_platform,
-                        title, snippet, extracted_markdown, content_hash, status,
-                        error_code, error_message
+                        title, snippet, published_at, extracted_markdown, content_hash, status,
+                        error_code, error_message, metadata_json
                     )
                     SELECT :id, :collection_job_id, :source_url, :canonical_url,
-                           :source_platform, :title, :snippet, :extracted_markdown,
-                           :content_hash, :status, :error_code, :error_message
+                           :source_platform, :title, :snippet, :published_at, :extracted_markdown,
+                           :content_hash, :status, :error_code, :error_message,
+                           CAST(:metadata_json AS jsonb)
                     WHERE EXISTS (
                         SELECT 1 FROM career_assistant.interview_collection_jobs
                         WHERE id = :collection_job_id AND organization_id = :organization_id
@@ -792,6 +863,10 @@ class InterviewLibraryRepository:
                         source_platform = EXCLUDED.source_platform,
                         title = COALESCE(EXCLUDED.title, interview_collection_candidates.title),
                         snippet = COALESCE(EXCLUDED.snippet, interview_collection_candidates.snippet),
+                        published_at = COALESCE(
+                            EXCLUDED.published_at,
+                            interview_collection_candidates.published_at
+                        ),
                         extracted_markdown = COALESCE(
                             EXCLUDED.extracted_markdown,
                             interview_collection_candidates.extracted_markdown
@@ -803,10 +878,16 @@ class InterviewLibraryRepository:
                         status = EXCLUDED.status,
                         error_code = EXCLUDED.error_code,
                         error_message = EXCLUDED.error_message,
+                        metadata_json = CASE
+                            WHEN EXCLUDED.metadata_json = '{}'::jsonb
+                                THEN interview_collection_candidates.metadata_json
+                            ELSE interview_collection_candidates.metadata_json || EXCLUDED.metadata_json
+                        END,
                         updated_at = NOW()
                     RETURNING id, collection_job_id, source_url, canonical_url, source_platform,
                               title, snippet, published_at, extracted_markdown, content_hash,
-                              status, error_code, error_message, created_at, updated_at
+                              status, error_code, error_message, metadata_json,
+                              created_at, updated_at
                     """,
                 ),
                 {
@@ -818,11 +899,13 @@ class InterviewLibraryRepository:
                     "source_platform": normalized_platform,
                     "title": normalized_title,
                     "snippet": normalized_snippet,
+                    "published_at": published_at,
                     "extracted_markdown": normalized_markdown,
                     "content_hash": normalized_hash,
                     "status": status.value,
                     "error_code": self._normalize_optional_text(error_code, "错误代码", 80),
                     "error_message": self._normalize_optional_text(error_message, "错误说明", 1_000),
+                    "metadata_json": self._serialize_metadata_json(normalized_metadata),
                 },
             ).mappings().one_or_none()
         if row is None:
@@ -845,7 +928,7 @@ class InterviewLibraryRepository:
                            candidate.snippet, candidate.published_at,
                            candidate.extracted_markdown, candidate.content_hash,
                            candidate.status, candidate.error_code, candidate.error_message,
-                           candidate.created_at, candidate.updated_at
+                           candidate.metadata_json, candidate.created_at, candidate.updated_at
                     FROM career_assistant.interview_collection_candidates AS candidate
                     INNER JOIN career_assistant.interview_collection_jobs AS job
                         ON job.id = candidate.collection_job_id
@@ -877,7 +960,7 @@ class InterviewLibraryRepository:
                            candidate.snippet, candidate.published_at,
                            candidate.extracted_markdown, candidate.content_hash,
                            candidate.status, candidate.error_code, candidate.error_message,
-                           candidate.created_at, candidate.updated_at
+                           candidate.metadata_json, candidate.created_at, candidate.updated_at
                     FROM career_assistant.interview_collection_candidates AS candidate
                     INNER JOIN career_assistant.interview_collection_jobs AS job
                         ON job.id = candidate.collection_job_id
@@ -889,21 +972,75 @@ class InterviewLibraryRepository:
             ).mappings().one_or_none()
         return self._to_collection_candidate(row) if row is not None else None
 
-    def set_collection_candidate_status(
+    def update_collection_candidate(
         self,
         organization_id: UUID,
         candidate_id: UUID,
         *,
-        status: CollectionCandidateStatus,
+        title: str | None = None,
+        snippet: str | None = None,
+        published_at: datetime | None = None,
+        extracted_markdown: str | None = None,
+        content_hash: str | None = None,
+        status: CollectionCandidateStatus | None = None,
+        error_code: str | None = None,
+        error_message: str | None = None,
+        clear_errors: bool = False,
+        metadata_json: Mapping[str, object] | None = None,
+        merge_metadata: bool = True,
     ) -> InterviewCollectionCandidateRecord:
-        """将候选标记为已选择或已入库，防止前端直接篡改其他组织资料。"""
+        """更新候选的提取结果和轻量元数据，空值默认不覆盖既有内容。
+
+        远程图文解析会分多步补齐标题、正文、发布时间、哈希和提取元数据；这些
+        字段必须在同一组织边界内原子更新。需要清理上一次失败信息时，调用方应
+        显式传入 ``clear_errors=True``，避免把遗漏参数误当作清空动作。
+        """
+
+        normalized_title = self._normalize_optional_text(title, "候选标题", 300)
+        normalized_snippet = self._normalize_optional_text(snippet, "候选摘要", 4_000)
+        if published_at is not None and not isinstance(published_at, datetime):
+            raise ValueError("候选发布时间必须是 datetime 或 None")
+        normalized_markdown = self._normalize_optional_markdown(
+            extracted_markdown,
+            "候选正文",
+            300_000,
+        )
+        normalized_hash = self._normalize_hash(content_hash) if content_hash else None
+        normalized_code = self._normalize_optional_text(error_code, "错误代码", 80)
+        normalized_message = self._normalize_optional_text(error_message, "错误说明", 1_000)
+        normalized_metadata = self._normalize_metadata_json(
+            metadata_json,
+            "候选资料元数据",
+        )
 
         with self._database.transaction() as connection:
             row = connection.execute(
                 text(
                     """
                     UPDATE career_assistant.interview_collection_candidates AS candidate
-                    SET status = :status, updated_at = NOW()
+                    SET title = COALESCE(:title, candidate.title),
+                        snippet = COALESCE(:snippet, candidate.snippet),
+                        published_at = COALESCE(:published_at, candidate.published_at),
+                        extracted_markdown = COALESCE(
+                            :extracted_markdown,
+                            candidate.extracted_markdown
+                        ),
+                        content_hash = COALESCE(:content_hash, candidate.content_hash),
+                        status = COALESCE(:status, candidate.status),
+                        error_code = CASE
+                            WHEN :clear_errors THEN NULL
+                            ELSE COALESCE(:error_code, candidate.error_code)
+                        END,
+                        error_message = CASE
+                            WHEN :clear_errors THEN NULL
+                            ELSE COALESCE(:error_message, candidate.error_message)
+                        END,
+                        metadata_json = CASE
+                            WHEN CAST(:metadata_json AS text) IS NULL THEN candidate.metadata_json
+                            WHEN :merge_metadata THEN candidate.metadata_json || CAST(:metadata_json AS jsonb)
+                            ELSE CAST(:metadata_json AS jsonb)
+                        END,
+                        updated_at = NOW()
                     FROM career_assistant.interview_collection_jobs AS job
                     WHERE candidate.id = :candidate_id
                       AND job.id = candidate.collection_job_id
@@ -913,18 +1050,66 @@ class InterviewLibraryRepository:
                               candidate.title, candidate.snippet, candidate.published_at,
                               candidate.extracted_markdown, candidate.content_hash,
                               candidate.status, candidate.error_code, candidate.error_message,
-                              candidate.created_at, candidate.updated_at
+                              candidate.metadata_json, candidate.created_at, candidate.updated_at
                     """,
                 ),
                 {
                     "candidate_id": candidate_id,
                     "organization_id": organization_id,
-                    "status": status.value,
+                    "title": normalized_title,
+                    "snippet": normalized_snippet,
+                    "published_at": published_at,
+                    "extracted_markdown": normalized_markdown,
+                    "content_hash": normalized_hash,
+                    "status": status.value if status is not None else None,
+                    "error_code": normalized_code,
+                    "error_message": normalized_message,
+                    "clear_errors": clear_errors,
+                    "metadata_json": self._serialize_metadata_json(normalized_metadata),
+                    "merge_metadata": merge_metadata,
                 },
             ).mappings().one_or_none()
         if row is None:
             raise LookupError("候选资料不存在或无访问权限")
         return self._to_collection_candidate(row)
+
+    def set_collection_candidate_status(
+        self,
+        organization_id: UUID,
+        candidate_id: UUID,
+        *,
+        status: CollectionCandidateStatus,
+        metadata_json: Mapping[str, object] | None = None,
+        merge_metadata: bool = True,
+    ) -> InterviewCollectionCandidateRecord:
+        """标记候选状态，并可追加该阶段的轻量处理元数据。"""
+
+        return self.update_collection_candidate(
+            organization_id,
+            candidate_id,
+            status=status,
+            metadata_json=metadata_json,
+            merge_metadata=merge_metadata,
+        )
+
+    def update_collection_candidate_status(
+        self,
+        organization_id: UUID,
+        candidate_id: UUID,
+        *,
+        status: CollectionCandidateStatus,
+        metadata_json: Mapping[str, object] | None = None,
+        merge_metadata: bool = True,
+    ) -> InterviewCollectionCandidateRecord:
+        """新采集链路使用的状态更新别名，保持旧 ``set`` 接口兼容。"""
+
+        return self.set_collection_candidate_status(
+            organization_id,
+            candidate_id,
+            status=status,
+            metadata_json=metadata_json,
+            merge_metadata=merge_metadata,
+        )
 
     def complete_ingestion_job(
         self,
@@ -1184,6 +1369,59 @@ class InterviewLibraryRepository:
             raise ValueError("来源链接必须是长度不超过 2000 的 http 或 https 地址")
         return normalized
 
+    @classmethod
+    def _normalize_metadata_json(
+        cls,
+        value: Mapping[str, object] | None,
+        field_name: str,
+    ) -> dict[str, object] | None:
+        """校验并深拷贝 JSON 元数据，阻断不可序列化对象进入 JSONB。"""
+
+        if value is None:
+            return None
+        if not isinstance(value, Mapping):
+            raise ValueError(f"{field_name}必须是 JSON 对象")
+        try:
+            serialized = json.dumps(
+                dict(value),
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            normalized = json.loads(serialized)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{field_name}必须只包含 JSON 可序列化的数据") from exc
+        if not isinstance(normalized, dict):
+            raise ValueError(f"{field_name}必须是 JSON 对象")
+        if len(serialized.encode("utf-8")) > cls._MAX_COLLECTION_METADATA_BYTES:
+            raise ValueError(
+                f"{field_name}不能超过 {cls._MAX_COLLECTION_METADATA_BYTES} 字节",
+            )
+        return normalized
+
+    @staticmethod
+    def _serialize_metadata_json(value: Mapping[str, object] | None) -> str | None:
+        """为 PostgreSQL JSONB 参数生成稳定的 JSON 字符串。"""
+
+        if value is None:
+            return None
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+    @staticmethod
+    def _read_metadata_json(value: object) -> dict[str, object]:
+        """兼容 PostgreSQL 驱动返回 dict 或 JSON 文本的两种形态。"""
+
+        if value is None:
+            return {}
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except ValueError as exc:
+                raise ValueError("采集元数据不是有效 JSON") from exc
+        if not isinstance(value, Mapping):
+            raise ValueError("采集元数据必须是 JSON 对象")
+        return dict(value)
+
     @staticmethod
     def _normalize_tags(values: Iterable[str], *, maximum_items: int, maximum_length: int) -> list[str]:
         result: list[str] = []
@@ -1282,6 +1520,9 @@ class InterviewLibraryRepository:
             completed_at=row["completed_at"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
+            metadata_json=InterviewLibraryRepository._read_metadata_json(
+                row.get("metadata_json"),
+            ),
         )
 
     @staticmethod
@@ -1304,4 +1545,7 @@ class InterviewLibraryRepository:
             error_message=row["error_message"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
+            metadata_json=InterviewLibraryRepository._read_metadata_json(
+                row.get("metadata_json"),
+            ),
         )

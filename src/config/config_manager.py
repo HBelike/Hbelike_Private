@@ -206,7 +206,7 @@ class AppConfig:
 
     @property
     def image_size(self) -> str:
-        return str(self.raw["image"].get("size", "2048x2048"))
+        return str(self.raw["image"].get("size", "2048x1152"))
 
     @property
     def image_n(self) -> int:
@@ -616,14 +616,16 @@ class AppConfig:
 
     @property
     def video_clip_prompt_max_length(self) -> int:
-        return int(self._video_clip_prompt_raw().get("max_length", 1800))
+        return int(self._video_clip_prompt_raw().get("max_length", 2400))
 
     @property
     def video_clip_prompt_visual_system(self) -> str:
         return str(
             self._video_clip_prompt_raw().get(
                 "visual_system",
-                "所有 clip 必须保持同一视觉系统：深色科技背景、蓝绿色发光线条、PPT 动画式架构图、清晰模块节点、平滑推镜。",
+                "所有 clip 必须保持同一套中文技术教学视觉系统：浅纸本或低饱和纹理背景、"
+                "清晰模块、箭头和留白表达工程逻辑；各项目按其视觉合同使用不同的克制色板，"
+                "不统一回退为蓝绿色霓虹或深色海报。",
             )
         )
 
@@ -669,7 +671,8 @@ class AppConfig:
         return str(
             self._video_clip_prompt_raw().get(
                 "negative_prompt",
-                "避免随机抽象画面、错误 UI、乱码文字、错误项目名、夸张电影镜头、跳切感很重的 slideshow。",
+                "避免随机抽象画面、错误 UI、乱码或伪文字、仓库地址、真实 Logo、代码截图、"
+                "满屏蓝绿色霓虹、夸张电影镜头和跳切感很重的 slideshow。",
             )
         )
 

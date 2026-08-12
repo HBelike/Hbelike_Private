@@ -346,11 +346,31 @@ def create_app(project_root: Path | None = None) -> FastAPI:
 
         return preview_service.build_latest_preview()
 
-    @app.get("/api/media-assets")
-    def media_asset_library(limit: int = 300) -> dict[str, Any]:
-        """读取工作台跨内容的媒体资源库和待生成视频状态。"""
+    @app.get("/api/execution-history")
+    def execution_history(limit: int = 50) -> dict[str, Any]:
+        """读取按 content_id 归档的执行历史索引。"""
 
-        return preview_service.build_media_library(limit=limit)
+        return preview_service.build_execution_history(limit=limit)
+
+    @app.get("/api/execution-history/{content_id}")
+    def execution_history_detail(content_id: int) -> dict[str, Any]:
+        """读取指定 content_id 对应的推文与专属资源库。"""
+
+        if content_id <= 0:
+            raise HTTPException(status_code=400, detail="content_id 必须大于 0")
+
+        payload = preview_service.build_content_preview(content_id=content_id)
+        if payload is None:
+            raise HTTPException(status_code=404, detail=f"执行历史不存在：content_id={content_id}")
+        return payload
+
+    @app.get("/api/media-assets")
+    def media_asset_library(limit: int = 300, content_id: int | None = None) -> dict[str, Any]:
+        """读取媒体资源库；传 content_id 时仅返回该执行批次的素材。"""
+
+        if content_id is not None and content_id <= 0:
+            raise HTTPException(status_code=400, detail="content_id 必须大于 0")
+        return preview_service.build_media_library(limit=limit, content_id=content_id)
 
     @app.get("/api/tasks/recent")
     def recent_tasks(limit: int = 20) -> dict[str, Any]:

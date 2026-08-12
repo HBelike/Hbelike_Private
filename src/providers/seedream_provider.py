@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -111,13 +112,63 @@ class SeedreamProvider:
         raise SeedreamApiError("Seedream 响应既没有 url，也没有 b64_json")
 
     def _download_image(self, image_url: str, output_path: Path) -> None:
-        """下载 Seedream 返回的图片 URL。"""
+        """下载 Seedream 返回的签名图片 URL，并处理对象存储的瞬时 TLS 断连。"""
+
+        attempts = 3
+        temporary_path = output_path.with_name(f"{output_path.name}.part")
+        last_error: requests.RequestException | OSError | None = None
+
+        for attempt in range(1, attempts + 1):
+            try:
+                # 不复用可能已被对象存储关闭的连接，避免半文件被误判为成功结果。
+                with requests.get(
+                    image_url,
+                    headers={"Connection": "close"},
+                    stream=True,
+                    timeout=(15, self.config.image_timeout_seconds),
+                ) as response:
+                    if response.status_code >= 400:
+                        raise SeedreamApiError(f"Seedream 图片下载返回错误状态码 {response.status_code}")
+                    with temporary_path.open("wb") as handle:
+                        for chunk in response.iter_content(chunk_size=1024 * 256):
+                            if chunk:
+                                handle.write(chunk)
+
+                if not temporary_path.exists() or temporary_path.stat().st_size <= 0:
+                    raise OSError("图片下载结果为空")
+                temporary_path.replace(output_path)
+                return
+            except SeedreamApiError:
+                self._remove_partial_file(temporary_path)
+                raise
+            except (requests.RequestException, OSError) as exc:
+                last_error = exc
+                self._remove_partial_file(temporary_path)
+                if attempt < attempts:
+                    time.sleep(0.8 * attempt)
+
+        detail = self._download_failure_detail(last_error)
+        raise SeedreamApiError(f"Seedream 图片下载失败，已重试 {attempts} 次：{detail}") from last_error
+
+    @staticmethod
+    def _remove_partial_file(path: Path) -> None:
+        """删除失败下载留下的临时文件。"""
+
         try:
-            response = requests.get(image_url, timeout=self.config.image_timeout_seconds)
-        except requests.RequestException as exc:
-            raise SeedreamApiError(f"Seedream 图片下载失败：{exc}") from exc
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
-        if response.status_code >= 400:
-            raise SeedreamApiError(f"Seedream 图片下载返回错误状态码 {response.status_code}")
+    @staticmethod
+    def _download_failure_detail(error: requests.RequestException | OSError | None) -> str:
+        """转换网络错误，不将对象存储的签名 URL 写入任务错误信息。"""
 
-        output_path.write_bytes(response.content)
+        if error is None:
+            return "下载连接未返回有效结果"
+        if isinstance(error, requests.exceptions.SSLError):
+            return "TLS 连接被远端中断，请稍后重试"
+        if isinstance(error, requests.exceptions.Timeout):
+            return "下载超时，请稍后重试"
+        if isinstance(error, requests.exceptions.ConnectionError):
+            return "对象存储连接失败，请稍后重试"
+        return error.__class__.__name__

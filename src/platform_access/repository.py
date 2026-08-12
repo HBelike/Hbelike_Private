@@ -617,28 +617,34 @@ class PlatformAccessRepository:
 
         if status not in {"queued", "running", "succeeded", "failed", "cancelled"}:
             raise ValueError("不支持的流水线状态")
+
+        # PostgreSQL 无法推断同一个绑定参数同时用于 ``IS NULL`` 和
+        # ``CAST(... AS JSONB)`` 时的类型。将“是否合并元数据”的分支放到
+        # Python 中，既避免参数类型歧义，也保留未传 metadata 时原值不变的语义。
+        metadata_expression = "metadata_json"
+        parameters: dict[str, object] = {
+            "id": request_id,
+            "status": status,
+            "error_message": error_message,
+        }
+        if metadata is not None:
+            metadata_expression = "metadata_json || CAST(:metadata_json AS JSONB)"
+            parameters["metadata_json"] = json.dumps(metadata, ensure_ascii=False)
+
         with self._database.transaction() as connection:
             row = connection.execute(
                 text(
-                    """
+                    f"""
                     UPDATE career_assistant.pipeline_execution_requests
                     SET status = :status,
                         error_message = :error_message,
-                        metadata_json = CASE
-                            WHEN :metadata_json IS NULL THEN metadata_json
-                            ELSE metadata_json || CAST(:metadata_json AS JSONB)
-                        END,
+                        metadata_json = {metadata_expression},
                         updated_at = NOW()
                     WHERE id = :id
                     RETURNING id, status, error_message, metadata_json, created_at, updated_at
                     """,
                 ),
-                {
-                    "id": request_id,
-                    "status": status,
-                    "error_message": error_message,
-                    "metadata_json": None if metadata is None else json.dumps(metadata, ensure_ascii=False),
-                },
+                parameters,
             ).mappings().one_or_none()
         if row is None:
             raise ValueError("未找到流水线执行请求")

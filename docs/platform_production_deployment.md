@@ -40,8 +40,8 @@ pipeline-scheduler（唯一副本）
 2. 安装 Docker Engine 与 Docker Compose v2；不需要在服务器安装 Python、Node.js 或 PostgreSQL。
 3. 一个已解析到服务器固定公网 IPv4 的域名；安全组和 UFW 仅放行 22（限管理 IP）、80、443。
 4. 私有仓库使用只读 Deploy Key 拉取；服务器不使用个人 GitHub Token。真实 `.env.production` 在服务器本地创建，权限为 `600`。
-5. 为 `CAREER_CREDENTIAL_MASTER_KEY` 生成独立的 Fernet URL-safe Base64 密钥；它不能复用数据库密码、模型 API Key 或登录验证码密钥，也不能提交到 Git。
-5. 微信公众平台的 API IP 白名单加入该服务器的固定出口 IP；当前项目仅主动调用微信接口，不需要配置公众号入站消息回调。
+5. `application_data` Docker 命名卷必须保留：未显式设置 `CAREER_CREDENTIAL_MASTER_KEY` 时，API 会在此卷自动创建并复用模型凭据主密钥。
+6. 微信公众平台的 API IP 白名单加入该服务器的固定出口 IP；当前项目仅主动调用微信接口，不需要配置公众号入站消息回调。
 
 ## 首次部署
 
@@ -50,9 +50,8 @@ git clone git@github.com:HBelike/Hbelike_Private.git /opt/wechat-agent-platform
 cd /opt/wechat-agent-platform
 cp .env.production.example .env.production
 chmod 600 .env.production
-# 将下面命令生成的单行值填入 CAREER_CREDENTIAL_MASTER_KEY；不要输出到终端历史或日志。
-openssl rand -base64 32 | tr '+/' '-_'
 # 编辑 .env.production，填写域名、数据库密码、账号邮件服务、微信与模型凭据。
+# CAREER_CREDENTIAL_MASTER_KEY 可留空，API 首次启动会在 application_data 卷自动创建。
 docker compose --env-file .env.production -f docker-compose.production.yml config --quiet
 docker compose --env-file .env.production -f docker-compose.production.yml up -d --build
 docker compose --env-file .env.production -f docker-compose.production.yml ps

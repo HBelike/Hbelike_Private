@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from enum import StrEnum
+from typing import Mapping
 from uuid import UUID
 
 
@@ -205,6 +206,9 @@ class InterviewCollectionJobRecord:
     completed_at: datetime | None
     created_at: datetime
     updated_at: datetime
+    # 采集批次的轻量可观测信息，例如入口 URL、页码和发现数量。
+    # 仅保存 JSON 可序列化的派生信息，绝不保存 Cookie、原始 HTML 或附件。
+    metadata_json: Mapping[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -226,3 +230,6 @@ class InterviewCollectionCandidateRecord:
     error_message: str | None
     created_at: datetime
     updated_at: datetime
+    # 单条候选资料的派生信息，例如图文页数量、OCR 结果摘要和提取置信度。
+    # 原始图片文件由临时存储负责清理，不能写入此字段。
+    metadata_json: Mapping[str, object] = field(default_factory=dict)

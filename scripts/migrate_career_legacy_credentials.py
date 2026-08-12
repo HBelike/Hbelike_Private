@@ -1,7 +1,8 @@
 """将求职助手的历史明文模型 API Key 转为 Fernet 密文。
 
-运行前必须已完成 Alembic ``20260810_08`` 迁移，并在服务端环境设置
-``CAREER_CREDENTIAL_MASTER_KEY``。本脚本不输出、导出或备份任何 Key 原文。
+运行前必须已完成 Alembic ``20260810_08`` 迁移。本脚本会复用 API 启动时自动
+创建的持久化主密钥；若部署者显式配置 ``CAREER_CREDENTIAL_MASTER_KEY``，则仍
+优先使用该值。本脚本不输出、导出或备份任何 Key 原文。
 """
 
 from __future__ import annotations
@@ -21,11 +22,20 @@ if str(PROJECT_ROOT) not in sys.path:
 load_dotenv(PROJECT_ROOT / ".env.career-assistant", override=False)
 
 from src.career_assistant.persistence import CareerDatabase, CareerModelProfileRepository
-from src.career_assistant.persistence.credential_cipher import CredentialCipherError
+from src.career_assistant.persistence.credential_cipher import (
+    CredentialCipherError,
+    ensure_credential_master_key,
+)
 
 
 def main() -> int:
     """执行一次幂等旧明文迁移，并仅报告不含敏感信息的统计结果。"""
+
+    try:
+        ensure_credential_master_key(PROJECT_ROOT)
+    except CredentialCipherError as exc:
+        print(f"凭据迁移未执行：{exc}", file=sys.stderr)
+        return 2
 
     database_url = os.getenv("CAREER_DATABASE_URL", "").strip()
     if not database_url:

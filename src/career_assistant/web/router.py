@@ -16,7 +16,17 @@ from threading import BoundedSemaphore, Event, Lock, Thread
 from time import monotonic
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, FastAPI, File, Form, HTTPException, Request, UploadFile, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    Request,
+    UploadFile,
+    status,
+)
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import SQLAlchemyError
@@ -88,6 +98,10 @@ from src.career_assistant.persistence.conversation_repository import (
     DEFAULT_ACTOR_ID,
     DEFAULT_ORGANIZATION_ID,
 )
+from src.career_assistant.persistence.credential_cipher import (
+    CredentialCipherError,
+    ensure_credential_master_key,
+)
 from src.career_assistant.settings import (
     load_attachment_processing_settings,
     load_career_runtime_settings,
@@ -149,6 +163,7 @@ class CareerAssistantServices:
     def close(self) -> None:
         """在应用关闭时释放 HTTP 与 PostgreSQL 连接池。"""
 
+        self.interview_collection_service.close()
         self.model_connection_client.close()
         self.interview_retrieval_service.close()
         if self.document_understanding_client is not None:
@@ -248,6 +263,16 @@ class CollectInterviewUrlRequest(BaseModel):
     source_url: str = Field(min_length=8, max_length=2_000)
 
 
+class CreateXiaohongshuImportRequest(BaseModel):
+    """创建一个由用户主动提交链接触发的小红书公开面经导入任务。"""
+
+    source_url: str = Field(min_length=8, max_length=2_000)
+    requested_limit: int = Field(default=20, ge=1, le=50)
+    include_images: bool = True
+    # 小红书候选必须先经过内容分析和人工确认，默认不自动写入面经库。
+    auto_import: bool = False
+
+
 class ImportInterviewCollectionCandidateRequest(BaseModel):
     """将已选择的候选正文写入面经库，并触发既有 RAG 建索引。"""
 
@@ -256,6 +281,7 @@ class ImportInterviewCollectionCandidateRequest(BaseModel):
     interview_date: date | None = None
     summary_text: str | None = Field(default=None, max_length=12_000)
     tags: list[str] = Field(default_factory=list, max_length=30)
+    markdown_content: str | None = Field(default=None, min_length=1, max_length=300_000)
 
 
 def install_career_assistant_api(app: FastAPI, project_root: Path) -> None:
@@ -308,6 +334,14 @@ def get_request_actor() -> CareerRequestActor:
 def get_career_services(request: Request) -> CareerAssistantServices:
     """懒加载求职助手服务；连接配置缺失时返回 503，不干扰旧接口。"""
 
+    try:
+        _load_career_environment(request.app.state.career_assistant_project_root)
+    except (CredentialCipherError, RuntimeError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"求职助手运行配置加载失败：{exc}",
+        ) from exc
+
     existing_services: CareerAssistantServices | None = request.app.state.career_assistant_services
     if existing_services is not None:
         return existing_services
@@ -318,7 +352,6 @@ def get_career_services(request: Request) -> CareerAssistantServices:
         if existing_services is not None:
             return existing_services
 
-        _load_career_environment(request.app.state.career_assistant_project_root)
         database_url = os.getenv("CAREER_DATABASE_URL", "").strip()
         if not database_url:
             raise HTTPException(
@@ -386,10 +419,6 @@ def get_career_services(request: Request) -> CareerAssistantServices:
                 interview_library_repository,
                 retrieval_service=interview_retrieval_service,
             )
-            interview_collection_service = InterviewCollectionService(
-                interview_library_repository,
-                interview_library_service,
-            )
             document_understanding_client = (
                 DoclingServiceDocumentParser(document_understanding_settings)
                 if document_understanding_settings.enabled
@@ -410,6 +439,14 @@ def get_career_services(request: Request) -> CareerAssistantServices:
                 document_understanding_parser=document_understanding_client,
                 legacy_office_converter=legacy_office_converter,
                 cloud_vision_parser=cloud_vision_client,
+            )
+            interview_collection_service = InterviewCollectionService(
+                interview_library_repository,
+                interview_library_service,
+                model_gateway=model_gateway,
+                model_connection_client=model_connection_client,
+                temporary_attachment_store=temporary_attachment_store,
+                attachment_parser=attachment_parser,
             )
             services = CareerAssistantServices(
                 database=database,
@@ -462,18 +499,20 @@ def get_career_services(request: Request) -> CareerAssistantServices:
 
 
 def _load_career_environment(project_root: Path) -> None:
-    """仅加载求职助手自己的本地环境文件，不读取或覆盖既有业务密钥。"""
+    """加载求职模块配置，并保证模型凭据的持久化主密钥已就绪。"""
 
     environment_path = project_root / ".env.career-assistant"
-    if not environment_path.is_file():
-        return
+    if environment_path.is_file():
+        try:
+            from dotenv import load_dotenv
+        except ImportError as exc:
+            raise RuntimeError("检测到求职助手环境文件，但缺少 python-dotenv") from exc
 
-    try:
-        from dotenv import load_dotenv
-    except ImportError as exc:
-        raise RuntimeError("检测到求职助手环境文件，但缺少 python-dotenv") from exc
+        load_dotenv(dotenv_path=environment_path, override=False)
 
-    load_dotenv(dotenv_path=environment_path, override=False)
+    # 本地自动写入项目 data 目录，生产 Docker 则自动落到 application_data 命名卷。
+    # 已通过部署 Secret 显式配置时会优先使用该值，不会覆盖现有部署策略。
+    ensure_credential_master_key(project_root)
 
 
 def _resolve_career_config_path(project_root: Path) -> Path:
@@ -870,9 +909,10 @@ def list_interview_collection_platforms(
 )
 def create_interview_collection_job(
     request_body: CreateInterviewCollectionJobRequest,
+    background_tasks: BackgroundTasks,
     request: Request,
 ) -> dict[str, object]:
-    """创建关键词发现任务；无授权连接器时清楚标记为等待用户处理。"""
+    """创建关键词发现任务；小红书关键词复用公开搜索页导入链路。"""
 
     actor = get_request_actor()
     services = get_career_services(request)
@@ -885,6 +925,12 @@ def create_interview_collection_job(
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if job.platform_key == "xiaohongshu" and job.connector_kind.value == "url_import":
+        background_tasks.add_task(
+            services.interview_collection_service.run_xiaohongshu_import,
+            actor.organization_id,
+            job.id,
+        )
     return _collection_job_payload(job)
 
 
@@ -940,6 +986,44 @@ def collect_interview_public_url(
     }
 
 
+@router.post(
+    "/interview-library/xiaohongshu-imports",
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def create_xiaohongshu_interview_import(
+    request_body: CreateXiaohongshuImportRequest,
+    background_tasks: BackgroundTasks,
+    request: Request,
+) -> dict[str, object]:
+    """创建小红书公开资料批量导入任务，并交由后台逐条完成解析与入库。
+
+    请求会立即返回任务编号，前端通过既有 collection job 查询接口轮询进度，避免多篇
+    笔记、多图 OCR 与 LLM 分析长时间占住浏览器请求。
+    """
+
+    actor = get_request_actor()
+    services = get_career_services(request)
+    try:
+        job = services.interview_collection_service.create_xiaohongshu_import_job(
+            actor.organization_id,
+            source_url=request_body.source_url,
+            requested_limit=request_body.requested_limit,
+            include_images=request_body.include_images,
+            auto_import=request_body.auto_import,
+        )
+    except CollectionOperationError as exc:
+        raise HTTPException(status_code=422, detail=exc.message) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    background_tasks.add_task(
+        services.interview_collection_service.run_xiaohongshu_import,
+        actor.organization_id,
+        job.id,
+    )
+    return {"job": _collection_job_payload(job)}
+
+
 @router.post("/interview-library/collection-candidates/{candidate_id}/select")
 def select_interview_collection_candidate(
     candidate_id: UUID,
@@ -983,6 +1067,7 @@ def import_interview_collection_candidate(
             interview_date=request_body.interview_date,
             summary_text=request_body.summary_text,
             tags=tuple(request_body.tags),
+            markdown_content=request_body.markdown_content,
         )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -1111,11 +1196,7 @@ async def parse_interview_experience_file(
         )
         company_name = inferred.company_name or "待归档公司"
         role_name = inferred.role_name or "未识别岗位"
-        markdown_content = _interview_markdown_from_parsed_attachment(
-            extracted_text,
-            company_name=company_name,
-            role_name=role_name,
-        )
+        markdown_content = _interview_markdown_from_parsed_attachment(extracted_text)
         warnings = []
         if inferred.company_name is None:
             warnings.append("未可靠识别公司名称，请在确认入库前补充或修正。")
@@ -1293,11 +1374,7 @@ async def import_interview_experience_file(
         )
         effective_company_name = company_name.strip() or inferred.company_name or "待归档公司"
         effective_role_name = role_name.strip() or inferred.role_name or "未识别岗位"
-        markdown_content = _interview_markdown_from_parsed_attachment(
-            parsed.extracted_text,
-            company_name=effective_company_name,
-            role_name=effective_role_name,
-        )
+        markdown_content = _interview_markdown_from_parsed_attachment(parsed.extracted_text)
         effective_tags = tuple(dict.fromkeys([*tags_value, *inferred.tags]))
         experience = services.interview_library_service.ingest(
             actor.organization_id,
@@ -1997,15 +2074,11 @@ def _temporary_attachment_service_unavailable(exc: OSError) -> HTTPException:
 
 def _interview_markdown_from_parsed_attachment(
     extracted_text: str,
-    *,
-    company_name: str,
-    role_name: str,
 ) -> str:
-    """把现有文档解析器的临时结果包装成可编辑的面经 Markdown。
+    """返回解析器抽取出的连续正文，不把技术元数据混入面经内容。
 
-    保留 Docling 返回的标题、列表、表格与阅读顺序；空解析结果不允许进入知识库，避免
-    后续向量检索命中“空资料”。图片若 OCR 与 Vision 都没有得到可用文本，也会在这里
-    返回明确的可操作提示。
+    公司、岗位、来源和标签由独立字段持久化。这里保留 Docling/OCR 返回的标题、列表、
+    表格与阅读顺序；空解析结果不允许进入知识库，避免后续向量检索命中空资料。
     """
 
     normalized_text = extracted_text.strip()
@@ -2013,11 +2086,7 @@ def _interview_markdown_from_parsed_attachment(
         raise ValueError(
             "未从材料中识别到可用文本；请上传更清晰的文件，或改用粘贴 Markdown 入库",
         )
-    return (
-        f"# {company_name.strip()}｜{role_name.strip()} 面经\n\n"
-        "## 解析原文\n\n"
-        f"{normalized_text}"
-    )
+    return normalized_text
 
 
 def _collection_job_payload(job) -> dict[str, object]:
@@ -2033,6 +2102,7 @@ def _collection_job_payload(job) -> dict[str, object]:
         "policy_decision": job.policy_decision,
         "error_code": job.error_code,
         "error_message": job.error_message,
+        "metadata": dict(job.metadata_json),
         "started_at": job.started_at.isoformat() if job.started_at is not None else None,
         "completed_at": (
             job.completed_at.isoformat() if job.completed_at is not None else None
@@ -2062,6 +2132,7 @@ def _collection_candidate_payload(candidate) -> dict[str, object]:
         "status": candidate.status.value,
         "error_code": candidate.error_code,
         "error_message": candidate.error_message,
+        "metadata": dict(candidate.metadata_json),
         "created_at": candidate.created_at.isoformat(),
         "updated_at": candidate.updated_at.isoformat(),
     }

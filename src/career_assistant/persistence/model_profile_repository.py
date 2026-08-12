@@ -87,7 +87,19 @@ class CareerModelProfileRepository:
         """
 
         self._database = database
-        self._credential_cipher = credential_cipher or CredentialCipher.from_environment()
+        # 注入的加密器仅供离线验证等显式场景使用；真实服务每次读写凭据前会重新
+        # 从环境取得加密器，使本地 .env.career-assistant 热更新后无需保留旧实例。
+        self._credential_cipher = credential_cipher
+
+    def _active_credential_cipher(self) -> CredentialCipher:
+        """返回当前可用的加密器，显式注入优先于运行环境。
+
+        API 服务会在每次 Career 请求开始时重新加载本地环境并确保托管主密钥存在。
+        因此这里不缓存环境加密器，避免“测试成功、保存仍沿用旧进程配置”的状态滞留。
+        Fernet 对象本身无可变共享状态，按本次读写构造不会影响数据库事务边界。
+        """
+
+        return self._credential_cipher or CredentialCipher.from_environment()
 
     def upsert_profile(
         self,
@@ -107,7 +119,7 @@ class CareerModelProfileRepository:
         if normalized_api_key is not None and not normalized_api_key:
             raise ValueError("API Key 不能为空")
         encrypted_api_key = (
-            self._credential_cipher.encrypt(normalized_api_key)
+            self._active_credential_cipher().encrypt(normalized_api_key)
             if normalized_api_key is not None
             else None
         )
@@ -262,7 +274,7 @@ class CareerModelProfileRepository:
 
         if row is None:
             return None
-        return self._credential_cipher.decrypt(
+        return self._active_credential_cipher().decrypt(
             encryption_scheme=row["encryption_scheme"],
             encrypted_api_key=row["encrypted_api_key"],
             plaintext_api_key=row["plaintext_api_key"],
@@ -280,8 +292,9 @@ class CareerModelProfileRepository:
         因而可安全关闭 ``CAREER_ALLOW_LEGACY_PLAINTEXT_CREDENTIALS``。
         """
 
-        if not self._credential_cipher.can_encrypt:
-            self._credential_cipher.require_encryption_ready()
+        credential_cipher = self._active_credential_cipher()
+        if not credential_cipher.can_encrypt:
+            credential_cipher.require_encryption_ready()
 
         profile_filter = "AND profile_id = :profile_id" if profile_id is not None else ""
         query_parameters: dict[str, object] = {
@@ -306,7 +319,7 @@ class CareerModelProfileRepository:
                 query_parameters,
             ).mappings().all()
             for row in legacy_rows:
-                encrypted_api_key = self._credential_cipher.encrypt(str(row["plaintext_api_key"]))
+                encrypted_api_key = credential_cipher.encrypt(str(row["plaintext_api_key"]))
                 connection.execute(
                     text(
                         """

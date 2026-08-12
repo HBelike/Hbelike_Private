@@ -175,11 +175,14 @@ class ImageTask(BaseTask):
             generation_prompt = prompt_design_service.build_project_architecture_prompt(
                 repository_full_name=repository_full_name,
                 focus_prompt=raw_prompt,
-                project_summary_text=str(item.get("project_summary_text", "")).strip(),
+                project_summary_text=str(item.get("project_summary_text") or item.get("summary_text") or "").strip(),
+                visual_brief=item.get("visual_brief") if isinstance(item.get("visual_brief"), dict) else None,
+                project_index=index,
             )
             generation_prompt = self._apply_runtime_image_instruction(
                 generation_prompt=generation_prompt,
                 runtime_instruction=context.config.runtime_prompt("image"),
+                max_length=context.config.image_prompt_max_length,
             )
             output_path = self._build_output_path(
                 output_dir=context.config.image_output_dir,
@@ -232,8 +235,9 @@ class ImageTask(BaseTask):
                             repository_full_name=repository_full_name,
                             prompt=generation_prompt,
                             index=index,
+                            raw_prompt=raw_prompt,
+                            prompt_stage="ark_final_v2",
                         ),
-                        "raw_prompt": raw_prompt,
                         "prompt_designed_by": "ImagePromptDesignService",
                         "image_post_processing": "none",
                         "source_url": image_result.source_url,
@@ -366,19 +370,45 @@ class ImageTask(BaseTask):
                     "prompt_source": "video_storyboard_architecture_prompt",
                     "storyboard_id": storyboard.id,
                     "project_index": project_index,
-                    "project_summary_text": str(item.get("project_summary_text", "")).strip(),
+                    "project_summary_text": str(item.get("project_summary_text") or item.get("summary_text") or "").strip(),
+                    "project_analysis_markdown": str(item.get("project_analysis_markdown") or "").strip(),
+                    "visual_brief": item.get("visual_brief") if isinstance(item.get("visual_brief"), dict) else None,
+                    "video_brief": item.get("video_brief") if isinstance(item.get("video_brief"), dict) else None,
                 }
             )
 
         return sorted(normalized_prompts, key=lambda item: int(item.get("project_index", 0) or 0))
 
-    def _apply_runtime_image_instruction(self, generation_prompt: str, runtime_instruction: str) -> str:
-        """在系统教学图约束后追加管理员指定的风格偏好。"""
+    def _apply_runtime_image_instruction(
+        self,
+        generation_prompt: str,
+        runtime_instruction: str,
+        max_length: int,
+    ) -> str:
+        """在不突破最终请求长度上限的前提下追加运行时生图偏好。
 
-        instruction = runtime_instruction.strip()
+        运行时策略不能覆盖结构、中文可读性和禁止本地叠字等基础约束。先收紧
+        运行时文本并为它预留容量，避免旧实现把已编译的 Ark prompt 又扩展到 5000 字。
+        """
+
+        bounded_length = max(256, int(max_length))
+        # 先完整保住已编译的视觉合同。它包含结构、中文短标签和“禁止本地叠字”等
+        # 不能被运行时偏好替换的硬约束；当合同已经占满上限时，宁可忽略补充策略。
+        base = generation_prompt[:bounded_length].rstrip(" ，,；;。")
+        if len(base) >= bounded_length:
+            return base
+
+        instruction = " ".join(runtime_instruction.split()).strip()[:420]
         if not instruction:
-            return generation_prompt
-        return f"{generation_prompt} 管理员额外生图策略：{instruction[:3000]}"[:5000]
+            return base
+
+        available_length = bounded_length - len(base)
+        suffix_prefix = " 运行时补充风格偏好（仅补充，不覆盖前述约束）："
+        if available_length <= len(suffix_prefix) + 8:
+            return base
+
+        suffix = f"{suffix_prefix}{instruction}"
+        return f"{base}{suffix[:available_length].rstrip(' ，,；;。')}"
 
     def _generate_github_repository_images(
         self,
@@ -777,12 +807,21 @@ class ImageTask(BaseTask):
         repository_full_name: str,
         prompt: str,
         index: int,
+        raw_prompt: str | None = None,
+        prompt_stage: str = "brief",
     ) -> dict[str, Any]:
-        """构造图片资产 metadata，保留 prompt 来源，方便后续视频任务追踪素材是否同源。"""
+        """构造图片资产 metadata，保留简报与最终 Ark prompt 的对应关系。
+
+        ``prompt`` 是实际提交给 provider 的最终提示词；``raw_prompt`` 是上游摘要或
+        分镜的原始意图。二者都保存，便于审核台区分“内容规划”与“生图执行”，同时
+        为后续 Seedance / HyperFrames 链路复用 visual_brief、video_brief。
+        """
 
         metadata: dict[str, Any] = {
             "repository_full_name": repository_full_name,
             "prompt": prompt,
+            "raw_prompt": str(raw_prompt if raw_prompt is not None else item.get("prompt", "")).strip(),
+            "prompt_stage": prompt_stage,
             "prompt_index": index,
             "prompt_source": str(item.get("prompt_source", "summary_image_prompt")).strip() or "summary_image_prompt",
         }
@@ -792,9 +831,16 @@ class ImageTask(BaseTask):
         project_index = item.get("project_index")
         if project_index is not None:
             metadata["project_index"] = project_index
-        project_summary_text = str(item.get("project_summary_text", "")).strip()
+        project_summary_text = str(item.get("project_summary_text") or item.get("summary_text") or "").strip()
         if project_summary_text:
             metadata["project_summary_text"] = project_summary_text
+        visual_brief = item.get("visual_brief")
+        if isinstance(visual_brief, dict):
+            metadata["visual_brief"] = visual_brief
+            metadata["creative_brief_version"] = str(visual_brief.get("version", "creative_brief_v1"))
+        video_brief = item.get("video_brief")
+        if isinstance(video_brief, dict):
+            metadata["video_brief"] = video_brief
         return metadata
 
     def _providers_used(self, assets: list[dict[str, Any]]) -> list[str]:

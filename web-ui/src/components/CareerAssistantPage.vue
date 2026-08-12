@@ -1132,6 +1132,120 @@ onMounted(refreshData)
 .connection-section-heading h3 { margin-top:0; }
 .test-connection-button { color:#50761b; }
 .test-connection-button:disabled { cursor:wait; opacity:.6; }
-@media (max-width:960px) { .career-workspace { grid-template-columns:1fr; grid-template-rows:minmax(160px,.35fr) minmax(0,1fr); }.career-history-panel { max-height:none; }.conversation-list { grid-template-columns:repeat(2,minmax(0,1fr)); overflow:auto; }.model-settings { grid-template-columns:1fr; }.provider-picker-grid { grid-template-columns:1fr; } }
-@media (max-width:640px) { .career-chat-panel { min-height:0; }.composer-toolbar,.composer-footer { align-items:flex-start; flex-direction:column; }.session-tools { margin-left:0; }.career-history-panel { max-height:none; }.conversation-list { grid-template-columns:1fr; max-height:200px; }.model-form { grid-template-columns:1fr; }.message,.agent-message { max-width:94%; }.model-select { max-width:100%; }.send-button { align-self:stretch; }.career-error-toast { width:calc(100vw - 28px); gap:12px; padding:17px; }.career-error-toast strong { font-size:16px; }.career-error-toast p { font-size:15px; }.model-dialog-backdrop { align-items:end; padding:0; }.model-dialog { max-height:90vh; border-radius:22px 22px 0 0; }.model-dialog-header,.model-dialog-body,.model-dialog-footer { padding-left:18px; padding-right:18px; }.connection-toolbar,.connection-card { align-items:flex-start; }.connection-toolbar { flex-direction:column; }.connection-card { grid-template-columns:18px 38px minmax(0,1fr); }.connection-meta { grid-column:3; justify-items:start; }.connection-form-grid,.capability-fieldset { grid-template-columns:1fr; } }
+@media (max-width:960px) { .career-workspace { grid-template-columns:1fr; grid-template-rows:minmax(160px,.35fr) minmax(0,1fr); }.career-history-panel { max-height:none; }.conversation-list { grid-template-columns:repeat(2,minmax(0,1fr)); overflow:auto; }.model-settings { grid-template-columns:1fr; }.provider-picker-grid,.provider-picker-grid-expanded { grid-template-columns:1fr; } }
+@media (max-width:640px) { .career-workspace { gap:10px; }.career-chat-panel { min-height:0; }.chat-header { min-height:60px; padding:12px 14px; }.message-list { padding:14px; }.composer { padding:10px 12px max(12px, env(safe-area-inset-bottom)); }.composer-toolbar,.composer-footer { align-items:flex-start; flex-direction:column; }.session-tools { margin-left:0; }.career-history-panel { max-height:none; }.conversation-list { grid-template-columns:1fr; max-height:200px; }.model-form { grid-template-columns:1fr; }.message,.agent-message { max-width:94%; }.model-select { max-width:100%; }.send-button { align-self:stretch; min-height:44px; }.career-error-toast { width:calc(100vw - 28px); gap:12px; padding:17px; }.career-error-toast strong { font-size:16px; }.career-error-toast p { font-size:15px; }.model-dialog-backdrop { align-items:end; padding:0; }.model-dialog { max-height:90dvh; border-radius:22px 22px 0 0; }.model-dialog-header,.model-dialog-body,.model-dialog-footer { padding-right:18px; padding-left:18px; }.connection-toolbar,.connection-card { align-items:flex-start; }.connection-toolbar { flex-direction:column; }.connection-card { grid-template-columns:18px 38px minmax(0,1fr); }.connection-meta { grid-column:3; justify-items:start; }.connection-form-grid,.capability-fieldset { grid-template-columns:1fr; }.dialog-primary-button,.dialog-secondary-button { min-height:44px; } }
+@media (max-width:960px) and (max-height:680px) { .career-workspace { height:auto; min-height:calc(100dvh - 76px); grid-template-rows:auto minmax(520px,1fr); overflow:visible; }.career-history-panel { height:auto; overflow:visible; }.conversation-list { max-height:196px; flex:none; }.career-chat-panel { min-height:520px; overflow:visible; }.message-list { min-height:220px; }.composer { position:sticky; bottom:0; z-index:2; } }
+
+/* 手机端只保留一个页面级滚动面，避免会话、消息和主容器互相抢滚动。 */
+@media (max-width:960px) {
+  .career-workspace {
+    height:auto;
+    min-height:calc(100dvh - 92px);
+    grid-template-rows:auto auto;
+    align-content:start;
+    overflow:visible;
+  }
+
+  .career-history-panel {
+    height:auto;
+    max-height:none;
+    overflow:visible;
+  }
+
+  .conversation-list {
+    flex:none;
+    max-height:228px;
+  }
+
+  .career-chat-panel {
+    height:auto;
+    min-height:520px;
+    overflow:visible;
+  }
+
+  .message-list {
+    min-height:270px;
+    flex:none;
+    overflow:visible;
+  }
+
+  .composer {
+    position:sticky;
+    z-index:5;
+    bottom:0;
+    box-shadow:0 -10px 22px rgba(47,62,37,.08);
+  }
+}
+
+@media (max-width:640px) {
+  .career-history-panel {
+    padding:12px;
+  }
+
+  .career-chat-panel {
+    min-height:440px;
+  }
+
+  .message-list {
+    min-height:228px;
+  }
+
+  .model-dialog-backdrop {
+    align-items:end;
+    padding:0;
+  }
+
+  .model-dialog {
+    width:100%;
+    max-height:calc(100dvh - env(safe-area-inset-top));
+    border-radius:22px 22px 0 0;
+  }
+
+  .model-dialog-body {
+    overscroll-behavior:contain;
+    padding-bottom:22px;
+  }
+
+  .model-dialog-footer {
+    flex-wrap:wrap;
+    padding:12px 18px max(12px, env(safe-area-inset-bottom));
+    box-shadow:0 -8px 20px rgba(47,62,37,.07);
+  }
+
+  .model-dialog-footer .dialog-primary-button,
+  .model-dialog-footer .dialog-secondary-button {
+    min-height:44px;
+    flex:1 1 126px;
+  }
+
+  .selected-provider-banner {
+    align-items:flex-start;
+  }
+
+  .selected-provider-banner > span:last-child {
+    white-space:nowrap;
+  }
+}
+
+@media (max-width:960px) and (max-height:760px) {
+  .career-workspace {
+    min-height:0;
+  }
+
+  .career-chat-panel {
+    min-height:400px;
+  }
+
+  .conversation-list {
+    max-height:156px;
+  }
+
+  .message-list {
+    min-height:176px;
+  }
+
+  .composer textarea {
+    min-height:56px;
+  }
+}
 </style>

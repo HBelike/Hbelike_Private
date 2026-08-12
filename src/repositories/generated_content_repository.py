@@ -84,6 +84,23 @@ class GeneratedContentPreview:
 
 
 @dataclass(frozen=True)
+class GeneratedContentHistoryItem:
+    """工作台执行历史的一条轻量内容索引。
+
+    执行历史只负责把已经持久化的推文快照与同一 ``content_id`` 的资源重新关联，
+    因此这里刻意不携带提示词、任务日志或模型原始响应。
+    """
+
+    id: int
+    week_end: str
+    title: str
+    digest: str
+    status: str
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True)
 class GeneratedContentForLayout:
     """ArticleLayoutTask 生成公众号排版稿时需要读取的内容快照。"""
 
@@ -295,6 +312,81 @@ class GeneratedContentRepository:
         if row is None:
             return None
 
+        return self._row_to_preview(row)
+
+    def get_for_preview(self, content_id: int) -> GeneratedContentPreview | None:
+        """按 content_id 读取一条历史推文快照。
+
+        工作台素材和执行历史都必须显式以 ``content_id`` 为边界；不能再通过
+        “最新一条”间接拿到其他任务的文章或媒体。
+        """
+
+        if content_id <= 0:
+            raise ValueError("content_id 必须大于 0")
+
+        with self.database_manager.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    id,
+                    week_end,
+                    title,
+                    digest,
+                    article_markdown,
+                    video_script,
+                    voiceover_text,
+                    image_prompts_json,
+                    status,
+                    created_at,
+                    updated_at
+                FROM generated_contents
+                WHERE id = ?
+                LIMIT 1
+                """,
+                (content_id,),
+            ).fetchone()
+
+        if row is None:
+            return None
+        return self._row_to_preview(row)
+
+    def list_recent_for_history(self, limit: int = 50) -> list[GeneratedContentHistoryItem]:
+        """读取可在执行历史中回看的推文快照索引。
+
+        只返回已经有正文的生成内容。正文和同 ID 的媒体资产才是本次执行历史要
+        长期展示的两类数据；任务运行日志不参与该列表。
+        """
+
+        normalized_limit = min(max(int(limit), 1), 100)
+        with self.database_manager.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, week_end, title, digest, status, created_at, updated_at
+                FROM generated_contents
+                WHERE article_markdown IS NOT NULL
+                  AND TRIM(article_markdown) != ''
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (normalized_limit,),
+            ).fetchall()
+
+        return [
+            GeneratedContentHistoryItem(
+                id=int(row["id"]),
+                week_end=str(row["week_end"]),
+                title=str(row["title"]),
+                digest=str(row["digest"] or ""),
+                status=str(row["status"]),
+                created_at=str(row["created_at"]),
+                updated_at=str(row["updated_at"]),
+            )
+            for row in rows
+        ]
+
+    def _row_to_preview(self, row: Any) -> GeneratedContentPreview:
+        """将查询结果转换为审核与历史页面共用的只读推文快照。"""
+
         return GeneratedContentPreview(
             id=int(row["id"]),
             week_end=str(row["week_end"]),
@@ -415,8 +507,13 @@ class GeneratedContentRepository:
                 "rank",
                 "summary_text",
                 "project_summary_text",
+                "project_analysis_markdown",
                 "prompt_source",
                 "visual_title",
+                "raw_prompt",
+                "prompt_stage",
+                "visual_brief",
+                "video_brief",
             ):
                 value = item.get(optional_field)
                 if value is not None:

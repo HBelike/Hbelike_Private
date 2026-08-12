@@ -62,14 +62,17 @@ image:
   generations_endpoint: /images/generations
   api_key_env: VOLCENGINE_ARK_API_KEY
   model: doubao-seedream-4-0-250828
-  size: 2048x2048
+  # 16:9 横版教学图；2048 与 1152 都是 32 的倍数，适合正文预览和后续横版视频裁切。
+  size: 2048x1152
   n: 1
   response_format: url
   watermark: false
   timeout_seconds: 180
   output_dir: outputs/images
   skip_when_api_key_missing: true
-  refresh_existing_assets_on_run: true
+  # 同一 content_id 的重试必须复用已成功落盘的素材；每周新任务会生成新的 content_id，
+  # 因此仍会完整更新五张项目图，不会混用上一期素材。
+  refresh_existing_assets_on_run: false
   github_asset_fallback_enabled: false
   github_asset_timeout_seconds: 10
   github_asset_max_bytes: 5242880
@@ -83,13 +86,13 @@ image:
   local_fallback_enabled: false
   chinese_overlay_enabled: false
   prompt:
-    max_length: 1400
-    visual_system: "统一视觉系统：白底技术博客架构图，浅蓝细线、蓝色图标、圆角白色卡片、轻微阴影、少量灰色辅助线，整体像源码阅读文章里的工程结构图或产品架构图。中文读者优先，标签短而清楚，可保留必要英文技术词。不要黑板背景，不要赛博朋克，不要海报感。"
-    composition_rule: "每张图必须是一张可读的工程图：横向或环形结构，最多5个主要模块，最多2层辅助输入；模块之间用清晰箭头或循环箭头连接。画面要表达输入、运行时、核心循环、输出或约束之间的关系，不要做抽象装饰图。"
-    text_rule: "图片由火山方舟直接生成原始图像，不允许后续本地叠字、遮罩或覆盖。允许少量清晰中文标签和必要英文函数名/模块名；每个标签尽量不超过10个字，全图不超过12个标签。不要仓库地址、网址、真实logo、水印、代码长句、英文长段落、密集小字、伪文字和乱码。"
-    style_rule: "画面要像技术博客正文里嵌入的架构图：白色背景、蓝色线框、圆角模块、简洁图标、信息结构清楚，留白充足。优先保证读者能看懂模块关系，其次才是美观。"
-    safe_zone_rule: "主体放在画面中心安全区，四周保留边距，适合公众号正文宽度和16:9视频裁切；标题、模块和箭头不要贴边。"
-    negative_prompt: "避免深色黑板背景、蓝绿霓虹背景、抽象艺术、纯装饰海报、随机粒子、复杂网状乱线、照片人物、股票素材、齿轮灯泡握手拼图、真实产品logo、真实网页截图、代码截图、仓库地址、网址、英文长句、密集小字、乱码文字、伪文字、错别字、难以辨认的标签。"
+    max_length: 2200
+    visual_system: "采用中文技术教学图语言：浅纸本、象牙白或低饱和灰纹理为底，模块、箭头、分组框和留白共同表达工程逻辑。颜色由单项目 visual_brief 的 palette_key 决定，只承担层级和强调功能；每期五张图要形成不同配色与不同结构，不能统一成蓝绿霓虹或单一蓝色卡片。"
+    composition_rule: "先根据 diagram_type 确定结构，再根据 nodes、relationships 与 reading_order 排版。最多6个核心节点、7条关系、8个短标签；主路径最醒目，辅助关系降低权重。禁止套用固定的“输入→核心→输出”三栏模板，也不要为了装饰加入无意义图标、粒子或网线。"
+    text_rule: "图片由火山方舟直接生成完整原始图像，绝不允许后续本地叠字、遮罩、拼贴或覆盖。所有可读文字优先使用2到6个字的中文短标签，必要英文术语只能极短；不出现仓库地址、网址、真实logo、水印、代码长句、英文长段落、密集小字、伪文字、乱码或错别字。"
+    style_rule: "像高质量技术博客或课程讲义中的编辑型架构图：用对齐、层级、克制阴影、线型区分和明确箭头构建信息密度；可使用纸张颗粒、细网格或标注卡，但不得做成产品广告、赛博海报、网页截图或抽象艺术。优先保证关系能被一眼读懂。"
+    safe_zone_rule: "主体放在画面中心安全区，四周留出充足边距，适合公众号正文宽度与16:9视频裁切。标题、节点、箭头均不得贴边；图内阅读方向必须清楚，长文字改写为短标签而非缩小字体。"
+    negative_prompt: "避免满屏蓝绿色霓虹、固定蓝白流程图、深色黑板背景、随机抽象画面、复杂蜘蛛网连线、照片人物、股票素材、齿轮灯泡握手拼图、真实产品logo、真实网页截图、代码截图、仓库地址、网址、长英文、密集小字、乱码文字、伪文字、难以辨认的标签。"
 
 audio:
   provider: doubao_tts_v3
@@ -169,7 +172,7 @@ video:
     max_regeneration_attempts: 1
     timeout_seconds: 90
   clip_prompt:
-    max_length: 1800
+    max_length: 2400
     visual_system: "所有 clip 必须保持统一的技术教学课件风：有纸张或深灰纹理的干净背景、黄绿色层级标题、蓝色模块容器、橙色强调标签、清晰箭头和流程节点。不要用满屏蓝绿色霓虹；信息层级应像讲师逐步展示的 PPT，而不是抽象科技广告。"
     continuity_rule: "本段不是独立广告片，要像连续课程的一页动态课件；画面必须承接上一段，并为下一段留下自然过渡。"
     motion_rule: "请让画面跟随旁白逐步展开，节点按讲解顺序高亮，流程线自然推进。"

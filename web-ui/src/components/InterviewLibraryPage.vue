@@ -22,11 +22,12 @@ const importProgress = ref(null)
 const importError = ref('')
 const importNotice = ref('')
 const importFiles = ref([])
+const fileProgressItems = ref([])
 const fileInput = ref(null)
 const fileParseResult = ref(null)
 const parsedFileImports = ref([])
 const fileImportStrategy = ref('merge')
-const collectionMode = ref('keyword')
+const collectionMode = ref('xiaohongshu')
 const collectionPlatforms = ref([])
 const collectionLoading = ref(false)
 const collectionSubmitting = ref(false)
@@ -34,8 +35,10 @@ const collectionError = ref('')
 const collectionNotice = ref('')
 const collectionJob = ref(null)
 const collectionCandidates = ref([])
+const candidateDrafts = ref({})
 const collectionDraft = ref(createCollectionDraft())
 let queryTimer = null
+let collectionPollTimer = null
 
 const textDraft = ref(createTextDraft())
 const fileDraft = ref(createFileDraft())
@@ -47,6 +50,65 @@ const importFileCount = computed(() => importFiles.value.length)
 const fileStrategyDescription = computed(() => fileImportStrategy.value === 'merge'
   ? `将 ${importFileCount.value || '所选'} 份材料归并为一份完整面经，适合同一场或同一岗位的多页资料。`
   : `将每份材料独立入库为一份面经，适合同一次导入多个不同岗位或公司的资料。`)
+const collectionMetadata = computed(() => collectionJob.value?.metadata ?? {})
+const collectionAnalysisSummary = computed(() => {
+  const metadata = collectionMetadata.value
+  const declared = metadata.summary ?? metadata.statistics ?? metadata.stats ?? {}
+  const candidates = collectionCandidates.value
+  const imported = numberFrom(declared.imported_count, declared.imported, candidates.filter((item) => Boolean(candidateImportedExperienceId(item))).length)
+  const rejected = numberFrom(
+    declared.rejected_count,
+    declared.invalid_count,
+    candidates.filter((item) => candidateValidity(item) === false).length
+  )
+  const failed = numberFrom(
+    declared.failed_count,
+    declared.failed,
+    candidates.filter((item) => ['failed', 'blocked', 'empty'].includes(item.status)).length
+  )
+  const valid = numberFrom(
+    declared.valid_count,
+    declared.valid,
+    candidates.filter((item) => candidateValidity(item) === true).length
+  )
+  return {
+    discovered: numberFrom(declared.discovered_count, declared.discovered, metadata.discovered_count, candidates.length),
+    processed: numberFrom(declared.processed_count, declared.processed, metadata.processed_count, candidates.length),
+    imported,
+    rejected,
+    failed,
+    valid,
+    incomplete: numberFrom(
+      declared.incomplete_count,
+      declared.insufficient_source_count,
+      candidates.filter((item) => candidateAnalysisStatus(item) === 'insufficient_source').length
+    )
+  }
+})
+const collectionProgress = computed(() => {
+  const metadata = collectionMetadata.value
+  const status = String(collectionJob.value?.status ?? '').toLowerCase()
+  const phase = String(metadata.phase ?? metadata.current_stage ?? metadata.stage ?? '').toLowerCase()
+  const sequence = ['discover', 'fetch', 'ocr', 'analyze', 'import']
+  const aliases = {
+    discover: ['discover', 'discovering', 'finding', '链接发现'],
+    fetch: ['fetch', 'reading', 'extract', '读取正文'],
+    ocr: ['ocr', 'image', '图片识别'],
+    analyze: ['analy', 'llm', 'classify', '甄别'],
+    import: ['import', 'ingest', 'index', '写入']
+  }
+  const matched = sequence.findIndex((key) => aliases[key].some((token) => phase.includes(token)))
+  const terminal = isCollectionTerminal(status)
+  const currentIndex = terminal ? sequence.length - 1 : Math.max(0, matched)
+  const declaredPercent = Number(metadata.progress_percent ?? metadata.percent ?? metadata.progress)
+  return {
+    currentIndex,
+    percent: Number.isFinite(declaredPercent)
+      ? Math.max(0, Math.min(100, declaredPercent))
+      : terminal ? 100 : Math.max(8, (currentIndex / sequence.length) * 100),
+    detail: metadata.progress_message ?? metadata.message ?? collectionJob.value?.error_message ?? ''
+  }
+})
 
 function displayMarkdownText(value) {
   return value
@@ -171,15 +233,14 @@ function buildFileExperiencePayload(draft) {
 function mergeParsedFileImports(items) {
   const firstDraft = items[0]?.draft ?? createFileDraft()
   const tags = [...new Set(items.flatMap((item) => parseTags(item.draft.tags)))]
-  const sections = items.map((item, index) => {
-    const title = item.fileName || `材料 ${index + 1}`
-    return `## 材料 ${index + 1}：${title}\n\n${item.draft.markdown.trim()}`
-  })
+  const sections = items
+    .map((item) => item.draft.markdown.trim())
+    .filter(Boolean)
   return {
     ...firstDraft,
     tags: tags.join('，'),
-    summary: firstDraft.summary || `由 ${items.length} 份材料归并生成，建议结合各材料中的面试轮次与考题复盘。`,
-    markdown: `# 合并面经材料\n\n${sections.join('\n\n---\n\n')}`
+    summary: firstDraft.summary || '',
+    markdown: sections.join('\n\n')
   }
 }
 
@@ -189,12 +250,173 @@ function createCollectionDraft() {
     keyword: '',
     requestedLimit: 10,
     sourceUrl: '',
+    includeImages: true,
+    autoImport: false,
     companyName: '',
     roleName: '',
     interviewDate: '',
     summary: '',
     tags: ''
   }
+}
+
+function numberFrom(...values) {
+  for (const value of values) {
+    const number = Number(value)
+    if (Number.isFinite(number) && number >= 0) return number
+  }
+  return 0
+}
+
+function getCandidateAnalysis(candidate) {
+  const metadata = candidate?.metadata ?? {}
+  return metadata.analysis ?? candidate?.analysis ?? {}
+}
+
+function candidateImportedExperienceId(candidate) {
+  const metadata = candidate?.metadata ?? {}
+  return candidate?.imported_experience_id ?? metadata.imported_experience_id ?? metadata.experience_id ?? null
+}
+
+function candidateValidity(candidate) {
+  const analysis = getCandidateAnalysis(candidate)
+  for (const key of ['is_valid_interview', 'is_valid', 'valid']) {
+    if (typeof analysis[key] === 'boolean') return analysis[key]
+    if (typeof analysis[key] === 'string') {
+      const value = analysis[key].toLowerCase()
+      if (['true', 'valid', 'yes'].includes(value)) return true
+      if (['false', 'invalid', 'no'].includes(value)) return false
+    }
+  }
+  if (['rejected', 'invalid', 'filtered'].includes(String(candidate?.status ?? '').toLowerCase())) return false
+  return null
+}
+
+function candidateAnalysisStatus(candidate) {
+  return String(getCandidateAnalysis(candidate).status ?? '').toLowerCase()
+}
+
+function candidateEvidence(candidate) {
+  const images = candidate?.metadata?.images ?? candidate?.images ?? {}
+  const evidence = images.evidence ?? candidate?.metadata?.evidence ?? {}
+  return evidence && typeof evidence === 'object' ? evidence : {}
+}
+
+function candidateEvidenceText(candidate) {
+  const evidence = candidateEvidence(candidate)
+  const body = numberFrom(evidence.body_text_characters)
+  const declared = numberFrom(evidence.image_declared_count)
+  const downloaded = numberFrom(evidence.image_downloaded_count)
+  const ocr = numberFrom(evidence.ocr_success_count)
+  return `正文 ${body} 字 · 图片 ${declared} 张 · 已下载 ${downloaded} 张 · OCR 成功 ${ocr} 张`
+}
+
+function candidateIncompleteReason(candidate) {
+  const analysis = getCandidateAnalysis(candidate)
+  if (candidateAnalysisStatus(candidate) !== 'insufficient_source') return ''
+  return analysis.message || '没有获得完整正文或配图文字，本条未作有效性判定，也不会自动入库。'
+}
+
+function candidateStatusText(candidate) {
+  if (candidateImportedExperienceId(candidate)) return '已入库'
+  if (candidateAnalysisStatus(candidate) === 'insufficient_source') return '采集不完整'
+  const validity = candidateValidity(candidate)
+  if (validity === true) return '有效面经'
+  if (validity === false) return '已过滤'
+  const labels = {
+    discovered: '待读取',
+    fetched: '待甄别',
+    selected: '待入库',
+    imported: '已入库',
+    failed: '解析失败',
+    blocked: '访问受限',
+    empty: '内容不足'
+  }
+  return labels[candidate?.status] ?? '处理中'
+}
+
+function collectionJobStatusText(status) {
+  const labels = {
+    queued: '等待开始',
+    running: '正在处理',
+    succeeded: '采集完成',
+    completed: '采集完成',
+    finished: '采集完成',
+    failed: '任务失败',
+    cancelled: '已取消',
+    needs_user_interaction: '需要人工处理'
+  }
+  return labels[String(status ?? '').toLowerCase()] ?? String(status ?? '正在处理')
+}
+
+function candidateReason(candidate) {
+  const analysis = getCandidateAnalysis(candidate)
+  return analysis.rejection_reason
+    ?? analysis.reason
+    ?? candidate?.error_message
+    ?? ''
+}
+
+function candidateCompany(candidate) {
+  const analysis = getCandidateAnalysis(candidate)
+  return analysis.company_name ?? analysis.company ?? ''
+}
+
+function candidateRole(candidate) {
+  const analysis = getCandidateAnalysis(candidate)
+  return analysis.role_name ?? analysis.role ?? analysis.job_name ?? ''
+}
+
+function createCandidateDraft(candidate) {
+  const analysis = getCandidateAnalysis(candidate)
+  return {
+    markdownContent: String(candidate?.markdown_content ?? '').trim(),
+    companyName: String(analysis.company_name ?? analysis.company ?? candidateCompany(candidate) ?? '待归档公司').trim() || '待归档公司',
+    roleName: String(analysis.role_name ?? analysis.role ?? analysis.job_name ?? candidateRole(candidate) ?? '未识别岗位').trim() || '未识别岗位',
+    interviewDate: String(analysis.interview_date ?? '').trim(),
+    summary: String(analysis.summary_text ?? candidate?.excerpt ?? candidate?.snippet ?? candidate?.title ?? '').trim(),
+    tags: Array.isArray(analysis.tags) ? analysis.tags.join('，') : String(analysis.tags ?? '').trim()
+  }
+}
+
+function syncCandidateDrafts(candidates) {
+  const next = {}
+  for (const candidate of candidates ?? []) {
+    const id = String(candidate.id)
+    const suggested = createCandidateDraft(candidate)
+    const current = candidateDrafts.value[id]
+    next[id] = current
+      ? {
+          ...suggested,
+          ...current,
+          markdownContent: current.markdownContent || suggested.markdownContent,
+          companyName: current.companyName || suggested.companyName,
+          roleName: current.roleName || suggested.roleName,
+          summary: current.summary || suggested.summary,
+          tags: current.tags || suggested.tags
+        }
+      : suggested
+  }
+  candidateDrafts.value = next
+}
+
+function candidateDraft(candidate) {
+  return candidateDrafts.value[String(candidate?.id)] ?? null
+}
+
+function canManuallySaveCandidate(candidate) {
+  return Boolean(candidateDraft(candidate)?.markdownContent?.trim()) && !candidateImportedExperienceId(candidate)
+}
+
+function candidateConfidence(candidate) {
+  const analysis = getCandidateAnalysis(candidate)
+  const value = Number(analysis.confidence ?? analysis.score)
+  if (!Number.isFinite(value)) return ''
+  return `${Math.round(value <= 1 ? value * 100 : value)}%`
+}
+
+function isCollectionTerminal(status) {
+  return ['succeeded', 'failed', 'cancelled', 'needs_user_interaction', 'completed', 'finished'].includes(String(status ?? '').toLowerCase())
 }
 
 function parseTags(value) {
@@ -280,7 +502,54 @@ async function requestJson(path, options = {}) {
   return payload
 }
 
-async function requestFileParseWithProgress(data) {
+function createFileProgressItems(files) {
+  fileProgressItems.value = files.map((file, index) => ({
+    index: index + 1,
+    name: file.name,
+    state: 'waiting',
+    percent: 0,
+    detail: '等待解析'
+  }))
+}
+
+function updateFileParseProgress(context, event) {
+  const percent = Math.max(0, Math.min(100, Number(event.percent) || 0))
+  fileProgressItems.value = fileProgressItems.value.map((item) => (
+    item.index === context.index
+      ? { ...item, state: 'parsing', percent, detail: event.detail || event.phase || '正在解析' }
+      : item
+  ))
+  const total = Math.max(1, context.total)
+  importProgress.value = {
+    percent: Math.round((((context.index - 1) + (percent / 100)) / total) * 100),
+    phase: `正在解析第 ${context.index}/${total} 份材料`,
+    detail: event.detail || event.phase || context.fileName,
+    fileIndex: context.index,
+    fileTotal: total,
+    fileName: context.fileName
+  }
+}
+
+function completeFileParse(context) {
+  updateFileParseProgress(context, { percent: 100, phase: '解析完成', detail: `${context.fileName} 已完成` })
+  fileProgressItems.value = fileProgressItems.value.map((item) => (
+    item.index === context.index ? { ...item, state: 'completed', percent: 100, detail: '解析完成' } : item
+  ))
+}
+
+function failFileParse(context, error) {
+  const detail = error instanceof Error ? error.message : '解析失败'
+  fileProgressItems.value = fileProgressItems.value.map((item) => (
+    item.index === context.index ? { ...item, state: 'failed', detail } : item
+  ))
+}
+
+function fileProgressStateText(item) {
+  const labels = { waiting: '等待', parsing: `${item.percent}%`, completed: '已完成', failed: '失败' }
+  return labels[item.state] ?? item.detail
+}
+
+async function requestFileParseWithProgress(data, context) {
   let response
   try {
     response = await fetch('/api/career/interview-library/parse-file-stream', {
@@ -323,11 +592,7 @@ async function requestFileParseWithProgress(data) {
         continue
       }
       if (event.event === 'progress') {
-        importProgress.value = {
-          percent: Math.max(0, Math.min(100, Number(event.percent) || 0)),
-          phase: event.phase || '正在解析材料',
-          detail: event.detail || '正在生成可编辑的面经草稿。'
-        }
+        updateFileParseProgress(context, event)
       } else if (event.event === 'result') {
         payload = event.payload
       } else if (event.event === 'error') {
@@ -459,12 +724,54 @@ function closeImport() {
   parsedFileImports.value = []
 }
 
-async function openCollection(mode = 'keyword') {
+function stopCollectionPolling() {
+  if (collectionPollTimer) {
+    window.clearTimeout(collectionPollTimer)
+    collectionPollTimer = null
+  }
+}
+
+async function refreshCollectionJob(jobId, { scheduleNext = true } = {}) {
+  if (!jobId) return
+  try {
+    const payload = await requestJson(`/api/career/interview-library/collection-jobs/${encodeURIComponent(jobId)}`)
+    const job = payload.job ?? payload
+    if (collectionJob.value?.id && collectionJob.value.id !== job.id) return
+    collectionJob.value = job
+    collectionCandidates.value = payload.candidates ?? []
+    syncCandidateDrafts(collectionCandidates.value)
+    if (isCollectionTerminal(job.status)) {
+      stopCollectionPolling()
+      const summary = collectionAnalysisSummary.value
+      collectionNotice.value = job.status === 'succeeded' || job.status === 'completed'
+        ? `采集完成：发现 ${summary.discovered} 条，识别有效面经 ${summary.valid} 条，已写入 ${summary.imported} 条。`
+        : (job.error_message || '采集任务未完成，请查看失败条目的原因后重试。')
+      if (summary.imported) await loadTree({ preserveSelection: false })
+      return
+    }
+    if (scheduleNext && showCollectionModal.value) {
+      stopCollectionPolling()
+      collectionPollTimer = window.setTimeout(() => refreshCollectionJob(jobId), 1500)
+    }
+  } catch (error) {
+    stopCollectionPolling()
+    collectionError.value = error instanceof Error ? error.message : '采集进度读取失败，请稍后刷新重试。'
+  }
+}
+
+function startCollectionPolling(jobId) {
+  stopCollectionPolling()
+  void refreshCollectionJob(jobId)
+}
+
+async function openCollection(mode = 'xiaohongshu') {
+  stopCollectionPolling()
   collectionMode.value = mode
   collectionError.value = ''
   collectionNotice.value = ''
   collectionJob.value = null
   collectionCandidates.value = []
+  candidateDrafts.value = {}
   showCollectionModal.value = true
   if (collectionPlatforms.value.length || collectionLoading.value) return
   collectionLoading.value = true
@@ -483,14 +790,15 @@ async function openCollection(mode = 'keyword') {
 
 function closeCollection() {
   if (collectionSubmitting.value) return
+  stopCollectionPolling()
   showCollectionModal.value = false
   collectionError.value = ''
 }
 
 async function submitKeywordCollection() {
   const draft = collectionDraft.value
-  if (!draft.platformKey || !draft.keyword.trim()) {
-    collectionError.value = '请选择平台并输入检索关键词。'
+  if (!draft.keyword.trim()) {
+    collectionError.value = '请输入小红书搜索关键词。'
     return
   }
   collectionSubmitting.value = true
@@ -505,13 +813,51 @@ async function submitKeywordCollection() {
         requested_limit: Number(draft.requestedLimit) || 10
       })
     })
-    collectionJob.value = payload
-    collectionCandidates.value = []
-    collectionNotice.value = payload.status === 'needs_user_interaction'
-      ? '任务已记录：该平台尚未接入受条款允许的连接器，因此没有伪造抓取结果。可改用公开链接导入或粘贴正文。'
-      : '检索任务已创建，候选资料将在此处展示。'
+    collectionJob.value = payload.job ?? payload
+    collectionCandidates.value = payload.candidates ?? []
+    syncCandidateDrafts(collectionCandidates.value)
+    collectionNotice.value = '公开搜索任务已启动：系统会读取搜索页实际暴露的笔记，再依次解析正文、图片文字并整理为可人工确认的候选正文。'
+    if (!isCollectionTerminal(collectionJob.value.status)) startCollectionPolling(collectionJob.value.id)
   } catch (error) {
     collectionError.value = error instanceof Error ? error.message : '创建检索任务失败。'
+  } finally {
+    collectionSubmitting.value = false
+  }
+}
+
+async function submitXiaohongshuCollection() {
+  const draft = collectionDraft.value
+  const sourceUrl = draft.sourceUrl.trim()
+  if (!/^https:\/\//i.test(sourceUrl)) {
+    collectionError.value = '请输入以 https:// 开头的小红书公开链接。'
+    return
+  }
+  collectionSubmitting.value = true
+  collectionError.value = ''
+  collectionNotice.value = ''
+  collectionJob.value = null
+  collectionCandidates.value = []
+  candidateDrafts.value = {}
+  stopCollectionPolling()
+  try {
+    const payload = await requestJson('/api/career/interview-library/xiaohongshu-imports', {
+      method: 'POST',
+      body: JSON.stringify({
+        source_url: sourceUrl,
+        requested_limit: Math.max(1, Math.min(50, Number(draft.requestedLimit) || 10)),
+        include_images: Boolean(draft.includeImages),
+        auto_import: false
+      })
+    })
+    const job = payload.job ?? payload
+    if (!job?.id) throw new Error('采集服务未返回任务编号，请稍后重试。')
+    collectionJob.value = job
+    collectionCandidates.value = payload.candidates ?? []
+    syncCandidateDrafts(collectionCandidates.value)
+    collectionNotice.value = '采集任务已启动：将依次发现链接、读取正文、识别图片，并由 Agent 整理为可人工确认的候选正文。'
+    startCollectionPolling(job.id)
+  } catch (error) {
+    collectionError.value = error instanceof Error ? error.message : '创建小红书采集任务失败。'
   } finally {
     collectionSubmitting.value = false
   }
@@ -533,6 +879,7 @@ async function submitUrlCollection() {
     })
     collectionJob.value = payload.job
     collectionCandidates.value = [payload.candidate]
+    syncCandidateDrafts(collectionCandidates.value)
     collectionNotice.value = '已读取公开页面并生成候选正文。确认信息后可写入面经库。'
   } catch (error) {
     collectionError.value = error instanceof Error ? error.message : '公开链接读取失败。'
@@ -542,9 +889,22 @@ async function submitUrlCollection() {
 }
 
 async function importCollectionCandidate(candidate) {
-  const draft = collectionDraft.value
-  if (!draft.companyName.trim() || !draft.roleName.trim()) {
-    collectionError.value = '导入前请填写公司名称和面试岗位。'
+  const candidateReviewDraft = candidateDraft(candidate) ?? createCandidateDraft(candidate)
+  const draft = collectionMode.value === 'url'
+    ? {
+        ...candidateReviewDraft,
+        companyName: collectionDraft.value.companyName || candidateReviewDraft.companyName,
+        roleName: collectionDraft.value.roleName || candidateReviewDraft.roleName,
+        interviewDate: collectionDraft.value.interviewDate || candidateReviewDraft.interviewDate,
+        summary: collectionDraft.value.summary || candidateReviewDraft.summary,
+        tags: collectionDraft.value.tags || candidateReviewDraft.tags
+      }
+    : candidateReviewDraft
+  const markdownContent = draft.markdownContent.trim()
+  const companyName = draft.companyName.trim() || '待归档公司'
+  const roleName = draft.roleName.trim() || '未识别岗位'
+  if (!markdownContent) {
+    collectionError.value = '请先确认候选正文，正文不能为空。'
     return
   }
   collectionSubmitting.value = true
@@ -555,17 +915,29 @@ async function importCollectionCandidate(candidate) {
       {
         method: 'POST',
         body: JSON.stringify({
-          company_name: draft.companyName.trim(),
-          role_name: draft.roleName.trim(),
+          company_name: companyName,
+          role_name: roleName,
           interview_date: draft.interviewDate || null,
           summary_text: draft.summary.trim() || candidate.title || null,
-          tags: parseTags(draft.tags)
+          tags: parseTags(draft.tags),
+          markdown_content: markdownContent
         })
       }
     )
     await finishImport(payload)
-    showCollectionModal.value = false
-    collectionDraft.value = createCollectionDraft()
+    if (['xiaohongshu', 'keyword'].includes(collectionMode.value)) {
+      collectionCandidates.value = collectionCandidates.value.map((item) => (
+        item.id === candidate.id
+          ? { ...item, imported_experience_id: payload.id, status: 'imported' }
+          : item
+      ))
+      syncCandidateDrafts(collectionCandidates.value)
+      collectionNotice.value = '已保存这条已核对的面经正文，并写入面经库。'
+      await loadTree({ preserveSelection: false })
+    } else {
+      showCollectionModal.value = false
+      collectionDraft.value = createCollectionDraft()
+    }
   } catch (error) {
     collectionError.value = error instanceof Error ? error.message : '候选资料入库失败。'
   } finally {
@@ -575,6 +947,7 @@ async function importCollectionCandidate(candidate) {
 
 function handleFileChange(event) {
   importFiles.value = Array.from(event.target.files ?? [])
+  createFileProgressItems(importFiles.value)
   fileParseResult.value = null
   parsedFileImports.value = []
   importError.value = ''
@@ -622,26 +995,36 @@ async function parseFileImport() {
     return
   }
   importing.value = true
+  if (fileProgressItems.value.length !== importFiles.value.length) {
+    createFileProgressItems(importFiles.value)
+  }
   importProgress.value = {
     percent: 3,
     phase: '正在准备解析',
-    detail: '正在安全传输文件，并准备提取面经正文。'
+    detail: '正在传输文件，并准备提取面经正文。',
+    fileIndex: 1,
+    fileTotal: importFiles.value.length,
+    fileName: importFiles.value[0]?.name ?? ''
   }
   importError.value = ''
   try {
     const parsedItems = []
     for (let index = 0; index < importFiles.value.length; index += 1) {
       const file = importFiles.value[index]
-      importProgress.value = {
-        percent: Math.max(3, Math.round((index / importFiles.value.length) * 100)),
-        phase: `正在解析第 ${index + 1}/${importFiles.value.length} 份材料`,
-        detail: file.name
-      }
+      const context = { index: index + 1, total: importFiles.value.length, fileName: file.name }
+      updateFileParseProgress(context, { percent: 0, phase: '准备解析', detail: `${file.name} 正在排队` })
       const data = new FormData()
       if (manualDraft.sourcePlatform.trim()) data.set('source_platform', manualDraft.sourcePlatform)
       if (manualDraft.sourceUrl.trim()) data.set('source_url', manualDraft.sourceUrl)
       data.set('source_file', file)
-      const payload = await requestFileParseWithProgress(data)
+      let payload
+      try {
+        payload = await requestFileParseWithProgress(data, context)
+        completeFileParse(context)
+      } catch (error) {
+        failFileParse(context, error)
+        throw error
+      }
       parsedItems.push({
         fileName: file.name,
         draft: normalizeParsedFileDraft(payload, manualDraft),
@@ -723,6 +1106,7 @@ onMounted(() => loadTree({ preserveSelection: false }))
 
 onBeforeUnmount(() => {
   if (queryTimer) window.clearTimeout(queryTimer)
+  stopCollectionPolling()
 })
 </script>
 
@@ -733,7 +1117,7 @@ onBeforeUnmount(() => {
         <p class="library-description">把零散经历沉淀成可检索、可追溯的面试证据</p>
       </div>
       <div class="library-actions">
-        <button type="button" class="quiet-action collection-action" @click="openCollection('keyword')">自动采集</button>
+        <button type="button" class="quiet-action collection-action" @click="openCollection('xiaohongshu')">小红书公开内容导入</button>
         <button type="button" class="quiet-action" @click="openImport('text')">粘贴正文</button>
         <button type="button" class="primary-action" @click="openImport('file')">导入材料</button>
       </div>
@@ -833,38 +1217,32 @@ onBeforeUnmount(() => {
             </div>
           </header>
 
-          <section class="evidence-strip">
-            <div>
-              <span>来源</span>
-              <strong>{{ selectedExperience.source_platform || sourceText(selectedExperience.source_type) }}</strong>
-            </div>
-            <div>
-              <span>索引版本</span>
-              <strong>{{ selectedExperience.chunking_version || '等待建立' }}</strong>
-            </div>
-            <div>
-              <span>最后更新</span>
-              <strong>{{ formatUpdatedAt(selectedExperience.updated_at) }}</strong>
-            </div>
+          <section class="experience-context-strip">
+            <span>来源 · {{ selectedExperience.source_platform || sourceText(selectedExperience.source_type) }}</span>
+            <span v-if="selectedExperience.updated_at">更新 · {{ formatUpdatedAt(selectedExperience.updated_at) }}</span>
             <div class="tag-list">
               <span v-for="tag in selectedTags" :key="tag"># {{ tag }}</span>
-              <em v-if="!selectedTags.length">尚未标注主题</em>
             </div>
           </section>
 
           <div v-if="editMode" class="editor-layout">
-            <label class="editor-field summary-field">
-              <span>摘要</span>
-              <input v-model="editorSummary" type="text" placeholder="一句话说明这份面经的价值" />
-            </label>
-            <label class="editor-field tag-field">
-              <span>标签</span>
-              <input v-model="editorTags" type="text" placeholder="例如：一面，Java，系统设计（用逗号分隔）" />
-            </label>
-            <label class="editor-field markdown-field">
-              <span>面经 Markdown</span>
+            <label class="editor-field markdown-field editor-canvas">
+              <span><i>CONTENT EDITOR</i>面经正文 <em>{{ editorMarkdown.trim().length }} 字</em></span>
               <textarea v-model="editorMarkdown" spellcheck="false" aria-label="编辑面经 Markdown"></textarea>
             </label>
+            <details class="editor-support-panel">
+              <summary>补充信息 <span>摘要与标签</span></summary>
+              <div class="editor-support-fields">
+                <label class="editor-field summary-field">
+                  <span>摘要</span>
+                  <input v-model="editorSummary" type="text" placeholder="一句话说明这份面经的价值" />
+                </label>
+                <label class="editor-field tag-field">
+                  <span>标签</span>
+                  <input v-model="editorTags" type="text" placeholder="例如：一面，Java，系统设计（用逗号分隔）" />
+                </label>
+              </div>
+            </details>
           </div>
           <section v-else class="reading-layout">
             <aside v-if="selectedExperience.summary_text" class="summary-note">
@@ -902,6 +1280,17 @@ onBeforeUnmount(() => {
               <div class="progress-track" aria-hidden="true"><i :style="{ width: `${importProgress?.percent ?? 0}%` }"></i></div>
               <strong class="progress-phase">{{ importProgress?.phase || '正在准备解析' }}</strong>
               <p>{{ importProgress?.detail || '系统会自动识别正文、公司、岗位与面试线索。' }}</p>
+              <div class="file-progress-context">
+                <span>第 {{ importProgress?.fileIndex ?? 1 }} / {{ importProgress?.fileTotal ?? importFileCount }} 份</span>
+                <strong>{{ importProgress?.fileName || '正在准备材料' }}</strong>
+              </div>
+              <ol v-if="fileProgressItems.length" class="file-progress-list">
+                <li v-for="item in fileProgressItems" :key="`${item.index}-${item.name}`" :class="`is-${item.state}`">
+                  <span>{{ item.index }}</span>
+                  <strong>{{ item.name }}</strong>
+                  <em>{{ fileProgressStateText(item) }}</em>
+                </li>
+              </ol>
             </div>
           </div>
           <header>
@@ -973,64 +1362,253 @@ onBeforeUnmount(() => {
         <section class="collection-dialog" role="dialog" aria-modal="true" aria-labelledby="collectionTitle">
           <header class="collection-dialog-header">
             <div>
-              <p class="library-kicker">PUBLIC INTERVIEW SOURCES</p>
-              <h2 id="collectionTitle">采集公开面经资料</h2>
-              <p>从公开链接导入正文，或登记关键词采集任务。受登录、验证码或平台规则限制的站点会明确提示需要授权连接器，不会伪造抓取结果。</p>
+              <p class="library-kicker">INTERVIEW SOURCE IMPORT</p>
+              <h2 id="collectionTitle">导入小红书公开面经资料</h2>
+              <p>粘贴小红书笔记、收藏、主页或搜索链接。系统会尝试读取服务端实际可访问的公开笔记，完成正文与图片文字解析，再由 Agent 整理为可编辑候选；只有你确认保存后才会写入面经库。</p>
             </div>
             <button type="button" class="close-button" :disabled="collectionSubmitting" aria-label="关闭" @click="closeCollection">×</button>
           </header>
 
           <nav class="import-tabs collection-tabs" aria-label="采集方式">
+            <button type="button" :class="{ active: collectionMode === 'xiaohongshu' }" @click="collectionMode = 'xiaohongshu'">小红书链接导入</button>
+            <button type="button" :class="{ active: collectionMode === 'url' }" @click="collectionMode = 'url'">单篇公开链接</button>
             <button type="button" :class="{ active: collectionMode === 'keyword' }" @click="collectionMode = 'keyword'">关键词采集</button>
-            <button type="button" :class="{ active: collectionMode === 'url' }" @click="collectionMode = 'url'">公开链接导入</button>
           </nav>
 
           <p v-if="collectionError" class="dialog-error">{{ collectionError }}</p>
           <p v-if="collectionNotice" class="dialog-success">{{ collectionNotice }}</p>
 
-          <form v-if="collectionMode === 'keyword'" class="collection-form" @submit.prevent="submitKeywordCollection">
-            <section class="collection-section">
+          <form v-if="collectionMode === 'xiaohongshu'" class="collection-form xiaohongshu-import-form" @submit.prevent="submitXiaohongshuCollection">
+            <section class="collection-section xiaohongshu-source-section">
               <div class="collection-section-heading">
                 <div>
-                  <h3>选择资料来源</h3>
-                  <p>目前可登记平台关键词任务；只有具备平台许可的连接器才会执行批量采集。</p>
+                  <h3>粘贴小红书链接</h3>
+                  <p>可提交公开笔记、用户主页、收藏页和搜索结果页；列表页仅会导入服务端实际可读取的笔记。任务按“发现链接 → 正文和图片解析 → Agent 整理 → 人工确认入库”执行。</p>
                 </div>
-                <span v-if="collectionLoading" class="collection-loading">正在加载平台</span>
+                <span class="collection-loading">小红书</span>
               </div>
-              <div class="platform-grid">
-                <button
-                  v-for="platform in collectionPlatforms"
-                  :key="platform.key"
-                  type="button"
-                  class="platform-card"
-                  :class="{ active: collectionDraft.platformKey === platform.key }"
-                  @click="collectionDraft.platformKey = platform.key"
-                >
-                  <strong>{{ platform.label }}</strong>
-                  <span>{{ platform.connector_kind === 'user_authorized_browser' ? '需授权连接器' : '平台能力待接入' }}</span>
-                </button>
+              <label class="collection-field">小红书公开 URL
+                <input v-model="collectionDraft.sourceUrl" type="url" required maxlength="2000" placeholder="https://www.xiaohongshu.com/explore/..." />
+              </label>
+              <div class="collection-options-grid">
+                <label class="collection-field compact-field">最多导入数量
+                  <input v-model.number="collectionDraft.requestedLimit" type="number" min="1" max="50" inputmode="numeric" />
+                </label>
+                <label class="collection-option-toggle">
+                  <input v-model="collectionDraft.includeImages" type="checkbox" />
+                  <span>
+                    <strong>识别多张图片文字</strong>
+                    <small>把图片中的面试流程、题目和复盘补进正文</small>
+                  </span>
+                </label>
+                <p class="collection-human-review-note">每条候选都会先由 Agent 整理为可编辑正文；只有点击“保存到面经库”后才会建立检索索引。</p>
+              </div>
+            </section>
+
+            <section v-if="collectionJob" class="collection-job-card xiaohongshu-job-card" :class="`job-${collectionJob.status}`">
+              <div class="collection-job-heading">
+                <div>
+                  <span>任务状态</span>
+                  <strong>{{ collectionJobStatusText(collectionJob.status) }}</strong>
+                </div>
+                <em>{{ Math.round(collectionProgress.percent) }}%</em>
+              </div>
+              <div class="collection-stage-track" aria-label="采集阶段">
+                <span v-for="(stage, index) in ['发现链接', '读取正文', 'OCR 图片', 'Agent 整理', '人工确认入库']" :key="stage" :class="{ active: collectionProgress.currentIndex >= index, current: collectionProgress.currentIndex === index && !isCollectionTerminal(collectionJob.status) }">
+                  <i>{{ index + 1 }}</i>
+                  {{ stage }}
+                </span>
+              </div>
+              <div class="collection-progress-line" aria-hidden="true"><i :style="{ width: `${collectionProgress.percent}%` }"></i></div>
+              <p>{{ collectionProgress.detail || collectionJob.error_message || '任务正在后台执行，完成后会自动刷新候选与入库结果。' }}</p>
+            </section>
+
+            <section v-if="collectionJob" class="collection-summary-grid" aria-label="采集结果统计">
+              <div><span>发现链接</span><strong>{{ collectionAnalysisSummary.discovered }}</strong></div>
+              <div><span>有效面经</span><strong>{{ collectionAnalysisSummary.valid }}</strong></div>
+              <div><span>已写入</span><strong>{{ collectionAnalysisSummary.imported }}</strong></div>
+              <div><span>采集不完整</span><strong>{{ collectionAnalysisSummary.incomplete }}</strong></div>
+              <div><span>已过滤 / 失败</span><strong>{{ collectionAnalysisSummary.rejected + collectionAnalysisSummary.failed }}</strong></div>
+            </section>
+
+            <section v-if="collectionCandidates.length" class="candidate-list xiaohongshu-candidate-list">
+              <header class="candidate-list-header">
+                <div>
+                  <p class="section-label">COLLECTION RESULTS</p>
+                  <h3>采集结果</h3>
+                </div>
+                <span>{{ collectionCandidates.length }} 条候选</span>
+              </header>
+              <article v-for="candidate in collectionCandidates" :key="candidate.id" class="candidate-card xiaohongshu-candidate-card">
+                <header>
+                  <div>
+                    <p class="section-label">{{ candidate.source_platform || '小红书' }}</p>
+                    <h3>{{ candidate.title || '未命名笔记' }}</h3>
+                    <a v-if="candidate.source_url" :href="candidate.source_url" target="_blank" rel="noreferrer">打开来源 ↗</a>
+                  </div>
+                  <span class="candidate-status" :class="{ 'is-imported': candidateImportedExperienceId(candidate), 'is-valid': candidateValidity(candidate) === true, 'is-invalid': candidateValidity(candidate) === false, 'is-incomplete': candidateAnalysisStatus(candidate) === 'insufficient_source', 'is-failed': ['failed', 'blocked', 'empty'].includes(candidate.status) }">{{ candidateStatusText(candidate) }}</span>
+                </header>
+                <p v-if="candidate.excerpt || candidate.snippet" class="candidate-excerpt">{{ candidate.excerpt || candidate.snippet }}</p>
+                <div v-if="candidateCompany(candidate) || candidateRole(candidate) || candidateConfidence(candidate)" class="candidate-analysis-meta">
+                  <span v-if="candidateCompany(candidate)">公司：{{ candidateCompany(candidate) }}</span>
+                  <span v-if="candidateRole(candidate)">岗位：{{ candidateRole(candidate) }}</span>
+                  <span v-if="candidateConfidence(candidate)">置信度：{{ candidateConfidence(candidate) }}</span>
+                </div>
+                <p class="candidate-evidence">{{ candidateEvidenceText(candidate) }}</p>
+                <p v-if="candidateIncompleteReason(candidate)" class="candidate-incomplete-reason">{{ candidateIncompleteReason(candidate) }}</p>
+                <p v-if="candidateReason(candidate)" class="candidate-reason">{{ candidateReason(candidate) }}</p>
+                <section v-if="canManuallySaveCandidate(candidate) && candidateDraft(candidate)" class="candidate-review">
+                  <header class="candidate-review-heading">
+                    <div>
+                      <p class="section-label">HUMAN REVIEW</p>
+                      <strong>核对正文后保存到面经库</strong>
+                    </div>
+                    <em>{{ candidateValidity(candidate) === true ? 'Agent 已提取' : '需人工核验' }}</em>
+                  </header>
+                  <p v-if="candidateValidity(candidate) !== true" class="candidate-review-hint">系统未确认这是一条完整面经；请核对正文来源与内容，确认后仍可手动保存。</p>
+                  <label class="candidate-body-field">面经正文
+                    <textarea v-model="candidateDrafts[candidate.id].markdownContent" spellcheck="false" :aria-label="`编辑 ${candidate.title || '候选面经'} 正文`"></textarea>
+                  </label>
+                  <div class="form-grid candidate-import-meta">
+                    <label>公司名称<input v-model="candidateDrafts[candidate.id].companyName" placeholder="待归档公司" /></label>
+                    <label>面试岗位<input v-model="candidateDrafts[candidate.id].roleName" placeholder="未识别岗位" /></label>
+                  </div>
+                  <details class="candidate-extra-fields">
+                    <summary>补充信息（可选）</summary>
+                    <div class="form-grid">
+                      <label>面试日期<input v-model="candidateDrafts[candidate.id].interviewDate" type="date" /></label>
+                      <label>标签<input v-model="candidateDrafts[candidate.id].tags" placeholder="一面，Java，系统设计" /></label>
+                    </div>
+                    <label>摘要<input v-model="candidateDrafts[candidate.id].summary" placeholder="说明这份面经的价值" /></label>
+                  </details>
+                  <footer>
+                    <button type="button" class="primary-action" :disabled="collectionSubmitting" @click="importCollectionCandidate(candidate)">{{ collectionSubmitting ? '正在保存…' : '保存到面经库' }}</button>
+                  </footer>
+                </section>
+                <details v-else-if="candidate.markdown_content" class="candidate-markdown">
+                  <summary>查看已保存的面经正文</summary>
+                  <pre>{{ candidate.markdown_content }}</pre>
+                </details>
+              </article>
+            </section>
+
+            <section v-else-if="collectionJob && !isCollectionTerminal(collectionJob.status)" class="collection-waiting-card">
+              <span class="thinking-orbit"></span>
+              <strong>正在整理候选资料</strong>
+              <p>已开始处理，候选笔记和入库结果会在这里自动出现。</p>
+            </section>
+
+            <footer>
+              <button type="button" class="quiet-action" :disabled="collectionSubmitting" @click="closeCollection">{{ collectionJob ? '关闭并后台继续' : '取消' }}</button>
+              <button v-if="!collectionJob || isCollectionTerminal(collectionJob.status)" class="primary-action" :disabled="collectionSubmitting">
+                {{ collectionSubmitting ? '正在创建任务…' : '开始采集并分析' }}
+              </button>
+            </footer>
+          </form>
+
+          <form v-else-if="collectionMode === 'keyword'" class="collection-form xiaohongshu-import-form" @submit.prevent="submitKeywordCollection">
+            <section class="collection-section xiaohongshu-source-section">
+              <div class="collection-section-heading">
+                <div>
+                  <h3>搜索小红书公开笔记</h3>
+                  <p>系统会将关键词转换为公开搜索页，只读取服务端实际可访问且页面已经暴露的笔记。每条材料会由 Agent 整理为候选正文，等待你核对并手动保存。</p>
+                </div>
+                <span class="collection-loading">小红书</span>
               </div>
             </section>
 
             <label class="collection-field">检索关键词
-              <input v-model="collectionDraft.keyword" required maxlength="120" placeholder="例如：Agent 开发 面经" />
+              <input v-model="collectionDraft.keyword" required maxlength="120" placeholder="例如：东方财富 AI 应用开发 面经" />
             </label>
-            <label class="collection-field compact-field">计划获取数量
-              <input v-model.number="collectionDraft.requestedLimit" type="number" min="1" max="30" />
+            <label class="collection-field compact-field">最多分析笔记数
+              <input v-model.number="collectionDraft.requestedLimit" type="number" min="1" max="50" inputmode="numeric" />
             </label>
 
-            <section v-if="collectionJob" class="collection-job-card" :class="`job-${collectionJob.status}`">
-              <div>
-                <span>任务状态</span>
-                <strong>{{ collectionJob.status === 'needs_user_interaction' ? '需要授权连接器' : collectionJob.status }}</strong>
+            <section v-if="collectionJob" class="collection-job-card xiaohongshu-job-card" :class="`job-${collectionJob.status}`">
+              <div class="collection-job-heading">
+                <div>
+                  <span>任务状态</span>
+                  <strong>{{ collectionJobStatusText(collectionJob.status) }}</strong>
+                </div>
+                <em>{{ Math.round(collectionProgress.percent) }}%</em>
               </div>
-              <p>{{ collectionJob.error_message || collectionJob.policy_decision || '任务已创建。' }}</p>
+              <div class="collection-stage-track" aria-label="采集阶段">
+                <span v-for="(stage, index) in ['发现链接', '读取正文', 'OCR 图片', 'Agent 整理', '人工确认入库']" :key="stage" :class="{ active: collectionProgress.currentIndex >= index, current: collectionProgress.currentIndex === index && !isCollectionTerminal(collectionJob.status) }">
+                  <i>{{ index + 1 }}</i>
+                  {{ stage }}
+                </span>
+              </div>
+              <div class="collection-progress-line" aria-hidden="true"><i :style="{ width: `${collectionProgress.percent}%` }"></i></div>
+              <p>{{ collectionProgress.detail || collectionJob.error_message || '任务正在后台执行，完成后会自动刷新候选与入库结果。' }}</p>
+            </section>
+
+            <section v-if="collectionJob" class="collection-summary-grid" aria-label="采集结果统计">
+              <div><span>发现链接</span><strong>{{ collectionAnalysisSummary.discovered }}</strong></div>
+              <div><span>有效面经</span><strong>{{ collectionAnalysisSummary.valid }}</strong></div>
+              <div><span>已写入</span><strong>{{ collectionAnalysisSummary.imported }}</strong></div>
+              <div><span>采集不完整</span><strong>{{ collectionAnalysisSummary.incomplete }}</strong></div>
+              <div><span>已过滤 / 失败</span><strong>{{ collectionAnalysisSummary.rejected + collectionAnalysisSummary.failed }}</strong></div>
+            </section>
+
+            <section v-if="collectionCandidates.length" class="candidate-list xiaohongshu-candidate-list">
+              <header class="candidate-list-header">
+                <div><p class="section-label">COLLECTION RESULTS</p><h3>采集结果</h3></div>
+                <span>{{ collectionCandidates.length }} 条候选</span>
+              </header>
+              <article v-for="candidate in collectionCandidates" :key="candidate.id" class="candidate-card xiaohongshu-candidate-card">
+                <header>
+                  <div>
+                    <p class="section-label">{{ candidate.source_platform || '小红书' }}</p>
+                    <h3>{{ candidate.title || '未命名笔记' }}</h3>
+                    <a v-if="candidate.source_url" :href="candidate.source_url" target="_blank" rel="noreferrer">打开来源 ↗</a>
+                  </div>
+                  <span class="candidate-status" :class="{ 'is-imported': candidateImportedExperienceId(candidate), 'is-valid': candidateValidity(candidate) === true, 'is-invalid': candidateValidity(candidate) === false, 'is-incomplete': candidateAnalysisStatus(candidate) === 'insufficient_source', 'is-failed': ['failed', 'blocked', 'empty'].includes(candidate.status) }">{{ candidateStatusText(candidate) }}</span>
+                </header>
+                <p v-if="candidate.excerpt || candidate.snippet" class="candidate-excerpt">{{ candidate.excerpt || candidate.snippet }}</p>
+                <div v-if="candidateCompany(candidate) || candidateRole(candidate) || candidateConfidence(candidate)" class="candidate-analysis-meta">
+                  <span v-if="candidateCompany(candidate)">公司：{{ candidateCompany(candidate) }}</span>
+                  <span v-if="candidateRole(candidate)">岗位：{{ candidateRole(candidate) }}</span>
+                  <span v-if="candidateConfidence(candidate)">置信度：{{ candidateConfidence(candidate) }}</span>
+                </div>
+                <p class="candidate-evidence">{{ candidateEvidenceText(candidate) }}</p>
+                <p v-if="candidateIncompleteReason(candidate)" class="candidate-incomplete-reason">{{ candidateIncompleteReason(candidate) }}</p>
+                <p v-if="candidateReason(candidate)" class="candidate-reason">{{ candidateReason(candidate) }}</p>
+                <section v-if="canManuallySaveCandidate(candidate) && candidateDraft(candidate)" class="candidate-review">
+                  <header class="candidate-review-heading">
+                    <div>
+                      <p class="section-label">HUMAN REVIEW</p>
+                      <strong>核对正文后保存到面经库</strong>
+                    </div>
+                    <em>{{ candidateValidity(candidate) === true ? 'Agent 已提取' : '需人工核验' }}</em>
+                  </header>
+                  <p v-if="candidateValidity(candidate) !== true" class="candidate-review-hint">系统未确认这是一条完整面经；请核对正文来源与内容，确认后仍可手动保存。</p>
+                  <label class="candidate-body-field">面经正文
+                    <textarea v-model="candidateDrafts[candidate.id].markdownContent" spellcheck="false" :aria-label="`编辑 ${candidate.title || '候选面经'} 正文`"></textarea>
+                  </label>
+                  <div class="form-grid candidate-import-meta">
+                    <label>公司名称<input v-model="candidateDrafts[candidate.id].companyName" placeholder="待归档公司" /></label>
+                    <label>面试岗位<input v-model="candidateDrafts[candidate.id].roleName" placeholder="未识别岗位" /></label>
+                  </div>
+                  <details class="candidate-extra-fields">
+                    <summary>补充信息（可选）</summary>
+                    <div class="form-grid">
+                      <label>面试日期<input v-model="candidateDrafts[candidate.id].interviewDate" type="date" /></label>
+                      <label>标签<input v-model="candidateDrafts[candidate.id].tags" placeholder="一面，Java，系统设计" /></label>
+                    </div>
+                    <label>摘要<input v-model="candidateDrafts[candidate.id].summary" placeholder="说明这份面经的价值" /></label>
+                  </details>
+                  <footer>
+                    <button type="button" class="primary-action" :disabled="collectionSubmitting" @click="importCollectionCandidate(candidate)">{{ collectionSubmitting ? '正在保存…' : '保存到面经库' }}</button>
+                  </footer>
+                </section>
+                <details v-else-if="candidate.markdown_content" class="candidate-markdown"><summary>查看已保存的面经正文</summary><pre>{{ candidate.markdown_content }}</pre></details>
+              </article>
             </section>
 
             <footer>
               <button type="button" class="quiet-action" :disabled="collectionSubmitting" @click="closeCollection">取消</button>
-              <button class="primary-action" :disabled="collectionSubmitting || collectionLoading">
-                {{ collectionSubmitting ? '正在创建任务…' : '创建采集任务' }}
+              <button v-if="!collectionJob || isCollectionTerminal(collectionJob.status)" class="primary-action" :disabled="collectionSubmitting">
+                {{ collectionSubmitting ? '正在创建任务…' : '开始采集并分析' }}
               </button>
             </footer>
           </form>
@@ -1134,6 +1712,125 @@ button:disabled { cursor: wait; opacity: .62; }
 .import-backdrop { position: fixed; z-index: 30; inset: 0; display: grid; place-items: center; background: rgba(38, 51, 32, .34); padding: 20px; }.import-dialog { position: relative; width: min(860px, 100%); max-height: min(860px, calc(100vh - 40px)); overflow: auto; border: 1px solid #e1e8d6; border-radius: 20px; background: #fff; box-shadow: 0 30px 90px rgba(21, 33, 17, .24); }.import-dialog > header { display: flex; align-items: start; justify-content: space-between; gap: 20px; border-bottom: 1px solid #edf1e8; padding: 24px 26px 18px; }.import-dialog h2 { margin: 5px 0 0; font-size: 25px; }.import-dialog header p:not(.library-kicker) { max-width: 620px; margin: 7px 0 0; color: #81907b; font-size: 13px; line-height: 1.6; }.close-button { width: 34px; height: 34px; flex: none; background: #fafbf7; color: #728067; font-size: 26px; font-weight: 400; line-height: 1; }.file-parse-overlay { position: absolute; z-index: 4; inset: 0; display: grid; place-items: center; background: rgba(249, 252, 245, .78); backdrop-filter: blur(3px); }.file-parse-progress-card { width: min(390px, calc(100% - 40px)); border: 1px solid #d7e6bf; border-radius: 16px; background: rgba(255, 255, 255, .96); box-shadow: 0 18px 48px rgba(48, 71, 33, .16); padding: 22px; }.progress-heading { display: flex; align-items: center; justify-content: space-between; color: #3f5635; font-size: 15px; font-weight: 800; }.progress-heading strong { color: #73953a; font-size: 20px; }.progress-track { height: 9px; overflow: hidden; margin: 16px 0 14px; border-radius: 999px; background: #e9f0df; }.progress-track i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #8eb33e, #b9d768); box-shadow: 0 0 14px rgba(131, 167, 52, .42); transition: width .35s ease; }.progress-phase { color: #40523a; font-size: 14px; }.file-parse-progress-card p { margin: 6px 0 0; color: #7c8974; font-size: 12px; line-height: 1.65; }
 .import-tabs { display: flex; gap: 6px; border-bottom: 1px solid #edf1e8; padding: 12px 26px 0; }.import-tabs button { border: 0; border-bottom: 2px solid transparent; background: transparent; color: #899486; cursor: pointer; padding: 8px 12px 10px; font: inherit; font-size: 13px; font-weight: 800; }.import-tabs button.active { border-bottom-color: #87a93a; color: #55752b; }.import-form { display: grid; gap: 12px; padding: 20px 26px 24px; }.import-form label { display: grid; gap: 6px; color: #4a5a47; font-size: 12px; font-weight: 800; }.import-form textarea { min-height: 220px; resize: vertical; padding: 12px; line-height: 1.7; }.form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }.file-intake-intro { border-left: 3px solid #8bae39; border-radius: 0 9px 9px 0; background: #f6faed; padding: 11px 13px; }.file-intake-intro strong { color: #4c6a29; font-size: 13px; }.file-intake-intro p { margin: 4px 0 0; color: #718064; font-size: 12px; line-height: 1.6; }.file-picker { min-height: 68px; place-content: center; border: 1px dashed #b9cba2; border-radius: 10px; background: #f8fbf3; padding: 8px 12px; cursor: pointer; }.file-picker input { position: absolute; width: 1px; height: 1px; opacity: 0; }.file-picker span { color: #6b833e; font-size: 12px; }.file-import-strategy { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 14px; margin: 0; border: 1px solid #e2ead8; border-radius: 11px; background: #fcfdf9; padding: 11px 13px; }.file-import-strategy legend { padding: 0 5px; color: #4f6541; font-size: 12px; font-weight: 850; }.file-import-strategy label { display: flex; align-items: center; gap: 7px; color: #52634d; cursor: pointer; font-size: 12px; font-weight: 750; }.file-import-strategy input { width: auto; accent-color: #89ab38; }.file-import-strategy p { grid-column: 1 / -1; margin: 2px 0 0; color: #7a8972; font-size: 12px; line-height: 1.55; }.recognition-card { display: grid; gap: 5px; border: 1px solid #dcebc6; border-radius: 11px; background: #fbfdf7; padding: 12px 13px; }.recognition-card > div { display: flex; align-items: center; justify-content: space-between; gap: 10px; }.recognition-card strong { color: #48642b; font-size: 13px; }.recognition-card span { border-radius: 999px; background: #eaf4d7; color: #648331; padding: 4px 8px; font-size: 11px; font-weight: 800; }.recognition-card p { margin: 0; color: #71806b; font-size: 12px; line-height: 1.55; }.recognition-card .recognition-warning { color: #a37237; }.import-form footer { display: flex; justify-content: end; gap: 8px; margin-top: 4px; }.dialog-error,.dialog-success { margin: 14px 26px 0; border-radius: 9px; padding: 10px 12px; font-size: 13px; }.dialog-error { background: #fff1ef; color: #ab5252; }.dialog-success { background: #eef7df; color: #5f8830; }
 .collection-backdrop { position: fixed; z-index: 31; inset: 0; display: grid; place-items: center; background: rgba(31, 43, 27, .43); padding: 20px; }.collection-dialog { width: min(960px, 100%); max-height: min(850px, calc(100vh - 40px)); overflow: auto; border: 1px solid #dfe8d2; border-radius: 20px; background: #fff; box-shadow: 0 30px 90px rgba(21, 33, 17, .28); }.collection-dialog-header { display: flex; align-items: start; justify-content: space-between; gap: 20px; border-bottom: 1px solid #edf1e8; padding: 24px 26px 18px; }.collection-dialog h2 { margin: 5px 0 0; font-size: 25px; }.collection-dialog-header p:not(.library-kicker) { max-width: 690px; margin: 7px 0 0; color: #71806c; font-size: 13px; line-height: 1.65; }.collection-tabs { background: #fbfcf8; }.collection-form { display: grid; gap: 16px; padding: 22px 26px 26px; }.collection-section { border: 1px solid #e6eddf; border-radius: 14px; background: #fbfcf9; padding: 16px; }.collection-section-heading { display: flex; align-items: start; justify-content: space-between; gap: 16px; margin-bottom: 14px; }.collection-section h3,.candidate-card h3 { margin: 0; color: #314230; font-size: 16px; }.collection-section-heading p { max-width: 640px; margin: 5px 0 0; color: #7e8d77; font-size: 12px; line-height: 1.6; }.collection-loading { flex: none; border-radius: 999px; background: #edf4df; color: #6d8937; padding: 5px 9px; font-size: 11px; font-weight: 800; }.platform-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; }.platform-card { display: grid; gap: 4px; min-height: 78px; border: 1px solid #dfe8d5; border-radius: 11px; background: #fff; color: #405040; cursor: pointer; padding: 12px; text-align: left; transition: border-color .16s ease, background .16s ease, transform .16s ease; }.platform-card strong { font-size: 13px; }.platform-card span { color: #8b9786; font-size: 11px; }.platform-card:hover,.platform-card.active { border-color: #91b236; background: #f2f8e5; }.platform-card:hover { transform: translateY(-1px); }.collection-field { display: grid; gap: 6px; color: #4a5a47; font-size: 12px; font-weight: 800; }.collection-field input { width: 100%; box-sizing: border-box; border: 1px solid #dce6d6; border-radius: 9px; background: #fff; color: #30422d; padding: 10px 11px; font: inherit; font-size: 13px; }.compact-field { max-width: 220px; }.collection-form footer { display: flex; justify-content: end; gap: 8px; }.collection-job-card { display: grid; gap: 7px; border: 1px solid #dcebc6; border-radius: 12px; background: #f6faee; padding: 14px 16px; }.collection-job-card > div { display: flex; align-items: center; justify-content: space-between; gap: 14px; }.collection-job-card span { color: #7d8d6b; font-size: 11px; }.collection-job-card strong { color: #55752b; font-size: 13px; }.collection-job-card p { margin: 0; color: #5d6d56; font-size: 12px; line-height: 1.6; }.candidate-card { display: grid; gap: 14px; border: 1px solid #dce8cb; border-radius: 14px; background: #fcfdf9; padding: 17px; }.candidate-card > header { display: flex; align-items: start; justify-content: space-between; gap: 14px; }.candidate-card header > div { display: grid; gap: 5px; }.candidate-card header > span { flex: none; border-radius: 999px; background: #edf4df; color: #688436; padding: 5px 8px; font-size: 11px; font-weight: 800; }.candidate-card a { color: #638331; font-size: 12px; font-weight: 750; text-decoration: none; }.candidate-excerpt { margin: 0; color: #596856; font-size: 13px; line-height: 1.7; }.candidate-markdown { border-radius: 10px; background: #f6f8f3; color: #586656; }.candidate-markdown summary { cursor: pointer; padding: 10px 12px; font-size: 12px; font-weight: 800; }.candidate-markdown pre { max-height: 240px; overflow: auto; margin: 0; border-top: 1px solid #e7ece0; padding: 12px; color: #52604f; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 11px; line-height: 1.65; white-space: pre-wrap; word-break: break-word; }.candidate-meta-grid { margin-top: 2px; }.candidate-meta-grid label { display: grid; gap: 6px; color: #4a5a47; font-size: 12px; font-weight: 800; }.candidate-meta-grid input { width: 100%; box-sizing: border-box; border: 1px solid #dce6d6; border-radius: 9px; background: #fff; color: #30422d; padding: 10px 11px; font: inherit; font-size: 13px; }
+.xiaohongshu-import-form { gap: 14px; }.xiaohongshu-source-section { background: linear-gradient(135deg, #fbfdf7, #f4f9ea); }.collection-options-grid { display: grid; grid-template-columns: minmax(150px, .55fr) 1fr 1fr; align-items: stretch; gap: 10px; margin-top: 12px; }.collection-options-grid .compact-field { max-width: none; }.collection-option-toggle { display: flex; align-items: center; gap: 9px; border: 1px solid #e0eacd; border-radius: 10px; background: rgba(255,255,255,.76); padding: 10px 12px; cursor: pointer; }.collection-option-toggle input { width: 16px; height: 16px; margin: 0; accent-color: #89ab38; }.collection-option-toggle span { display: grid; gap: 3px; }.collection-option-toggle strong { color: #4a623b; font-size: 12px; }.collection-option-toggle small { color: #809076; font-size: 11px; line-height: 1.45; }.xiaohongshu-job-card { position: sticky; z-index: 2; top: 0; gap: 12px; border-color: #d5e6b8; background: rgba(248, 252, 240, .98); box-shadow: 0 10px 22px rgba(76, 104, 44, .08); }.collection-job-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }.collection-job-heading > div { display: grid; gap: 3px; }.collection-job-heading em { border-radius: 999px; background: #e5f1cf; color: #5f8430; padding: 5px 9px; font-size: 12px; font-style: normal; font-weight: 850; }.collection-stage-track { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; }.collection-stage-track span { display: grid; grid-template-columns: 19px minmax(0, 1fr); align-items: center; gap: 5px; color: #a0aa98; font-size: 10px; font-weight: 750; line-height: 1.25; }.collection-stage-track i { display: grid; width: 19px; height: 19px; place-items: center; border: 1px solid #d9e3ce; border-radius: 50%; background: #fff; color: #91a087; font-size: 10px; font-style: normal; }.collection-stage-track span.active { color: #668c30; }.collection-stage-track span.active i { border-color: #a7c766; background: #eaf5d4; color: #5f8430; }.collection-stage-track span.current i { box-shadow: 0 0 0 4px rgba(145,178,54,.14); }.collection-progress-line { height: 7px; overflow: hidden; border-radius: 999px; background: #e3ecd6; }.collection-progress-line i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #8bae39, #bbd76f); transition: width .35s ease; }.collection-summary-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 9px; }.collection-summary-grid > div { display: grid; gap: 4px; border: 1px solid #e6eddf; border-radius: 11px; background: #fbfcf9; padding: 11px 12px; }.collection-summary-grid span { color: #899783; font-size: 11px; }.collection-summary-grid strong { color: #4d6d2b; font-size: 18px; }.candidate-list { display: grid; gap: 10px; }.candidate-list-header { display: flex; align-items: end; justify-content: space-between; gap: 14px; padding: 2px 2px 0; }.candidate-list-header h3 { margin: 4px 0 0; color: #394c35; font-size: 17px; }.candidate-list-header > span { color: #7b8d6f; font-size: 12px; }.xiaohongshu-candidate-card { gap: 11px; }.candidate-status { white-space: nowrap; }.candidate-card header > .candidate-status.is-valid { background: #edf7d9; color: #5a8130; }.candidate-card header > .candidate-status.is-imported { background: #dff0c5; color: #4c7823; }.candidate-card header > .candidate-status.is-invalid { background: #fff1e8; color: #a26a34; }.candidate-card header > .candidate-status.is-incomplete { background: #fff7df; color: #9a702e; }.candidate-card header > .candidate-status.is-failed { background: #fff0ef; color: #ad5757; }.candidate-analysis-meta { display: flex; flex-wrap: wrap; gap: 6px; }.candidate-analysis-meta span { border-radius: 999px; background: #eef5e1; color: #668236; padding: 4px 8px; font-size: 11px; }.candidate-evidence { margin: 0; color: #798b70; font-size: 11px; line-height: 1.5; }.candidate-incomplete-reason { margin: 0; border-left: 3px solid #e0ab4e; border-radius: 0 8px 8px 0; background: #fff9e9; color: #85652d; padding: 8px 10px; font-size: 12px; line-height: 1.55; }.candidate-reason { margin: 0; border-left: 3px solid #e7b36e; border-radius: 0 8px 8px 0; background: #fff9ef; color: #8a683f; padding: 8px 10px; font-size: 12px; line-height: 1.55; }.collection-waiting-card { display: grid; place-items: center; gap: 8px; min-height: 128px; border: 1px dashed #cbdcb4; border-radius: 13px; background: #fbfdf8; padding: 20px; color: #6d7e63; text-align: center; }.collection-waiting-card .thinking-orbit { width: 25px; height: 25px; border-width: 2px; }.collection-waiting-card strong { color: #516747; font-size: 14px; }.collection-waiting-card p { margin: 0; font-size: 12px; }
+.experience-context-strip { display: flex; flex-wrap: wrap; align-items: center; gap: 7px 12px; border-bottom: 1px solid #eef2e9; background: #fbfcf8; color: #879380; padding: 10px 24px; font-size: 11px; }.experience-context-strip > span { white-space: nowrap; }.experience-context-strip .tag-list { margin-left: auto; }.editor-layout { grid-template-columns: minmax(0, 1fr); max-width: 1040px; margin: 0 auto; }.editor-canvas { gap: 10px; border: 1px solid #dfe8d4; border-radius: 15px; background: #fff; box-shadow: 0 12px 26px rgba(57, 75, 42, .05); padding: 18px; }.editor-canvas > span { display: flex; align-items: center; gap: 9px; color: #354b31; font-size: 15px; }.editor-canvas > span i { color: #87a23f; font-size: 10px; font-style: normal; letter-spacing: .1em; }.editor-canvas > span em { margin-left: auto; border-radius: 999px; background: #edf5df; color: #668335; padding: 4px 8px; font-size: 11px; font-style: normal; }.editor-canvas textarea { min-height: 560px; border-color: #e5ecde; border-radius: 11px; background: #fcfdfb; padding: 17px; font-family: "PingFang SC", "Microsoft YaHei", sans-serif; font-size: 15px; line-height: 1.85; }.editor-support-panel { border: 1px solid #e3eadc; border-radius: 12px; background: #fafcf8; color: #54654e; }.editor-support-panel summary { display: flex; align-items: center; justify-content: space-between; cursor: pointer; padding: 12px 14px; font-size: 12px; font-weight: 800; }.editor-support-panel summary span { color: #95a18d; font-weight: 600; }.editor-support-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; border-top: 1px solid #ebf0e6; padding: 13px 14px 15px; }.file-progress-context { display: flex; justify-content: space-between; gap: 10px; margin-top: 15px; color: #70815f; font-size: 11px; }.file-progress-context strong { overflow: hidden; color: #4d653b; text-align: right; text-overflow: ellipsis; white-space: nowrap; }.file-progress-list { display: grid; gap: 5px; max-height: 150px; overflow: auto; margin: 9px 0 0; padding: 0; list-style: none; }.file-progress-list li { display: grid; grid-template-columns: 21px minmax(0, 1fr) auto; align-items: center; gap: 7px; border-radius: 8px; background: #f8faf5; padding: 6px 8px; color: #71806b; font-size: 11px; }.file-progress-list li > span { display: grid; width: 20px; height: 20px; place-items: center; border-radius: 50%; background: #e8efdf; color: #6a843b; font-size: 10px; font-weight: 800; }.file-progress-list strong { overflow: hidden; color: #566751; text-overflow: ellipsis; white-space: nowrap; }.file-progress-list em { color: #88977e; font-size: 10px; font-style: normal; }.file-progress-list .is-parsing { background: #f2f8e7; }.file-progress-list .is-completed > span { background: #dcefc1; }.file-progress-list .is-failed { background: #fff4f1; }.file-progress-list .is-failed > span,.file-progress-list .is-failed em { color: #b45b52; }.collection-human-review-note { margin: 0; border: 1px solid #dce9c8; border-left: 3px solid #8eae39; border-radius: 0 10px 10px 0; background: #f8fbf2; color: #637759; padding: 11px 12px; font-size: 12px; line-height: 1.6; }.candidate-review { display: grid; gap: 11px; border-top: 1px solid #e4ecdc; padding-top: 14px; }.candidate-review-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }.candidate-review-heading > div { display: grid; gap: 3px; }.candidate-review-heading strong { color: #3d5436; font-size: 14px; }.candidate-review-heading em { flex: none; border-radius: 999px; background: #eff5e5; color: #6c8839; padding: 4px 8px; font-size: 11px; font-style: normal; font-weight: 750; }.candidate-review-hint { margin: 0; border-left: 3px solid #d8a550; background: #fff9ec; color: #86682d; padding: 8px 10px; font-size: 12px; line-height: 1.6; }.candidate-body-field { display: grid; gap: 7px; color: #47603e; font-size: 12px; font-weight: 850; }.candidate-body-field textarea { width: 100%; min-height: 340px; box-sizing: border-box; resize: vertical; border: 1px solid #dbe7d2; border-radius: 11px; background: #fff; color: #334732; padding: 14px; font-family: "PingFang SC", "Microsoft YaHei", sans-serif; font-size: 14px; line-height: 1.8; }.candidate-import-meta label,.candidate-extra-fields label { display: grid; gap: 6px; color: #53644d; font-size: 12px; font-weight: 750; }.candidate-import-meta input,.candidate-extra-fields input { width: 100%; box-sizing: border-box; border: 1px solid #dce6d6; border-radius: 9px; background: #fff; color: #30422d; padding: 10px 11px; font: inherit; font-size: 13px; }.candidate-extra-fields { border: 1px solid #e5ecdf; border-radius: 10px; background: #fafcf8; }.candidate-extra-fields summary { cursor: pointer; color: #607455; padding: 10px 11px; font-size: 12px; font-weight: 800; }.candidate-extra-fields[open] { padding-bottom: 11px; }.candidate-extra-fields[open] summary { margin-bottom: 10px; border-bottom: 1px solid #ebf0e6; }.candidate-extra-fields > .form-grid,.candidate-extra-fields > label { margin-right: 11px; margin-left: 11px; }.candidate-extra-fields > label { margin-top: 10px; }.candidate-review footer { display: flex; justify-content: flex-end; }
 @media (max-width: 900px) { .library-layout { grid-template-columns: 1fr; }.interview-tree-pane { max-height: 290px; }.evidence-strip { grid-template-columns: 1fr 1fr; }.library-header,.experience-header { align-items: start; flex-direction: column; }.experience-actions { width: 100%; justify-content: space-between; }.library-title-row { align-items: start; flex-direction: column; gap: 3px; }.editor-layout,.form-grid,.platform-grid { grid-template-columns: 1fr; }.collection-dialog { max-height: calc(100vh - 24px); }.collection-backdrop { padding: 12px; }.collection-dialog-header,.collection-form { padding-right: 18px; padding-left: 18px; }.collection-tabs { padding-right: 18px; padding-left: 18px; } }
+@media (max-width: 640px) { .library-page { gap:12px; }.library-header,.experience-header { padding:16px; }.evidence-strip { grid-template-columns:1fr; padding:12px 16px; }.reading-layout,.editor-layout { padding:18px 14px 26px; }.markdown-reading { border-radius:12px; padding:22px 18px 28px; font-size:15px; line-height:1.85; }.file-import-strategy { grid-template-columns:1fr; }.import-backdrop,.collection-backdrop { align-items:end; padding:0; }.import-dialog,.collection-dialog { width:100%; max-height:92dvh; border-radius:20px 20px 0 0; }.import-dialog > header,.collection-dialog-header { padding:18px 18px 14px; }.import-tabs,.collection-tabs { overflow-x:auto; padding-right:18px; padding-left:18px; }.import-form,.collection-form { padding:18px; }.import-form footer,.collection-form footer { flex-wrap:wrap; }.import-form footer button,.collection-form footer button { min-height:44px; flex:1; }.file-parse-progress-card { width:calc(100% - 28px); padding:18px; } }
+@media (max-width: 900px) {
+  .collection-options-grid { grid-template-columns: 1fr 1fr; }
+  .collection-options-grid .compact-field { grid-column: 1 / -1; max-width: 220px; }
+  .collection-stage-track { grid-template-columns: repeat(3, minmax(0, 1fr)); row-gap: 10px; }
+}
+@media (max-width: 640px) {
+  .collection-options-grid,.collection-summary-grid { grid-template-columns: 1fr 1fr; }
+  .collection-options-grid .compact-field { grid-column: 1 / -1; max-width: none; }
+  .collection-stage-track { grid-template-columns: 1fr 1fr; }
+  .xiaohongshu-job-card { top: -1px; margin: 0 -2px; border-radius: 12px; }
+  .candidate-list-header,.candidate-card > header { align-items: start; flex-direction: column; }
+  .candidate-card header > .candidate-status { align-self: start; }
+}
 @media (prefers-reduced-motion: reduce) { .thinking-orbit { animation: none; } }
+/* 手机阅读、编辑与详情使用同一纵向页面滚动；仅面经树保留受控滚动。 */
+@media (max-width:900px) {
+  .interview-library-shell,
+  .library-layout {
+    min-height:0;
+  }
+
+  .interview-tree-pane {
+    max-height:320px;
+  }
+
+  .company-tree {
+    max-height:218px;
+  }
+
+  .interview-detail-pane,
+  .reading-layout,
+  .editor-layout {
+    overflow:visible;
+  }
+
+  .reading-layout,
+  .editor-layout {
+    flex:none;
+  }
+}
+
+@media (max-width:640px) {
+  .library-actions,
+  .experience-actions {
+    width:100%;
+    flex-wrap:wrap;
+  }
+
+  .library-actions > button,
+  .experience-actions > button {
+    min-height:44px;
+    flex:1 1 132px;
+  }
+
+  .import-dialog,
+  .collection-dialog {
+    max-height:calc(100dvh - env(safe-area-inset-top));
+  }
+
+  .import-form,
+  .collection-form {
+    padding-bottom:max(24px, env(safe-area-inset-bottom));
+  }
+
+  .import-dialog > header,
+  .collection-dialog-header {
+    padding-top:max(18px, env(safe-area-inset-top));
+  }
+
+  .close-button {
+    width:44px;
+    height:44px;
+  }
+
+  .experience-context-strip {
+    align-items: flex-start;
+    padding: 11px 16px;
+  }
+
+  .experience-context-strip .tag-list {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .editor-canvas {
+    border-right: 0;
+    border-left: 0;
+    border-radius: 0;
+    padding: 14px;
+  }
+
+  .editor-canvas textarea {
+    min-height: 440px;
+    padding: 13px;
+    font-size: 15px;
+  }
+
+  .editor-support-fields,
+  .candidate-import-meta {
+    grid-template-columns: 1fr;
+  }
+
+  .candidate-review-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .candidate-body-field textarea {
+    min-height: 360px;
+    font-size: 15px;
+  }
+
+  .candidate-review footer .primary-action {
+    width: 100%;
+    min-height: 44px;
+  }
+}
 </style>

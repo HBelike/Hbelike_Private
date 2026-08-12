@@ -9,6 +9,9 @@ import ManualPipelinePanel from './components/ManualPipelinePanel.vue'
 
 const preview = ref(null)
 const mediaLibrary = ref({ items: [], pending_video_clips: [], summary: {} })
+const executionHistory = ref([])
+const executionHistoryLoading = ref(false)
+const executionHistoryError = ref('')
 const tasks = ref([])
 const healthSummary = ref(null)
 const loading = ref(false)
@@ -36,6 +39,8 @@ const starPopoverSkill = ref(null)
 const starPopoverPosition = ref({ left: '0px', top: '0px' })
 const authReady = ref(false)
 const authUser = ref(null)
+const mobileNavOpen = ref(false)
+const isMobileViewport = ref(false)
 let starPopoverCloseTimer = null
 
 const pipelineTaskNames = [
@@ -62,6 +67,7 @@ const routeItems = [
   { path: '/review/article', label: '文章预览', description: '只读审核' },
   { path: '/review/pipeline', label: '任务流程', description: '运行状态' },
   { path: '/review/assets', label: '媒体素材', description: '图片音视频' },
+  { path: '/review/history', label: '执行历史', description: '推文与素材归档' },
   { path: '/review/storyboard', label: '短视频蓝图', description: '分镜规划' },
   { path: '/review/prompts', label: '生成提示词', description: '文图视频' }
 ]
@@ -83,9 +89,31 @@ const content = computed(() => preview.value?.content ?? null)
 const articleLayout = computed(() => preview.value?.article_layout ?? null)
 const approval = computed(() => preview.value?.approval ?? null)
 const mediaAssets = computed(() => preview.value?.media_assets ?? [])
-const mediaLibraryAssets = computed(() => mediaLibrary.value?.items ?? [])
-const pendingVideoClips = computed(() => mediaLibrary.value?.pending_video_clips ?? [])
-const mediaLibrarySummary = computed(() => mediaLibrary.value?.summary ?? {})
+const activeContentId = computed(() => normalizeContentId(content.value?.id))
+const mediaLibraryAssets = computed(() => {
+  const contentId = activeContentId.value
+  if (!contentId) return []
+  return (mediaLibrary.value?.items ?? []).filter((asset) => normalizeContentId(asset?.content_id) === contentId)
+})
+const pendingVideoClips = computed(() => {
+  const contentId = activeContentId.value
+  if (!contentId) return []
+  return (mediaLibrary.value?.pending_video_clips ?? []).filter(
+    (clip) => normalizeContentId(clip?.content_id) === contentId
+  )
+})
+const mediaLibrarySummary = computed(() => {
+  const assets = mediaLibraryAssets.value
+  const pendingClips = pendingVideoClips.value
+  return {
+    total_asset_count: assets.length,
+    image_count: assets.filter((asset) => asset.asset_type === 'image').length,
+    audio_count: assets.filter((asset) => asset.asset_type === 'audio').length,
+    video_count: assets.filter((asset) => ['video', 'video_clip'].includes(asset.asset_type)).length,
+    pending_video_count: pendingClips.length,
+    failed_asset_count: assets.filter((asset) => asset.status === 'failed').length
+  }
+})
 const videoStoryboard = computed(() => preview.value?.video_storyboard ?? null)
 const videoClipPlans = computed(() => preview.value?.video_clip_plans ?? [])
 const imagePrompts = computed(() => content.value?.image_prompts ?? [])
@@ -232,6 +260,14 @@ const moduleCards = computed(() => [
     accent: 'orange'
   },
   {
+    path: '/review/history',
+    eyebrow: 'ARCHIVE',
+    title: '执行历史',
+    description: '按 content_id 保留推文与本次生成的专属媒体素材',
+    metric: '只读归档',
+    accent: 'green'
+  },
+  {
     path: '/review/prompts',
     eyebrow: 'PROMPTS',
     title: '生成提示词',
@@ -240,6 +276,15 @@ const moduleCards = computed(() => [
     accent: 'blue'
   }
 ])
+
+function normalizeContentId(value) {
+  const parsed = Number(value)
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null
+}
+
+function contentIdFromLocation() {
+  return normalizeContentId(new URLSearchParams(window.location.search).get('content_id'))
+}
 
 function normalizeRoute(pathname) {
   if (!pathname || pathname === '/') return '/review'
@@ -255,22 +300,64 @@ function normalizeRoute(pathname) {
   return '/review'
 }
 
-function navigateTo(path) {
+async function navigateTo(path) {
   const navItem = appNavItems.find((item) => item.path === path)
   if (navItem && !canAccessNavItem(navItem)) return
-  if (currentRoute.value === path) return
-  window.history.pushState({}, '', path)
-  currentRoute.value = normalizeRoute(path)
+  closeMobileNavigation()
+  const nextUrl = new URL(path, window.location.origin)
+  const nextRoute = normalizeRoute(nextUrl.pathname)
+  const nextLocation = `${nextUrl.pathname}${nextUrl.search}${nextUrl.hash}`
+  const currentLocation = `${window.location.pathname}${window.location.search}${window.location.hash}`
+  if (currentRoute.value === nextRoute && currentLocation === nextLocation) return
+  window.history.pushState({}, '', nextLocation)
+  currentRoute.value = nextRoute
   if (currentRoute.value === '/skills' && !skills.value.length) {
-    loadSkills()
+    await loadSkills()
+  }
+  if (currentRoute.value === '/review/history') {
+    await loadExecutionHistory()
+  } else if (currentRoute.value.startsWith('/review')) {
+    await refreshDashboard()
   }
   mainViewport.value?.scrollTo({ top: 0, behavior: 'smooth' })
 }
 
 function handlePopState() {
+  closeMobileNavigation()
   currentRoute.value = normalizeRoute(window.location.pathname)
   if (currentRoute.value === '/skills' && !skills.value.length) {
-    loadSkills()
+    void loadSkills()
+  }
+  if (currentRoute.value === '/review/history') {
+    void loadExecutionHistory()
+  } else if (currentRoute.value.startsWith('/review')) {
+    void refreshDashboard()
+  }
+}
+
+function closeMobileNavigation() {
+  mobileNavOpen.value = false
+}
+
+function toggleMobileNavigation() {
+  if (!isMobileViewport.value) return
+  mobileNavOpen.value = !mobileNavOpen.value
+}
+
+function syncMobileViewport() {
+  isMobileViewport.value = window.matchMedia('(max-width: 900px)').matches
+  if (!isMobileViewport.value) closeMobileNavigation()
+}
+
+function handleViewportResize() {
+  closeStarPopover()
+  syncMobileViewport()
+}
+
+function handleGlobalKeydown(event) {
+  if (event.key === 'Escape') {
+    closeMobileNavigation()
+    closeStarPopover()
   }
 }
 
@@ -327,6 +414,10 @@ async function refreshCurrentPage() {
     await loadSkills(selectedSkillId.value)
     return
   }
+  if (currentRoute.value === '/review/history') {
+    await loadExecutionHistory()
+    return
+  }
   await refreshDashboard()
 }
 
@@ -336,20 +427,35 @@ async function refreshDashboard() {
 
   try {
     const cacheBuster = Date.now()
-    const [previewResponse, tasksResponse, healthResponse, mediaLibraryResponse] = await Promise.all([
-      fetch(`/api/preview/latest?_=${cacheBuster}`, { cache: 'no-store' }),
+    const requestedContentId = currentRoute.value === '/review/assets' ? contentIdFromLocation() : null
+    const previewEndpoint = requestedContentId
+      ? `/api/execution-history/${requestedContentId}?_=${cacheBuster}`
+      : `/api/preview/latest?_=${cacheBuster}`
+    const [previewResponse, tasksResponse, healthResponse] = await Promise.all([
+      fetch(previewEndpoint, { cache: 'no-store' }),
       fetch(`/api/tasks/recent?limit=80&_=${cacheBuster}`, { cache: 'no-store' }),
-      fetch(`/api/system/health-summary?_=${cacheBuster}`, { cache: 'no-store' }),
-      fetch(`/api/media-assets?limit=300&_=${cacheBuster}`, { cache: 'no-store' })
+      fetch(`/api/system/health-summary?_=${cacheBuster}`, { cache: 'no-store' })
     ])
 
     if (!previewResponse.ok) throw new Error(`预览接口异常：${previewResponse.status}`)
     if (!tasksResponse.ok) throw new Error(`任务接口异常：${tasksResponse.status}`)
     if (!healthResponse.ok) throw new Error(`健康摘要接口异常：${healthResponse.status}`)
-    if (!mediaLibraryResponse.ok) throw new Error(`媒体资源库接口异常：${mediaLibraryResponse.status}`)
 
     preview.value = normalizePreviewPayload(await previewResponse.json())
-    mediaLibrary.value = await mediaLibraryResponse.json()
+    const contentId = normalizeContentId(preview.value?.content?.id)
+    if (contentId) {
+      const mediaLibraryResponse = await fetch(
+        `/api/media-assets?content_id=${contentId}&limit=300&_=${cacheBuster}`,
+        { cache: 'no-store' }
+      )
+      const mediaPayload = await mediaLibraryResponse.json().catch(() => ({}))
+      if (!mediaLibraryResponse.ok) {
+        throw new Error(mediaPayload.detail ?? `媒体资源库接口异常：${mediaLibraryResponse.status}`)
+      }
+      mediaLibrary.value = mediaPayload
+    } else {
+      mediaLibrary.value = { items: [], pending_video_clips: [], summary: {} }
+    }
     const taskPayload = await tasksResponse.json()
     tasks.value = taskPayload.items ?? []
     healthSummary.value = await healthResponse.json()
@@ -357,6 +463,25 @@ async function refreshDashboard() {
     errorMessage.value = error instanceof Error ? error.message : '刷新失败'
   } finally {
     loading.value = false
+  }
+}
+
+async function loadExecutionHistory() {
+  executionHistoryLoading.value = true
+  executionHistoryError.value = ''
+
+  try {
+    const response = await fetch(`/api/execution-history?limit=80&_=${Date.now()}`, { cache: 'no-store' })
+    const payload = await response.json().catch(() => ({}))
+    if (!response.ok) {
+      throw new Error(payload.detail ?? `执行历史接口异常：${response.status}`)
+    }
+    executionHistory.value = payload.items ?? []
+  } catch (error) {
+    executionHistoryError.value = error instanceof Error ? error.message : '执行历史读取失败'
+    executionHistory.value = []
+  } finally {
+    executionHistoryLoading.value = false
   }
 }
 
@@ -602,7 +727,12 @@ function statusText(status) {
     failed: '失败',
     running: '运行中',
     created: '已创建',
-    pending: '等待'
+    pending: '等待',
+    generated: '已生成',
+    approved: '已通过审核',
+    rejected: '已驳回',
+    delivered: '已推送',
+    published: '已发布'
   }
   return mapping[status] ?? status
 }
@@ -830,6 +960,14 @@ function openStarPopover(skill, event) {
   }
 }
 
+function toggleStarPopover(skill, event) {
+  if (starPopoverSkill.value?.id === skill?.id) {
+    closeStarPopover()
+    return
+  }
+  openStarPopover(skill, event)
+}
+
 function scheduleStarPopoverClose() {
   if (starPopoverCloseTimer) window.clearTimeout(starPopoverCloseTimer)
   starPopoverCloseTimer = window.setTimeout(() => {
@@ -862,7 +1000,9 @@ function isExternalSkillLink(skill) {
 
 onMounted(async () => {
   window.addEventListener('popstate', handlePopState)
-  window.addEventListener('resize', closeStarPopover)
+  window.addEventListener('resize', handleViewportResize)
+  window.addEventListener('keydown', handleGlobalKeydown)
+  syncMobileViewport()
   if (window.location.pathname === '/' && authUser.value) {
     window.history.replaceState({}, '', '/review')
   }
@@ -879,16 +1019,14 @@ onMounted(async () => {
     currentRoute.value = '/review'
   }
   if (currentRoute.value !== '/career' && currentRoute.value !== '/interviews' && currentRoute.value !== '/observability' && currentRoute.value !== '/admin') {
-    refreshDashboard()
-  }
-  if (currentRoute.value === '/skills') {
-    loadSkills()
+    await refreshCurrentPage()
   }
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('popstate', handlePopState)
-  window.removeEventListener('resize', closeStarPopover)
+  window.removeEventListener('resize', handleViewportResize)
+  window.removeEventListener('keydown', handleGlobalKeydown)
   closeStarPopover()
 })
 </script>
@@ -896,8 +1034,20 @@ onBeforeUnmount(() => {
 <template>
   <LoginPage v-if="!authReady || !authUser" @authenticated="handleAuthenticated" />
 
-  <div v-else class="shell">
-    <aside class="sidebar">
+  <div v-else class="shell" :class="{ 'mobile-nav-open': mobileNavOpen }">
+    <button
+      type="button"
+      class="mobile-nav-scrim"
+      aria-label="关闭导航"
+      @click="closeMobileNavigation"
+    ></button>
+
+    <aside
+      id="app-navigation"
+      class="sidebar"
+      :aria-hidden="isMobileViewport && !mobileNavOpen"
+      :inert="isMobileViewport && !mobileNavOpen"
+    >
       <div class="brand">
         <div class="brand-icon">AI</div>
         <div>
@@ -940,6 +1090,18 @@ onBeforeUnmount(() => {
       }"
     >
       <header class="topbar">
+        <button
+          type="button"
+          class="mobile-nav-toggle"
+          :aria-expanded="mobileNavOpen"
+          aria-controls="app-navigation"
+          aria-label="打开导航"
+          @click="toggleMobileNavigation"
+        >
+          <span aria-hidden="true"></span>
+          <span aria-hidden="true"></span>
+          <span aria-hidden="true"></span>
+        </button>
         <h1>{{ activeRoute.label }}</h1>
         <div class="topbar-account">
           <span>{{ authUser.display_name || authUser.username }}</span>
@@ -1028,7 +1190,7 @@ onBeforeUnmount(() => {
                   @mouseleave="scheduleStarPopoverClose"
                   @focus="openStarPopover(skill, $event)"
                   @blur="scheduleStarPopoverClose"
-                  @click.stop
+                  @click.stop="toggleStarPopover(skill, $event)"
                 >
                   <i class="star-ring" aria-hidden="true"></i>
                 </button>
@@ -1226,6 +1388,17 @@ onBeforeUnmount(() => {
                   {{ mediaTypeLabel(asset.asset_type).slice(0, 1) }}
                 </div>
               </template>
+              <template v-else-if="card.path === '/review/history'">
+                <div class="mini-history-track" aria-hidden="true">
+                  <span class="history-node article-node">推文</span>
+                  <i></i>
+                  <span class="history-node asset-node">素材</span>
+                </div>
+                <div class="mini-history-copy">
+                  <strong>每次执行独立归档</strong>
+                  <small>以 content_id 为边界查看推文与媒体文件</small>
+                </div>
+              </template>
               <template v-else>
                 <div class="mini-prompt-list">
                   <div v-for="(prompt, index) in imagePrompts.slice(0, 3)" :key="`explain-${prompt.repository_full_name}`" class="mini-prompt-explained">
@@ -1374,7 +1547,9 @@ onBeforeUnmount(() => {
 
       <template v-else-if="currentRoute === '/review/assets'">
         <section class="detail-toolbar">
-          <button type="button" @click="navigateTo('/review')">← 返回总览</button>
+          <button type="button" @click="navigateTo(contentIdFromLocation() ? '/review/history' : '/review')">
+            {{ contentIdFromLocation() ? '← 返回执行历史' : '← 返回总览' }}
+          </button>
           <button type="button" class="secondary-button" :disabled="upgradingImages || !content?.id" @click="upgradeGithubImages">
             {{ upgradingImages ? '抓取中...' : '尝试复用 GitHub 项目图' }}
           </button>
@@ -1385,6 +1560,9 @@ onBeforeUnmount(() => {
             <div>
               <p class="eyebrow">Assets</p>
               <h2>媒体素材</h2>
+              <p v-if="activeContentId" class="asset-scope-note">
+                content_id={{ activeContentId }} · {{ shortText(content?.title, 72) }}
+              </p>
             </div>
             <span class="asset-count">
               实际文件 {{ mediaLibrarySummary.total_asset_count ?? 0 }} ·
@@ -1439,6 +1617,57 @@ onBeforeUnmount(() => {
               </article>
             </div>
           </section>
+        </section>
+      </template>
+
+      <template v-else-if="currentRoute === '/review/history'">
+        <section class="detail-toolbar">
+          <button type="button" @click="navigateTo('/review')">← 返回总览</button>
+          <button type="button" class="secondary-button" :disabled="executionHistoryLoading" @click="loadExecutionHistory">
+            {{ executionHistoryLoading ? '刷新中...' : '刷新执行历史' }}
+          </button>
+        </section>
+
+        <section class="detail-card execution-history-card">
+          <div class="panel-header execution-history-header">
+            <div>
+              <p class="eyebrow">Execution Archive</p>
+              <h2>执行历史</h2>
+              <p>每个 content_id 只保留对应推文与本次生成的专属媒体素材。</p>
+            </div>
+            <span class="asset-count">{{ executionHistory.length }} 条归档</span>
+          </div>
+
+          <p v-if="executionHistoryError" class="history-error">{{ executionHistoryError }}</p>
+          <div v-else-if="executionHistoryLoading" class="empty-media">正在读取执行历史…</div>
+          <div v-else-if="!executionHistory.length" class="empty-media">
+            还没有可查看的执行归档。完成一次内容生成后，这里会按 content_id 显示推文与素材数量。
+          </div>
+          <div v-else class="execution-history-list">
+            <button
+              v-for="item in executionHistory"
+              :key="item.content_id"
+              type="button"
+              class="execution-history-item"
+              @click="navigateTo(`/review/assets?content_id=${item.content_id}`)"
+            >
+              <div class="history-item-heading">
+                <span class="history-content-id">content_id={{ item.content_id }}</span>
+                <span class="status-pill" :class="statusClass(item.status)">{{ statusText(item.status) }}</span>
+              </div>
+              <h3>{{ item.title || `第 ${item.content_id} 次内容生成` }}</h3>
+              <p>{{ shortText(item.digest, 150) || '该次推文尚未生成摘要。' }}</p>
+              <div class="history-item-footer">
+                <strong>{{ item.assets?.total_asset_count ?? 0 }} 个有效素材</strong>
+                <span>
+                  图片 {{ item.assets?.image_count ?? 0 }} ·
+                  音频 {{ item.assets?.audio_count ?? 0 }} ·
+                  视频 {{ item.assets?.video_count ?? 0 }}
+                </span>
+                <em>查看专属素材 →</em>
+              </div>
+            </button>
+          </div>
         </section>
       </template>
 

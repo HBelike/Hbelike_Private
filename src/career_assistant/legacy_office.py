@@ -50,6 +50,8 @@ class GotenbergOfficeConverter:
         self._owns_client = client is None
         self._client = client or httpx.Client(
             timeout=httpx.Timeout(settings.request_timeout_seconds),
+            # Gotenberg 同为本机/Docker 内网服务，避免错误走系统代理。
+            trust_env=False,
         )
 
     def close(self) -> None:

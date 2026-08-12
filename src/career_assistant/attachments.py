@@ -94,6 +94,15 @@ class TemporaryAttachmentStore:
             ".tif": {"image/tiff"},
             ".tiff": {"image/tiff"},
         },
+        AttachmentKind.INTERVIEW_EVIDENCE_IMAGE: {
+            ".jpg": {"image/jpeg"},
+            ".jpeg": {"image/jpeg"},
+            ".png": {"image/png"},
+            ".webp": {"image/webp"},
+            ".bmp": {"image/bmp", "image/x-ms-bmp"},
+            ".tif": {"image/tiff"},
+            ".tiff": {"image/tiff"},
+        },
         AttachmentKind.JOB_DESCRIPTION_IMAGE: {
             ".jpg": {"image/jpeg"},
             ".jpeg": {"image/jpeg"},
@@ -153,6 +162,51 @@ class TemporaryAttachmentStore:
             raise
         finally:
             await upload.close()
+
+    def save_bytes(
+        self,
+        data: bytes,
+        filename: str,
+        media_type: str,
+        kind: AttachmentKind,
+    ) -> AttachmentDescriptor:
+        """同步暂存已下载的远程图片，复用统一的 MIME、大小和清理边界。
+
+        小红书等公开页面的图片会先由上游连接器下载为字节，再通过该方法进入
+        既有的 ``AttachmentParser`` OCR/Vision 路径；方法不负责网络请求，也不
+        会把图片持久化到面经库。
+        """
+
+        if not isinstance(data, (bytes, bytearray, memoryview)):
+            raise ValueError("临时附件内容必须是字节数据")
+        original_filename = Path(filename or "").name.strip()
+        normalized_media_type = (media_type or "").split(";", 1)[0].strip().lower()
+        self._validate_type(kind, original_filename, normalized_media_type)
+        payload = bytes(data)
+        if not payload:
+            raise ValueError("附件不能为空")
+        if len(payload) > self._settings.max_size_bytes:
+            raise ValueError("附件超过允许的最大大小")
+
+        request_directory = Path(
+            tempfile.mkdtemp(prefix="career-turn-", dir=str(self._root)),
+        ).resolve()
+        destination = request_directory / f"{uuid4().hex}{Path(original_filename).suffix.lower()}"
+        try:
+            with destination.open("xb") as output_file:
+                output_file.write(payload)
+            return AttachmentDescriptor(
+                attachment_id=uuid4(),
+                kind=kind,
+                original_filename=original_filename,
+                media_type=normalized_media_type,
+                size_bytes=len(payload),
+                temporary_path=destination,
+                expires_at=datetime.now(UTC) + timedelta(seconds=self._settings.ttl_seconds),
+            )
+        except Exception:
+            self._cleanup_directory(request_directory)
+            raise
 
     def cleanup(self, attachments: tuple[AttachmentDescriptor, ...]) -> None:
         """清理同一 Turn 的临时目录；重复调用安全。"""

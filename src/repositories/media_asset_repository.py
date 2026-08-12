@@ -232,6 +232,49 @@ class MediaAssetRepository:
             for row in rows
         ]
 
+    def summarize_by_content_ids(self, content_ids: list[int]) -> dict[int, dict[str, int]]:
+        """按 ``content_id`` 汇总当前可用的媒体资产。
+
+        执行历史只关心每篇推文所归属的图片、音频与视频，不应把不同
+        ``content_id`` 的素材混在一张卡片里。这里刻意沿用素材库的默认
+        语义：已被新一轮素材替换的 ``replaced`` 记录不再计入可用资源。
+        """
+
+        normalized_ids = sorted({int(content_id) for content_id in content_ids if int(content_id) > 0})
+        if not normalized_ids:
+            return {}
+
+        placeholders = ",".join("?" for _ in normalized_ids)
+        with self.database_manager.connection() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT
+                    content_id,
+                    COUNT(*) AS total_asset_count,
+                    SUM(CASE WHEN asset_type = 'image' THEN 1 ELSE 0 END) AS image_count,
+                    SUM(CASE WHEN asset_type = 'audio' THEN 1 ELSE 0 END) AS audio_count,
+                    SUM(CASE WHEN asset_type IN ('video', 'video_clip') THEN 1 ELSE 0 END) AS video_count,
+                    SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed_asset_count
+                FROM media_assets
+                WHERE content_id IN ({placeholders})
+                  AND status != 'replaced'
+                GROUP BY content_id
+                """,
+                tuple(normalized_ids),
+            ).fetchall()
+
+        return {
+            int(row["content_id"]): {
+                "total_asset_count": int(row["total_asset_count"] or 0),
+                "image_count": int(row["image_count"] or 0),
+                "audio_count": int(row["audio_count"] or 0),
+                "video_count": int(row["video_count"] or 0),
+                "failed_asset_count": int(row["failed_asset_count"] or 0),
+            }
+            for row in rows
+            if row["content_id"] is not None
+        }
+
     def list_upload_candidates(self, asset_types: list[str]) -> list[MediaAssetRecord]:
         """读取还没有 remote_url 的媒体资产。"""
         normalized_types = [asset_type.strip() for asset_type in asset_types if asset_type.strip()]
