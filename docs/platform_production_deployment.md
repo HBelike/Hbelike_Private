@@ -86,5 +86,5 @@ docker compose --env-file .env.production -f docker-compose.production.yml ps
 - 每日对 PostgreSQL 执行 `pg_dump -Fc`，并备份 `application_data`（SQLite）、`application_outputs`（媒体）与 `application_skills`（编辑后的 Skill）到异地对象存储；保留至少 7 个日备份与 4 个周备份。
 - Caddy 的 `caddy_data`、`caddy_config` 卷必须保留，否则会丢失证书账户状态。
 - 首发不启用 GPU Docling；有 NVIDIA GPU 的服务器再使用 `document-processing` profile。
-- 首发不自动提交付费 Seedance；待 R2/TOS 等公开对象存储和模型额度验收后，显式启用 `video.submit_enabled`。
+- 仓库中的 `config/app.yaml` 始终保留 `video.submit_enabled: false`，避免开发机误提交付费任务；生产环境通过 `.env.production` 的 `VIDEO_SUBMIT_ENABLED=true` 单独开启真实 Seedance 提交。开启前必须确认火山方舟 Key、公开媒体地址和语音配置可用。
 - 旧公众号 SQLite 工作流、Skill 文件持久化、多用户 Career 角色授权、Docker secrets 与 CI/CD 是下一阶段演进项，不应在未验证的情况下横向扩容。

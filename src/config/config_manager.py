@@ -6,6 +6,22 @@ from pathlib import Path
 from typing import Any
 
 
+def _optional_env_bool(name: str) -> bool | None:
+    """读取可选布尔环境变量；未配置时返回 ``None``。"""
+
+    raw_value = os.getenv(name)
+    if raw_value is None or not raw_value.strip():
+        return None
+    normalized = raw_value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(
+        f"环境变量 {name} 必须是 true/false、1/0、yes/no 或 on/off"
+    )
+
+
 @dataclass(frozen=True)
 class AppConfig:
     """应用配置快照，供启动后的各模块只读使用。"""
@@ -416,6 +432,9 @@ class AppConfig:
 
     @property
     def video_submit_enabled(self) -> bool:
+        environment_override = _optional_env_bool("VIDEO_SUBMIT_ENABLED")
+        if environment_override is not None:
+            return environment_override
         return bool(self.raw["video"].get("submit_enabled", False))
 
     @property

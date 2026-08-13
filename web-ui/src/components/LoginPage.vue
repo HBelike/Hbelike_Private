@@ -34,17 +34,16 @@ const panelDescription = computed(() => {
   if (requiresBootstrap.value) return '首个账户将获得管理员权限。使用邮箱完成验证后，即可配置成员、角色与平台能力。'
   if (mode.value === 'register') return '注册后默认获得基础访问权限。高级管理功能需由管理员单独授权。'
   if (mode.value === 'reset') return '验证码仅发送到已验证邮箱，用于确认本次密码重置操作。'
-  return '使用邮箱和密码继续。历史账户也可暂时使用原用户名登录，并在进入平台后绑定邮箱。'
+  return '使用邮箱或用户名，继续访问你的职业工作台。'
 })
 
 const primaryLabel = computed(() => {
   if (requiresBootstrap.value) return verificationStage.value ? '验证并进入平台' : '发送管理员验证码'
   if (mode.value === 'register') return verificationStage.value ? '验证并创建账户' : '发送注册验证码'
   if (mode.value === 'reset') return verificationStage.value ? '保存新密码' : '发送重置验证码'
-  return '登录并进入平台'
+  return '登录'
 })
 
-const showAccountTabs = computed(() => !requiresBootstrap.value && !verificationStage.value && publicRegistrationEnabled.value)
 const visibleEmail = computed(() => email.value.trim())
 const isCodeStage = computed(() => verificationStage.value && !requiresCliBootstrap.value)
 const flowStep = computed(() => (isCodeStage.value ? 2 : 1))
@@ -56,12 +55,14 @@ const maskedEmail = computed(() => {
 })
 
 onMounted(() => {
+  document.body.classList.add('auth-page-active')
   window.addEventListener('popstate', syncModeFromLocation)
   syncModeFromLocation()
   void loadBootstrapStatus()
 })
 
 onBeforeUnmount(() => {
+  document.body.classList.remove('auth-page-active')
   window.removeEventListener('popstate', syncModeFromLocation)
 })
 
@@ -347,11 +348,12 @@ function readableError(error, fallback) {
 
     <section class="login-form-panel">
       <div class="login-form-wrap">
+        <div class="login-mobile-brand" aria-label="职业智能工作台">
+          <div class="login-brand-mark">AI</div>
+          <span>职业智能工作台</span>
+        </div>
+
         <div class="login-form-heading" :class="{ 'is-code-stage': isCodeStage }">
-          <div class="login-heading-topline">
-            <p class="login-kicker">ACCOUNT ACCESS</p>
-            <span v-if="!loading && !requiresCliBootstrap" class="login-heading-status">邮箱验证</span>
-          </div>
           <h2>{{ panelTitle }}</h2>
           <p>{{ panelDescription }}</p>
         </div>
@@ -369,17 +371,6 @@ function readableError(error, fallback) {
           </section>
 
           <template v-else>
-            <nav v-if="showAccountTabs" class="login-mode-tabs" aria-label="账户操作">
-              <button :class="{ active: mode === 'login' }" type="button" @click="switchMode('login')">
-                登录
-                <small>已有账号</small>
-              </button>
-              <button :class="{ active: mode === 'register' }" type="button" @click="switchMode('register')">
-                注册账号
-                <small>绑定邮箱</small>
-              </button>
-            </nav>
-
             <section v-if="isCodeStage" class="verification-flow" aria-live="polite">
               <div class="verification-flow-mark" aria-hidden="true">{{ flowStep }}</div>
               <div>
@@ -390,14 +381,17 @@ function readableError(error, fallback) {
 
             <form class="login-form" @submit.prevent="submit">
               <template v-if="mode === 'login' && !requiresBootstrap">
-                <label>
-                  <span>登录邮箱 <small>历史账号可填用户名</small></span>
-                  <input v-model.trim="identity" autocomplete="username" maxlength="160" placeholder="name@example.com" autofocus />
+                <label for="login-identity">
+                  <span>邮箱或用户名</span>
+                  <input id="login-identity" v-model.trim="identity" autocomplete="username" maxlength="160" placeholder="name@example.com" autofocus />
                 </label>
-                <label>
-                  <span>密码</span>
-                  <input v-model="password" type="password" autocomplete="current-password" placeholder="输入密码" />
-                </label>
+                <div class="login-field">
+                  <div class="login-label-row">
+                    <label for="login-password">密码</label>
+                    <button type="button" @click="switchMode('reset')">忘记密码？</button>
+                  </div>
+                  <input id="login-password" v-model="password" type="password" autocomplete="current-password" placeholder="输入密码" />
+                </div>
               </template>
 
               <template v-else-if="(mode === 'register' || requiresBootstrap) && !verificationStage">
@@ -442,16 +436,25 @@ function readableError(error, fallback) {
             </form>
 
             <div class="login-switches">
-              <button v-if="!requiresBootstrap && mode === 'login'" type="button" @click="switchMode('reset')">忘记密码？</button>
-              <button v-if="!requiresBootstrap && mode === 'login' && publicRegistrationEnabled" type="button" @click="switchMode('register')">还没有账号，立即注册</button>
-              <button v-if="!requiresBootstrap && mode === 'reset' && !verificationStage" type="button" @click="switchMode('login')">返回登录</button>
-              <button v-if="verificationStage" type="button" @click="returnToEntry">修改邮箱或重新发送</button>
+              <template v-if="!requiresBootstrap && mode === 'login' && publicRegistrationEnabled">
+                <span>还没有账号？</span>
+                <button type="button" @click="switchMode('register')">创建账号</button>
+              </template>
+              <template v-else-if="!requiresBootstrap && mode === 'register' && !verificationStage">
+                <span>已有账号？</span>
+                <button type="button" @click="switchMode('login')">登录</button>
+              </template>
+              <template v-else-if="!requiresBootstrap && mode === 'reset' && !verificationStage">
+                <span>想起密码了？</span>
+                <button type="button" @click="switchMode('login')">返回登录</button>
+              </template>
+              <button v-else-if="verificationStage" type="button" @click="returnToEntry">修改邮箱或重新发送</button>
             </div>
           </template>
         </template>
 
         <p v-if="requiresCliBootstrap" class="login-footer">管理员完成服务器端初始化后，刷新本页并使用初始化邮箱登录。</p>
-        <p v-else class="login-footer">验证码有效期为 10 分钟；注册后即绑定该邮箱，后续可使用验证码找回密码。</p>
+        <p v-else-if="mode !== 'login'" class="login-footer">验证码有效期为 10 分钟；注册后即绑定该邮箱，后续可使用验证码找回密码。</p>
       </div>
     </section>
   </main>

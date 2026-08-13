@@ -6,14 +6,17 @@ const selectedConversation = ref(null)
 const messages = ref([])
 const modelProfiles = ref([])
 const freeModelCatalog = ref([])
+const freeModelCatalogError = ref('')
 const loading = ref(false)
 const sending = ref(false)
 const creating = ref(false)
 const savingModel = ref(false)
 const testingConnection = ref(false)
+const loadingFreeModelCatalog = ref(false)
 const showJobUrl = ref(false)
 const showModelDialog = ref(false)
 const modelDialogMode = ref('list')
+const modelSetupReturnMode = ref('list')
 const testedConnectionFingerprint = ref('')
 const connectionTestMessage = ref('')
 const connectionTestError = ref('')
@@ -147,36 +150,33 @@ const providerOptions = [
 const selectedProfile = computed(() =>
   modelProfiles.value.find((item) => item.profile.id === selectedProfileId.value) ?? null
 )
+const readyModelProfiles = computed(() =>
+  modelProfiles.value.filter((item) => item.readiness === 'ready')
+)
+const readyFreeModelProfiles = computed(() =>
+  readyModelProfiles.value.filter((item) => item.profile.cost_tier === 'free_quota')
+)
+const readyOtherModelProfiles = computed(() =>
+  readyModelProfiles.value.filter((item) => item.profile.cost_tier !== 'free_quota')
+)
+const hasReadyModel = computed(() => readyModelProfiles.value.length > 0)
+const hasReadyFreeModel = computed(() => readyFreeModelProfiles.value.length > 0)
+const modelSelectionValue = computed(() => {
+  if (selectionMode.value === 'free_quota_first' && hasReadyFreeModel.value) return 'free_quota_first'
+  return selectedProfile.value?.readiness === 'ready' ? selectedProfileId.value : ''
+})
 const modelLabel = computed(() =>
-  selectionMode.value === 'free_quota_first'
+  selectionMode.value === 'free_quota_first' && hasReadyFreeModel.value
     ? '免费模型自动选择'
-    : selectedProfile.value?.profile.display_name ?? '请选择模型'
+    : selectedProfile.value
+      ? modelPrimaryLabel(selectedProfile.value)
+      : '尚未配置可用模型'
 )
-const configuredFreeModels = computed(() =>
-  freeModelCatalog.value.flatMap((offer) =>
-    (offer.configured_profiles ?? []).map((profile) => ({
-      ...profile,
-      providerName: offer.display_name
-    }))
-  )
-)
-const configuredFreeProfileIds = computed(() =>
-  new Set(configuredFreeModels.value.map((item) => item.id))
-)
-const pendingFreeModels = computed(() =>
-  freeModelCatalog.value.flatMap((offer) =>
-    offer.platform_ready
-      ? []
-      : (offer.models ?? []).map((model) => ({
-          ...model,
-          providerName: offer.display_name,
-          providerKey: offer.provider_key
-        }))
-  )
-)
-const otherModelProfiles = computed(() =>
-  modelProfiles.value.filter((item) => !configuredFreeProfileIds.value.has(item.profile.id))
-)
+const modelDialogTitle = computed(() => ({
+  list: '模型与连接',
+  free: '申请并接入免费模型',
+  setup: '添加或编辑模型连接'
+}[modelDialogMode.value] ?? '模型与连接'))
 
 function emptyModelForm() {
   return {
@@ -196,6 +196,11 @@ function openModelDialog() {
   showModelDialog.value = true
 }
 
+function openFreeModelDirectory() {
+  modelDialogMode.value = 'free'
+  showModelDialog.value = true
+}
+
 function closeModelDialog() {
   showModelDialog.value = false
   connectionTestMessage.value = ''
@@ -210,6 +215,7 @@ function createModelConnection() {
   connectionTestError.value = ''
   connectionSaveError.value = ''
   testedConnectionFingerprint.value = ''
+  modelSetupReturnMode.value = 'list'
   modelDialogMode.value = 'setup'
 }
 
@@ -231,7 +237,77 @@ function chooseProvider(provider) {
   nextTick(() => connectionConfigRef.value?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
 }
 
-function editModelConnection(item) {
+function configureFreeModel(offer, model) {
+  const provider = providerOptions.find((item) => item.key === offer.provider_key)
+  if (!provider) {
+    errorMessage.value = `暂不支持自动配置 ${offer.display_name}，请使用自定义兼容服务商。`
+    return
+  }
+  chooseProvider(provider)
+  modelForm.value = {
+    ...modelForm.value,
+    displayName: `${offer.display_name} · ${model.display_name}`,
+    modelId: model.model_id,
+    apiBaseUrl: offer.api_base_url || provider.apiBaseUrl,
+    websiteUrl: offer.website_url || provider.websiteUrl,
+    costTier: 'free_quota',
+    vision: Boolean(model.supports_vision)
+  }
+  modelSetupReturnMode.value = 'free'
+  modelDialogMode.value = 'setup'
+}
+
+function configuredCatalogProfile(offer, model) {
+  return modelProfiles.value.find((item) =>
+    item.profile.provider_key === offer.provider_key && item.profile.model_id === model.model_id
+  ) ?? null
+}
+
+function configureCatalogModel(offer, model) {
+  const existing = configuredCatalogProfile(offer, model)
+  if (existing) {
+    editModelConnection(existing, 'free')
+    return
+  }
+  configureFreeModel(offer, model)
+}
+
+function catalogModelStatus(offer, model) {
+  const existing = configuredCatalogProfile(offer, model)
+  return existing ? readinessText(existing.readiness) : '待接入'
+}
+
+function providerOption(providerKey) {
+  return providerOptions.find((item) => item.key === providerKey) ?? {
+    label: providerKey,
+    short: providerKey.slice(0, 2).toUpperCase()
+  }
+}
+
+function modelPrimaryLabel(item) {
+  const profile = item?.profile ?? item
+  if (!profile) return '未知模型'
+  return `${providerOption(profile.provider_key).label} · ${profile.model_id}`
+}
+
+async function loadFreeModelCatalog() {
+  loadingFreeModelCatalog.value = true
+  freeModelCatalogError.value = ''
+  try {
+    const catalog = await requestJson('/api/career/free-model-catalog')
+    freeModelCatalog.value = catalog.items ?? []
+    return true
+  } catch (error) {
+    freeModelCatalog.value = []
+    const reason = error instanceof Error ? error.message : '服务暂时不可用'
+    freeModelCatalogError.value = `无法读取免费模型目录：${reason}。请重试，或返回模型连接手动添加服务商。`
+    return false
+  } finally {
+    loadingFreeModelCatalog.value = false
+  }
+}
+
+function editModelConnection(item, returnMode = 'list') {
   const profile = item.profile
   modelForm.value = {
     profileKey: profile.profile_key,
@@ -250,6 +326,7 @@ function editModelConnection(item) {
   connectionTestMessage.value = '为了保护密钥，修改连接后请重新填写 API Key 并测试。'
   connectionTestError.value = ''
   connectionSaveError.value = ''
+  modelSetupReturnMode.value = returnMode
   modelDialogMode.value = 'setup'
 }
 
@@ -349,16 +426,36 @@ async function refreshActiveConversationTurn() {
 }
 
 function useFreeQuotaFirstSelection() {
+  if (!hasReadyFreeModel.value) {
+    useFirstReadyModelSelection()
+    return
+  }
   selectionMode.value = 'free_quota_first'
   selectedProfileId.value = ''
 }
 
+function useFirstReadyModelSelection() {
+  const firstReady = readyModelProfiles.value[0]
+  if (!firstReady) {
+    selectionMode.value = 'specific_profile'
+    selectedProfileId.value = ''
+    return
+  }
+  selectionMode.value = 'specific_profile'
+  selectedProfileId.value = firstReady.profile.id
+}
+
 function restoreConversationModelSelection(selection) {
   const profileId = selection?.profile_id ?? ''
-  const profileExists = modelProfiles.value.some((item) => item.profile.id === profileId)
-  if (selection?.mode === 'specific_profile' && profileId && profileExists) {
+  const profileIsReady = readyModelProfiles.value.some((item) => item.profile.id === profileId)
+  if (selection?.mode === 'specific_profile' && profileId && profileIsReady) {
     selectionMode.value = 'specific_profile'
     selectedProfileId.value = profileId
+    return
+  }
+  if (selection?.mode === 'free_quota_first' && hasReadyFreeModel.value) {
+    selectionMode.value = 'free_quota_first'
+    selectedProfileId.value = ''
     return
   }
   useFreeQuotaFirstSelection()
@@ -427,14 +524,14 @@ async function refreshData() {
   loading.value = true
   errorMessage.value = ''
   try {
-    const [history, profiles, catalog] = await Promise.all([
+    const [history, profiles] = await Promise.all([
       requestJson('/api/career/conversations'),
-      requestJson('/api/career/model-profiles'),
-      requestJson('/api/career/free-model-catalog')
+      requestJson('/api/career/model-profiles')
     ])
     conversations.value = history.items ?? []
     modelProfiles.value = profiles.items ?? []
-    freeModelCatalog.value = catalog.items ?? []
+    restoreConversationModelSelection(null)
+    await loadFreeModelCatalog()
     if (selectedConversation.value) {
       const current = conversations.value.find((item) => item.id === selectedConversation.value.id)
       if (current) await selectConversation(current.id, false)
@@ -597,6 +694,11 @@ function restoreComposerAfterPreflightFailure(input) {
 }
 
 async function sendMessage() {
+  if (!hasReadyModel.value) {
+    errorMessage.value = '尚未配置可调用模型，请先申请免费模型或添加模型连接。'
+    openFreeModelDirectory()
+    return
+  }
   if (!messageText.value.trim() && !jobUrl.value.trim() && !resumeFile.value) {
     errorMessage.value = '请输入咨询内容或粘贴职位链接。'
     return
@@ -754,8 +856,18 @@ async function archiveConversation() {
 
 function chooseModel(event) {
   const value = event.target.value
-  selectionMode.value = value === 'free_quota_first' ? 'free_quota_first' : 'specific_profile'
-  selectedProfileId.value = value === 'free_quota_first' ? '' : value
+  if (value === 'free_quota_first') {
+    useFreeQuotaFirstSelection()
+    return
+  }
+  const selected = readyModelProfiles.value.find((item) => item.profile.id === value)
+  if (!selected) {
+    useFirstReadyModelSelection()
+    errorMessage.value = '该模型连接当前不可调用，请在“模型与连接”中重新测试或配置。'
+    return
+  }
+  selectionMode.value = 'specific_profile'
+  selectedProfileId.value = selected.profile.id
 }
 
 async function saveModelProfile() {
@@ -779,8 +891,14 @@ async function saveModelProfile() {
     const index = modelProfiles.value.findIndex((item) => item.profile.id === payload.profile.id)
     if (index >= 0) modelProfiles.value.splice(index, 1, payload)
     else modelProfiles.value = [...modelProfiles.value, payload]
-    selectionMode.value = 'specific_profile'
-    selectedProfileId.value = payload.profile.id
+    // 免费目录是辅助入口；刷新失败不能回滚已验证并保存的模型连接。
+    await loadFreeModelCatalog()
+    if (payload.readiness === 'ready') {
+      selectionMode.value = 'specific_profile'
+      selectedProfileId.value = payload.profile.id
+    } else {
+      useFreeQuotaFirstSelection()
+    }
     modelForm.value = emptyModelForm()
     modelDialogMode.value = 'list'
     connectionTestMessage.value = ''
@@ -982,18 +1100,17 @@ onMounted(refreshData)
             <input ref="resumeInput" class="resume-input" type="file" accept="application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,image/jpeg,image/png,image/webp,image/bmp,image/x-ms-bmp,image/tiff" @change="handleResumeFile" />
             <button class="chip-button" :class="{ active: resumeFile }" type="button" @click="openResumePicker">{{ resumeFile ? `材料：${resumeFile.name}` : '上传材料' }}</button>
             <button v-if="resumeFile" class="chip-button file-clear-button" type="button" @click="clearResumeFile">移除</button>
-            <select class="model-select" :value="selectionMode === 'free_quota_first' ? 'free_quota_first' : selectedProfileId" aria-label="本轮模型选择" @change="chooseModel">
-              <option value="free_quota_first">【免费】自动选择可用模型</option>
-              <optgroup v-if="configuredFreeModels.length" label="已接入的免费模型">
-                <option v-for="model in configuredFreeModels" :key="model.id" :value="model.id">【免费】{{ model.providerName }} · {{ model.display_name }}</option>
+            <select class="model-select" :value="modelSelectionValue" :disabled="!hasReadyModel" aria-label="本轮模型选择" @change="chooseModel">
+              <option v-if="!hasReadyModel" value="">尚未配置可用模型</option>
+              <option v-if="hasReadyFreeModel" value="free_quota_first">【免费】自动选择可用模型</option>
+              <optgroup v-if="readyFreeModelProfiles.length" label="已接入的免费模型">
+                <option v-for="item in readyFreeModelProfiles" :key="item.profile.id" :value="item.profile.id">【免费】{{ modelPrimaryLabel(item) }}（{{ item.profile.display_name }}）</option>
               </optgroup>
-              <optgroup v-if="pendingFreeModels.length" label="免费模型（待管理员接入）">
-                <option v-for="model in pendingFreeModels" :key="`${model.providerKey}-${model.model_id}`" disabled>【免费·待接入】{{ model.providerName }} · {{ model.display_name }}</option>
-              </optgroup>
-              <optgroup v-if="otherModelProfiles.length" label="已配置的其他模型">
-                <option v-for="item in otherModelProfiles" :key="item.profile.id" :value="item.profile.id">{{ item.profile.display_name }} · {{ readinessText(item.readiness) }}</option>
+              <optgroup v-if="readyOtherModelProfiles.length" label="已配置的其他模型">
+                <option v-for="item in readyOtherModelProfiles" :key="item.profile.id" :value="item.profile.id">{{ modelPrimaryLabel(item) }}（{{ item.profile.display_name }}）</option>
               </optgroup>
             </select>
+            <button class="chip-button free-model-entry-button" type="button" @click="openFreeModelDirectory">{{ hasReadyModel ? '申请免费模型' : '配置可用模型' }}</button>
           </div>
           <div class="session-tools">
             <button class="quiet-button model-manager-button" type="button" @click="openModelDialog">模型与连接</button>
@@ -1031,7 +1148,7 @@ onMounted(refreshData)
       <section class="model-dialog" role="dialog" aria-modal="true" aria-label="模型与连接管理">
         <header class="model-dialog-header">
           <div>
-            <h2>{{ modelDialogMode === 'list' ? '模型与连接' : '添加或编辑模型连接' }}</h2>
+            <h2>{{ modelDialogTitle }}</h2>
           </div>
           <button class="dialog-close-button" type="button" aria-label="关闭模型连接管理" @click="closeModelDialog">×</button>
         </header>
@@ -1039,21 +1156,64 @@ onMounted(refreshData)
         <main v-if="modelDialogMode === 'list'" class="model-dialog-body">
           <div class="connection-toolbar">
             <div><strong>模型连接</strong><small>平台已托管的免费模型可直接供访客使用，不会向浏览器暴露 API Key。</small></div>
-            <button class="dialog-primary-button" type="button" @click="createModelConnection">＋ 添加模型</button>
+            <div class="connection-toolbar-actions">
+              <button class="dialog-secondary-button" type="button" @click="openFreeModelDirectory">申请免费模型</button>
+              <button class="dialog-primary-button" type="button" @click="createModelConnection">＋ 添加模型</button>
+            </div>
           </div>
           <div v-if="modelProfiles.length" class="connection-card-list">
             <button v-for="item in modelProfiles" :key="item.profile.id" class="connection-card" type="button" @click="editModelConnection(item)">
               <span class="connection-drag">⠿</span>
               <span class="provider-avatar">{{ item.profile.provider_key.slice(0, 2).toUpperCase() }}</span>
-              <span class="connection-card-copy"><strong>{{ item.profile.display_name }}</strong><small>{{ item.profile.provider_key }} · {{ item.profile.model_id }}</small></span>
+              <span class="connection-card-copy"><strong>{{ modelPrimaryLabel(item) }}</strong><small>{{ item.profile.display_name }}</small></span>
               <span class="connection-meta"><span :class="`readiness ${item.readiness}`">{{ readinessText(item.readiness) }}</span><small>顺序 {{ item.profile.priority }}</small></span>
             </button>
           </div>
           <div v-else class="connection-empty-state"><span>⌁</span><strong>还没有可用模型</strong><p>添加一个带免费额度的服务商连接后，即可开始求职分析。</p></div>
         </main>
 
-        <main v-else class="model-dialog-body connection-setup-body">
-          <button class="back-button" type="button" @click="modelDialogMode = 'list'">← 返回已配置模型</button>
+        <main v-else-if="modelDialogMode === 'free'" class="model-dialog-body free-model-directory">
+          <button class="back-button" type="button" @click="modelDialogMode = 'list'">← 返回模型连接</button>
+          <div v-if="freeModelCatalogError" class="connection-test-error catalog-load-error" role="alert">
+            <div><strong>免费模型目录暂不可用</strong><span>{{ freeModelCatalogError }}</span></div>
+            <button class="dialog-secondary-button" type="button" :disabled="loadingFreeModelCatalog" @click="loadFreeModelCatalog">{{ loadingFreeModelCatalog ? '正在重试…' : '重新加载目录' }}</button>
+          </div>
+          <div class="free-directory-intro">
+            <div>
+              <span>FREE MODEL ACCESS</span>
+              <h3>先申请 Key，再把模型接入工作台</h3>
+              <p>这里仅列出有免费层、免费额度或免费路由的官方服务。额度会随平台政策变化，实际以申请页面为准。</p>
+            </div>
+            <strong>{{ freeModelCatalog.length }} 个服务商</strong>
+          </div>
+          <div v-if="loadingFreeModelCatalog" class="connection-empty-state"><span>⌁</span><strong>正在读取免费模型目录</strong><p>正在同步服务商、申请入口与最新费用说明。</p></div>
+          <div v-else-if="freeModelCatalog.length" class="free-provider-grid">
+            <article v-for="offer in freeModelCatalog" :key="offer.provider_key" class="free-provider-card">
+              <header>
+                <span class="provider-avatar large">{{ providerOption(offer.provider_key).short }}</span>
+                <div><strong>{{ offer.display_name }}</strong><small>{{ offer.free_label }}</small></div>
+                <span class="catalog-readiness" :class="{ ready: offer.platform_ready }">{{ offer.platform_ready ? '已有连接' : '待接入' }}</span>
+              </header>
+              <p>{{ offer.free_description }}</p>
+              <div class="free-model-template-list">
+                <div v-for="model in offer.models" :key="model.model_id" class="free-model-template">
+                  <div><strong>{{ model.display_name }}</strong><code>{{ model.model_id }}</code></div>
+                  <button type="button" @click="configureCatalogModel(offer, model)">{{ configuredCatalogProfile(offer, model) ? '编辑连接' : '配置此模型' }}</button>
+                  <small>{{ catalogModelStatus(offer, model) }}</small>
+                </div>
+              </div>
+              <footer>
+                <a :href="offer.setup_url" target="_blank" rel="noopener noreferrer">申请 API Key ↗</a>
+                <a :href="offer.documentation_url" target="_blank" rel="noopener noreferrer">官方接入文档 ↗</a>
+                <a :href="offer.pricing_url || offer.documentation_url" target="_blank" rel="noopener noreferrer">费用与免费额度 ↗</a>
+              </footer>
+            </article>
+          </div>
+          <div v-else-if="!freeModelCatalogError" class="connection-empty-state"><span>⌁</span><strong>暂无免费模型目录</strong><p>仍可返回“模型与连接”，手动添加 OpenAI-compatible 模型服务。</p></div>
+        </main>
+
+        <main v-else-if="modelDialogMode === 'setup'" class="model-dialog-body connection-setup-body">
+          <button class="back-button" type="button" @click="modelDialogMode = modelSetupReturnMode">← {{ modelSetupReturnMode === 'free' ? '返回免费模型目录' : '返回已配置模型' }}</button>
           <section class="provider-catalog-section" aria-labelledby="provider-catalog-title">
             <div><h3 id="provider-catalog-title">1. 选择服务商</h3></div>
             <div class="provider-picker-grid provider-picker-grid-expanded">
@@ -1080,8 +1240,8 @@ onMounted(refreshData)
           </section>
         </main>
 
-        <footer v-if="modelDialogMode !== 'list'" class="model-dialog-footer">
-          <button class="dialog-secondary-button" type="button" @click="modelDialogMode = 'list'">取消</button>
+        <footer v-if="modelDialogMode === 'setup'" class="model-dialog-footer">
+          <button class="dialog-secondary-button" type="button" @click="modelDialogMode = modelSetupReturnMode">取消</button>
           <button v-if="modelDialogMode === 'setup'" class="dialog-secondary-button test-connection-button" type="button" :disabled="testingConnection || savingModel" @click="testModelConnection">{{ testingConnection ? '正在测试连接…' : '测试连接' }}</button>
           <button v-if="modelDialogMode === 'setup'" class="dialog-primary-button" type="button" :disabled="savingModel || testingConnection || testedConnectionFingerprint !== connectionFingerprint()" @click="saveModelProfile">{{ savingModel ? '正在保存并复测…' : '保存模型连接' }}</button>
         </footer>
@@ -1111,7 +1271,7 @@ onMounted(refreshData)
 .message-list { display:flex; flex:1; flex-direction:column; gap:12px; overflow-y:auto; overscroll-behavior:contain; padding:18px 20px; }.message,.agent-message { max-width:min(760px,78%); border-radius:15px; padding:12px 14px; }.agent-message,.message.from-agent { align-self:flex-start; border:1px solid #e5ebdc; background:#fbfcf9; }.message.from-user { align-self:flex-end; background:#edf5dc; }.message span,.agent-message strong { color:#687c50; font-size:11px; font-weight:900; }.message p,.agent-message p { margin:6px 0; color:#344033; line-height:1.7; white-space:pre-wrap; }.message small { color:#99a38f; font-size:10px; }.turn-status { align-self:center; border-radius:999px; background:#f7f8f3; color:#64715a; padding:7px 11px; font-size:12px; }.turn-status.active { background:#fff5df; color:#a16e1b; }
 .message-sending { opacity:.76; }.message-failed { border:1px solid #edcaca; background:#fff8f8 !important; }.message-failed small { color:#b35454; font-weight:800; }.agent-pending { width:min(520px,78%); color:#607852; }.stream-pending-heading { display:flex; align-items:center; gap:8px; color:#607852; }.stream-pending-heading::before { width:13px; height:13px; flex:0 0 auto; border:2px solid #d7e5bc; border-top-color:#89a93e; border-radius:50%; content:''; animation:career-thinking-spin .8s linear infinite; }.stream-pending-heading span { color:#596d4d; font-size:12px; font-weight:850; }.stream-progress-list { display:grid; gap:7px; margin:11px 0 0; padding:0; list-style:none; }.stream-progress-item { display:flex; align-items:center; gap:8px; color:#75846d; font-size:12px; line-height:1.45; }.stream-progress-item i { width:7px; height:7px; flex:0 0 auto; border-radius:50%; background:#d2dcc5; }.stream-progress-item.running { color:#557525; font-weight:750; }.stream-progress-item.running i { background:#89a93e; animation:career-progress-pulse 1s ease-in-out infinite; }.stream-progress-item.completed i { background:#96b95a; }.stream-status,.streamed-answer { margin:10px 0 0 !important; }.streamed-answer { border-top:1px solid #e8eee0; padding-top:10px; } @keyframes career-progress-pulse { 50% { transform:scale(.72); opacity:.55; } }
 @keyframes career-thinking-spin { to { transform:rotate(360deg); } }
-.composer { border-top:1px solid #edf0e7; background:#fff; padding:12px 16px 14px; }.composer-toolbar { min-height:36px; flex-wrap:wrap; border-bottom:1px solid #edf0e7; padding-bottom:9px; }.input-tools,.session-tools { display:flex; min-width:0; flex-wrap:wrap; align-items:center; gap:7px; }.session-tools { margin-left:auto; justify-content:flex-end; }.job-url-row { display:grid; grid-template-columns:auto 1fr; align-items:center; gap:8px; margin:10px 0 9px; color:#738068; font-size:12px; font-weight:800; }.job-url-row input,.composer textarea { padding:10px 11px; }.composer textarea { display:block; min-height:68px; margin-top:10px; resize:vertical; }.composer-footer { margin-top:9px; }.input-tools { justify-content:flex-start; }.resume-input { display:none; }.chip-button.active { max-width:240px; overflow:hidden; background:#eaf4d4; color:#5a7d21; text-overflow:ellipsis; white-space:nowrap; }.file-clear-button { border-color:#f0d5d5; background:#fff8f8; color:#a65a5a; }.model-select { width:auto; max-width:210px; padding:7px 9px; color:#65775a; font-size:12px; font-weight:700; }.send-button { min-width:88px; padding:9px 13px; }.composer-footer > small { color:#98a18e; font-size:11px; }
+.composer { border-top:1px solid #edf0e7; background:#fff; padding:12px 16px 14px; }.composer-toolbar { min-height:36px; flex-wrap:wrap; border-bottom:1px solid #edf0e7; padding-bottom:9px; }.input-tools,.session-tools { display:flex; min-width:0; flex-wrap:wrap; align-items:center; gap:7px; }.session-tools { margin-left:auto; justify-content:flex-end; }.job-url-row { display:grid; grid-template-columns:auto 1fr; align-items:center; gap:8px; margin:10px 0 9px; color:#738068; font-size:12px; font-weight:800; }.job-url-row input,.composer textarea { padding:10px 11px; }.composer textarea { display:block; min-height:68px; margin-top:10px; resize:vertical; }.composer-footer { margin-top:9px; }.input-tools { justify-content:flex-start; }.resume-input { display:none; }.chip-button.active { max-width:240px; overflow:hidden; background:#eaf4d4; color:#5a7d21; text-overflow:ellipsis; white-space:nowrap; }.file-clear-button { border-color:#f0d5d5; background:#fff8f8; color:#a65a5a; }.free-model-entry-button { border-style:dashed; background:#fff; color:#62812d; }.free-model-entry-button:hover { border-color:#9fbd67; background:#f5f9ed; }.model-select { width:auto; max-width:300px; padding:7px 9px; color:#65775a; font-size:12px; font-weight:700; }.send-button { min-width:88px; padding:9px 13px; }.composer-footer > small { color:#98a18e; font-size:11px; }
 .interview-reference-row { display:flex; flex-wrap:wrap; gap:7px; margin-top:9px; }
 .interview-reference-chip { display:inline-flex; align-items:center; max-width:100%; gap:6px; border:1px solid #cfe1a9; border-radius:999px; background:#f1f8e4; color:#5d7e2a; padding:5px 7px 5px 10px; font-size:12px; font-weight:800; }
 .interview-reference-chip > span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -1124,6 +1284,7 @@ onMounted(refreshData)
 .model-manager-button { border-color:#cfdcb7; background:#f1f7e5; color:#5c7a28; }.model-dialog-backdrop { position:fixed; z-index:1200; inset:0; display:grid; place-items:center; box-sizing:border-box; padding:28px; background:rgba(29,40,25,.42); backdrop-filter:blur(5px); }.model-dialog { display:flex; width:min(960px,100%); max-height:min(780px,calc(100vh - 56px)); flex-direction:column; overflow:hidden; border:1px solid #dce6cf; border-radius:24px; background:#fff; box-shadow:0 28px 80px rgba(23,37,20,.28); }.model-dialog-header { display:flex; align-items:flex-start; justify-content:space-between; gap:20px; border-bottom:1px solid #ecf0e5; padding:24px 28px 20px; }.model-dialog-header h2 { margin:4px 0 0; color:#243323; font-size:23px; }.dialog-close-button { display:grid; width:34px; height:34px; flex:0 0 auto; place-items:center; border:1px solid #e1e8d7; border-radius:10px; background:#fafcf7; color:#728067; font-size:23px; line-height:1; }.model-dialog-body { min-height:240px; overflow-y:auto; padding:22px 28px 26px; }.connection-toolbar { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:16px; }.connection-toolbar strong,.connection-toolbar small { display:block; }.connection-toolbar strong { color:#354333; font-size:16px; }.connection-toolbar small,.dialog-helper { margin-top:4px; color:#889281; font-size:12px; }.dialog-primary-button,.dialog-secondary-button { border:0; border-radius:11px; padding:10px 15px; font-size:13px; font-weight:850; }.dialog-primary-button { background:#89a93e; color:#fff; box-shadow:0 8px 18px rgba(112,144,51,.2); }.dialog-primary-button:disabled { cursor:wait; opacity:.6; }.dialog-secondary-button,.back-button { border:1px solid #e1e8d7; background:#fff; color:#64735a; }.connection-card-list { display:grid; gap:10px; }.connection-card { display:grid; width:100%; grid-template-columns:18px 42px minmax(0,1fr) auto; align-items:center; gap:13px; border:1px solid #e3ead9; border-radius:15px; background:#fff; color:#31402f; padding:13px 15px; text-align:left; transition:border-color .16s ease,background .16s ease,transform .16s ease; }.connection-card:hover { border-color:#a7c66d; background:#fbfdf7; transform:translateY(-1px); }.connection-drag { color:#bcc7b4; font-size:20px; letter-spacing:-3px; }.provider-avatar { display:grid; width:38px; height:38px; place-items:center; border:1px solid #dfe8d0; border-radius:12px; background:#f3f8e9; color:#6d8c33; font-size:11px; font-weight:900; }.provider-avatar.large { width:44px; height:44px; border-radius:14px; }.connection-card-copy { min-width:0; }.connection-card-copy strong,.connection-card-copy small { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.connection-card-copy strong { font-size:14px; }.connection-card-copy small { margin-top:3px; color:#899481; font-size:12px; }.connection-meta { display:grid; justify-items:end; gap:5px; }.connection-meta small { color:#98a18f; font-size:11px; }.connection-empty-state { display:grid; min-height:250px; place-content:center; justify-items:center; border:1px dashed #d9e4cb; border-radius:16px; background:#fbfdf8; color:#7a8870; text-align:center; }.connection-empty-state > span { color:#90b04c; font-size:30px; }.connection-empty-state strong { margin-top:8px; color:#526449; }.connection-empty-state p { max-width:320px; margin:7px 0 0; font-size:13px; line-height:1.6; }.back-button { border-radius:9px; padding:7px 10px; color:#66765b; font-size:12px; font-weight:800; }.model-dialog-body h3 { margin:20px 0 4px; color:#31402e; font-size:18px; }.provider-picker-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; margin-top:18px; }.provider-picker-card { display:grid; grid-template-columns:44px minmax(0,1fr); align-items:center; gap:11px; border:1px solid #e2ead8; border-radius:16px; background:#fbfcf9; color:#334131; padding:15px; text-align:left; transition:border-color .16s ease,box-shadow .16s ease; }.provider-picker-card:hover { border-color:#97ba57; box-shadow:0 10px 25px rgba(91,120,42,.1); }.provider-picker-card strong,.provider-picker-card small { display:block; }.provider-picker-card small { margin-top:4px; color:#84907c; font-size:11px; line-height:1.5; }.provider-picker-card em { grid-column:1 / -1; justify-self:start; border-radius:999px; background:#eef6df; color:#66842e; padding:4px 7px; font-size:10px; font-style:normal; font-weight:850; }.connection-form-body { padding-bottom:22px; }.selected-provider-banner { display:flex; align-items:center; gap:11px; margin-top:17px; border:1px solid #dce9c8; border-radius:15px; background:#f6faef; padding:12px; }.selected-provider-banner div { min-width:0; flex:1; }.selected-provider-banner strong,.selected-provider-banner small { display:block; }.selected-provider-banner small { margin-top:3px; color:#7d8973; font-size:12px; }.selected-provider-banner > span:last-child { border-radius:999px; background:#e7f1d4; color:#63822b; padding:5px 8px; font-size:11px; font-weight:850; }.connection-form-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; margin-top:18px; }.connection-form-grid label { display:grid; gap:5px; color:#4e5c49; font-size:13px; font-weight:850; }.connection-form-grid label > span { color:#8a9583; font-size:11px; font-weight:500; }.connection-form-grid input,.connection-form-grid select { width:100%; box-sizing:border-box; border:1px solid #dfe7d4; border-radius:10px; background:#fff; color:#354334; padding:10px 11px; font:inherit; outline:none; }.connection-form-grid input:focus,.connection-form-grid select:focus { border-color:#91b44b; box-shadow:0 0 0 3px rgba(137,169,62,.12); }.full-width { grid-column:1 / -1; }.capability-fieldset { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; margin:18px 0 0; border:0; padding:0; }.capability-fieldset legend { margin-bottom:8px; color:#4d5d48; font-size:13px; font-weight:850; }.capability-option { display:flex; align-items:flex-start; gap:8px; border:1px solid #e3ead9; border-radius:13px; background:#fbfcf9; padding:11px; }.capability-option input { margin-top:3px; accent-color:#89a93e; }.capability-option strong,.capability-option small { display:block; }.capability-option strong { color:#485846; font-size:12px; }.capability-option small { margin-top:3px; color:#899481; font-size:11px; line-height:1.45; }.connection-test-success,.connection-test-error { display:block; margin:14px 0 0; border-radius:11px; padding:10px 12px; font-size:12px; font-weight:750; line-height:1.6; }.connection-test-success { border:1px solid #cce5aa; background:#f4faea; color:#587b27; }.connection-test-error { border:1px solid #efcaca; background:#fff6f6; color:#9c4848; }.connection-test-error strong { display:block; margin-bottom:2px; }.model-dialog-footer { display:flex; justify-content:flex-end; gap:10px; border-top:1px solid #ecf0e5; background:#fbfcf9; padding:15px 28px; }
 .model-dialog { width:min(1080px,100%); max-height:min(840px,calc(100vh - 44px)); }
 .connection-setup-body { scroll-behavior:smooth; }
+.connection-toolbar-actions { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:8px; }
 .provider-catalog-section { padding-bottom:22px; border-bottom:1px solid #edf0e7; }
 .provider-picker-grid-expanded { grid-template-columns:repeat(4,minmax(0,1fr)); }
 .provider-picker-card.selected { border-color:#89a93e; background:#f2f8e7; box-shadow:0 0 0 3px rgba(137,169,62,.12); }
@@ -1132,50 +1293,12 @@ onMounted(refreshData)
 .connection-section-heading h3 { margin-top:0; }
 .test-connection-button { color:#50761b; }
 .test-connection-button:disabled { cursor:wait; opacity:.6; }
-@media (max-width:960px) { .career-workspace { grid-template-columns:1fr; grid-template-rows:minmax(160px,.35fr) minmax(0,1fr); }.career-history-panel { max-height:none; }.conversation-list { grid-template-columns:repeat(2,minmax(0,1fr)); overflow:auto; }.model-settings { grid-template-columns:1fr; }.provider-picker-grid,.provider-picker-grid-expanded { grid-template-columns:1fr; } }
-@media (max-width:640px) { .career-workspace { gap:10px; }.career-chat-panel { min-height:0; }.chat-header { min-height:60px; padding:12px 14px; }.message-list { padding:14px; }.composer { padding:10px 12px max(12px, env(safe-area-inset-bottom)); }.composer-toolbar,.composer-footer { align-items:flex-start; flex-direction:column; }.session-tools { margin-left:0; }.career-history-panel { max-height:none; }.conversation-list { grid-template-columns:1fr; max-height:200px; }.model-form { grid-template-columns:1fr; }.message,.agent-message { max-width:94%; }.model-select { max-width:100%; }.send-button { align-self:stretch; min-height:44px; }.career-error-toast { width:calc(100vw - 28px); gap:12px; padding:17px; }.career-error-toast strong { font-size:16px; }.career-error-toast p { font-size:15px; }.model-dialog-backdrop { align-items:end; padding:0; }.model-dialog { max-height:90dvh; border-radius:22px 22px 0 0; }.model-dialog-header,.model-dialog-body,.model-dialog-footer { padding-right:18px; padding-left:18px; }.connection-toolbar,.connection-card { align-items:flex-start; }.connection-toolbar { flex-direction:column; }.connection-card { grid-template-columns:18px 38px minmax(0,1fr); }.connection-meta { grid-column:3; justify-items:start; }.connection-form-grid,.capability-fieldset { grid-template-columns:1fr; }.dialog-primary-button,.dialog-secondary-button { min-height:44px; } }
-@media (max-width:960px) and (max-height:680px) { .career-workspace { height:auto; min-height:calc(100dvh - 76px); grid-template-rows:auto minmax(520px,1fr); overflow:visible; }.career-history-panel { height:auto; overflow:visible; }.conversation-list { max-height:196px; flex:none; }.career-chat-panel { min-height:520px; overflow:visible; }.message-list { min-height:220px; }.composer { position:sticky; bottom:0; z-index:2; } }
-
-/* 手机端只保留一个页面级滚动面，避免会话、消息和主容器互相抢滚动。 */
-@media (max-width:960px) {
-  .career-workspace {
-    height:auto;
-    min-height:calc(100dvh - 92px);
-    grid-template-rows:auto auto;
-    align-content:start;
-    overflow:visible;
-  }
-
-  .career-history-panel {
-    height:auto;
-    max-height:none;
-    overflow:visible;
-  }
-
-  .conversation-list {
-    flex:none;
-    max-height:228px;
-  }
-
-  .career-chat-panel {
-    height:auto;
-    min-height:520px;
-    overflow:visible;
-  }
-
-  .message-list {
-    min-height:270px;
-    flex:none;
-    overflow:visible;
-  }
-
-  .composer {
-    position:sticky;
-    z-index:5;
-    bottom:0;
-    box-shadow:0 -10px 22px rgba(47,62,37,.08);
-  }
-}
+.free-model-directory { background:linear-gradient(180deg,#fbfdf8 0,#fff 160px); }
+.free-directory-intro { display:flex; align-items:flex-start; justify-content:space-between; gap:24px; margin:18px 0 20px; border-bottom:1px solid #e7ecdf; padding-bottom:18px; }.free-directory-intro > div { max-width:690px; }.free-directory-intro span { color:#8aa34c; font-size:10px; font-weight:900; letter-spacing:.14em; }.free-directory-intro h3 { margin:5px 0 4px; font-size:20px; }.free-directory-intro p { margin:0; color:#778372; font-size:12px; line-height:1.65; }.free-directory-intro > strong { flex:0 0 auto; border-radius:999px; background:#eaf3d8; color:#66852d; padding:7px 10px; font-size:11px; }
+.free-provider-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; }.free-provider-card { display:flex; min-width:0; flex-direction:column; border:1px solid #dfe8d4; border-radius:18px; background:#fff; padding:16px; box-shadow:0 8px 24px rgba(65,82,50,.05); }.free-provider-card > header { display:grid; grid-template-columns:44px minmax(0,1fr) auto; align-items:center; gap:11px; }.free-provider-card > header strong,.free-provider-card > header small { display:block; }.free-provider-card > header strong { color:#31402e; font-size:14px; }.free-provider-card > header small { margin-top:3px; color:#839078; font-size:11px; }.catalog-readiness { border-radius:999px; background:#f4eee1; color:#9a7327; padding:5px 7px; font-size:10px; font-weight:850; }.catalog-readiness.ready { background:#eaf4d8; color:#5f8228; }.free-provider-card > p { min-height:44px; margin:13px 0; color:#727f6c; font-size:12px; line-height:1.65; }.free-model-template-list { display:grid; gap:8px; }.free-model-template { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:4px 10px; border:1px solid #e7ecdf; border-radius:12px; background:#fafcf7; padding:10px; }.free-model-template > div { min-width:0; }.free-model-template strong,.free-model-template code { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.free-model-template strong { color:#445340; font-size:12px; }.free-model-template code { margin-top:3px; color:#84917d; font-size:10px; }.free-model-template button { grid-row:1 / 3; grid-column:2; align-self:center; border:1px solid #b9cf8e; border-radius:9px; background:#f0f7e3; color:#5d7d28; padding:7px 9px; font-size:11px; font-weight:850; }.free-model-template > small { color:#96a08f; font-size:10px; }.free-provider-card > footer { display:flex; flex-wrap:wrap; gap:8px 14px; margin-top:auto; padding-top:14px; }.free-provider-card > footer a { color:#557825; font-size:11px; font-weight:850; text-decoration:none; }.free-provider-card > footer a:hover { text-decoration:underline; }
+.catalog-load-error { display:flex; align-items:center; justify-content:space-between; gap:14px; flex-wrap:wrap; }.catalog-load-error > div { min-width:0; flex:1 1 420px; }.catalog-load-error span { display:block; }.catalog-load-error button { flex:0 0 auto; background:#fff; }
+/* 只维护电脑与手机两档；手机端保留一个页面级滚动面。 */
+@media (max-width:640px) { .career-workspace { height:auto; min-height:calc(100dvh - 92px); grid-template-columns:1fr; grid-template-rows:auto auto; align-content:start; gap:10px; overflow:visible; }.career-chat-panel { height:auto; min-height:520px; overflow:visible; }.chat-header { min-height:60px; padding:12px 14px; }.message-list { min-height:270px; flex:none; overflow:visible; padding:14px; }.composer { position:sticky; z-index:5; bottom:0; padding:10px 12px max(12px, env(safe-area-inset-bottom)); box-shadow:0 -10px 22px rgba(47,62,37,.08); }.composer-toolbar,.composer-footer { align-items:flex-start; flex-direction:column; }.session-tools { margin-left:0; }.career-history-panel { height:auto; max-height:none; overflow:visible; }.conversation-list { grid-template-columns:1fr; max-height:200px; flex:none; overflow:auto; }.model-settings,.model-form,.provider-picker-grid,.provider-picker-grid-expanded { grid-template-columns:1fr; }.message,.agent-message { max-width:94%; }.model-select { max-width:100%; }.send-button { align-self:stretch; min-height:44px; }.career-error-toast { width:calc(100vw - 28px); gap:12px; padding:17px; }.career-error-toast strong { font-size:16px; }.career-error-toast p { font-size:15px; }.model-dialog-backdrop { align-items:end; padding:0; }.model-dialog { max-height:90dvh; border-radius:22px 22px 0 0; }.model-dialog-header,.model-dialog-body,.model-dialog-footer { padding-right:18px; padding-left:18px; }.connection-toolbar,.connection-card { align-items:flex-start; }.connection-toolbar { flex-direction:column; }.connection-toolbar-actions { width:100%; justify-content:stretch; }.connection-toolbar-actions button { flex:1; }.connection-card { grid-template-columns:18px 38px minmax(0,1fr); }.connection-meta { grid-column:3; justify-items:start; }.connection-form-grid,.capability-fieldset { grid-template-columns:1fr; }.dialog-primary-button,.dialog-secondary-button { min-height:44px; }.free-directory-intro { align-items:flex-start; flex-direction:column; gap:10px; }.free-provider-grid { grid-template-columns:1fr; }.free-provider-card { padding:14px; }.free-provider-card > header { grid-template-columns:40px minmax(0,1fr); }.free-provider-card > header .catalog-readiness { grid-column:2; justify-self:start; }.free-provider-card > p { min-height:0; }.free-model-template { grid-template-columns:1fr; }.free-model-template button { grid-row:auto; grid-column:auto; min-height:42px; }.free-provider-card > footer a { min-height:36px; display:inline-flex; align-items:center; } }
 
 @media (max-width:640px) {
   .career-history-panel {
@@ -1227,7 +1350,7 @@ onMounted(refreshData)
   }
 }
 
-@media (max-width:960px) and (max-height:760px) {
+@media (max-width:640px) and (max-height:760px) {
   .career-workspace {
     min-height:0;
   }

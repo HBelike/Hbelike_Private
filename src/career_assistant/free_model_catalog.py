@@ -43,6 +43,7 @@ class FreeModelProvider:
     website_url: str
     setup_url: str
     documentation_url: str
+    pricing_url: str
     free_label: str
     free_description: str
     templates: tuple[FreeModelTemplate, ...]
@@ -55,11 +56,19 @@ FREE_MODEL_PROVIDERS: tuple[FreeModelProvider, ...] = (
         api_base_url="https://generativelanguage.googleapis.com/v1beta/openai",
         website_url="https://aistudio.google.com",
         setup_url="https://aistudio.google.com/apikey",
-        documentation_url="https://ai.google.dev/gemini-api/docs/pricing",
+        documentation_url="https://ai.google.dev/gemini-api/docs/openai",
+        pricing_url="https://ai.google.dev/gemini-api/docs/pricing",
         free_label="免费层",
-        free_description="Gemini Developer API 的 Free Tier 提供部分模型的免费输入与输出额度。",
+        free_description=(
+            "Gemini Developer API 的标准 Free Tier 对部分模型免收输入与输出费用；"
+            "可用地区、项目级限额和模型限额以 AI Studio 为准，免费层内容可能用于改进 Google 产品。"
+        ),
         templates=(
-            FreeModelTemplate("gemini-3.5-flash-lite", "Gemini 3.5 Flash-Lite"),
+            FreeModelTemplate(
+                "gemini-3.5-flash-lite",
+                "Gemini 3.5 Flash-Lite",
+                supports_vision=True,
+            ),
             FreeModelTemplate("gemini-3.5-flash", "Gemini 3.5 Flash", supports_vision=True),
             FreeModelTemplate("gemini-3.6-flash", "Gemini 3.6 Flash", supports_vision=True),
         ),
@@ -69,12 +78,13 @@ FREE_MODEL_PROVIDERS: tuple[FreeModelProvider, ...] = (
         display_name="阿里云百炼 Qwen",
         api_base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
         website_url="https://bailian.console.aliyun.com",
-        setup_url="https://bailian.console.aliyun.com",
-        documentation_url="https://help.aliyun.com/en/model-studio/text-generation-model/",
+        setup_url="https://bailian.console.aliyun.com/cn-beijing/?tab=app#/api-key",
+        documentation_url="https://help.aliyun.com/zh/model-studio/new-free-quota/",
+        pricing_url="https://help.aliyun.com/zh/model-studio/model-pricing",
         free_label="新用户免费额度",
         free_description=(
-            "百炼为新激活用户的部分模型提供限时免费额度；额度、区域与模型准入以控制台为准。"
-            "平台保存并验证 DASHSCOPE_API_KEY 后，访客可直接使用。"
+            "百炼为中国内地（北京）的新用户提供部分模型限时额度；qwen3.6-flash 当前为"
+            "100 万 Token、有效期 90 天，实际额度、区域和到期后的计费以控制台为准。"
         ),
         templates=(
             # 此通用 Vision-Language 模型可作为管理员另行保存的会话模型；
@@ -91,10 +101,14 @@ FREE_MODEL_PROVIDERS: tuple[FreeModelProvider, ...] = (
         display_name="OpenRouter",
         api_base_url="https://openrouter.ai/api/v1",
         website_url="https://openrouter.ai",
-        setup_url="https://openrouter.ai/keys",
-        documentation_url="https://openrouter.ai/docs/guides/routing/model-variants/free",
+        setup_url="https://openrouter.ai/settings/keys",
+        documentation_url="https://openrouter.ai/docs/guides/routing/routers/free-router",
+        pricing_url="https://openrouter.ai/pricing",
         free_label="免费模型路由",
-        free_description="使用 openrouter/free 路由到当时可用的免费模型，具体模型与限额由平台动态调整。",
+        free_description=(
+            "未购买额度的账号每天最多 50 次免费模型请求、20 RPM；累计购买至少 10 美元额度后"
+            "上限为每天 1,000 次。openrouter/free 会动态路由，不保证固定模型。"
+        ),
         templates=(
             FreeModelTemplate("openrouter/free", "OpenRouter Free 自动路由"),
         ),
@@ -103,11 +117,15 @@ FREE_MODEL_PROVIDERS: tuple[FreeModelProvider, ...] = (
         provider_key="modelscope",
         display_name="ModelScope 魔搭",
         api_base_url="https://api-inference.modelscope.cn/v1",
-        website_url="https://www.modelscope.cn",
+        website_url="https://www.modelscope.cn/home?tab=model",
         setup_url="https://modelscope.cn/my/myaccesstoken",
-        documentation_url="https://www.modelscope.cn/learn/434591",
+        documentation_url="https://modelscope.cn/docs/model-service/API-Inference/intro",
+        pricing_url="https://www.modelscope.cn/learn/434367",
         free_label="免费日额度",
-        free_description="API Inference 为选定开源模型提供免费层，实际可调用目录与每日额度以控制台为准。",
+        free_description=(
+            "API Inference 为选定开源模型提供免费层；当前说明为带魔搭标识的模型至少 50 次/日，"
+            "热门模型可能有单独日限额，实际目录与额度以模型页实时状态为准。"
+        ),
         templates=(
             FreeModelTemplate("Qwen/Qwen2.5-7B-Instruct", "Qwen 2.5 7B Instruct"),
             FreeModelTemplate("Qwen/Qwen2.5-Coder-32B-Instruct", "Qwen 2.5 Coder 32B"),
@@ -119,12 +137,16 @@ FREE_MODEL_PROVIDERS: tuple[FreeModelProvider, ...] = (
         api_base_url="https://api.siliconflow.cn/v1",
         website_url="https://cloud.siliconflow.cn",
         setup_url="https://cloud.siliconflow.cn/account/ak",
-        documentation_url="https://docs.siliconflow.cn/cn/userguide/rate-limits/rate-limit-and-upgradation",
+        documentation_url="https://docs.siliconflow.cn/cn/userguide/quickstart",
+        pricing_url="https://siliconflow.cn/pricing",
         free_label="认证后免费模型",
-        free_description="仅列出硅基流动标记为免费的模型；同名 Pro 前缀模型属于收费版本。",
+        free_description=(
+            "完成实名认证后可调用免费模型；目录仅列价格页标记为 0 元的型号，"
+            "固定限流以账号等级为准，带 Pro/ 前缀的同系列模型属于收费版本。"
+        ),
         templates=(
             FreeModelTemplate("Qwen/Qwen2.5-7B-Instruct", "Qwen 2.5 7B Instruct"),
-            FreeModelTemplate("Qwen/Qwen-3-8B", "Qwen 3 8B"),
+            FreeModelTemplate("Qwen/Qwen3-8B", "Qwen 3 8B"),
             FreeModelTemplate("THUDM/GLM-4-9B-0414", "GLM 4 9B"),
         ),
     ),
@@ -133,12 +155,16 @@ FREE_MODEL_PROVIDERS: tuple[FreeModelProvider, ...] = (
         display_name="NVIDIA NIM",
         api_base_url="https://integrate.api.nvidia.com/v1",
         website_url="https://build.nvidia.com",
-        setup_url="https://build.nvidia.com",
-        documentation_url="https://build.nvidia.com/stockmark/stockmark-2-100b-instruct/deploy",
+        setup_url="https://build.nvidia.com/settings/api-keys",
+        documentation_url="https://docs.api.nvidia.com/nim/reference/llm-apis",
+        pricing_url="https://build.nvidia.com/explore/discover?api-key=true",
         free_label="免费原型端点",
-        free_description="NVIDIA Build 为部分模型提供免费原型推理端点；适合试验，不应假定为无限生产额度。",
+        free_description=(
+            "NVIDIA Build 托管端点仅用于开发和试用，存在限流、拥塞与模型下线风险，"
+            "试用条款不允许生产用途；可用模型和额度以 Build 目录实时状态为准。"
+        ),
         templates=(
-            FreeModelTemplate("stockmark/stockmark-2-100b-instruct", "Stockmark 2 100B Instruct"),
+            FreeModelTemplate("meta/llama-3.3-70b-instruct", "Llama 3.3 70B Instruct"),
         ),
     ),
 )
@@ -172,6 +198,7 @@ def build_free_model_catalog_payload(
                 "website_url": provider.website_url,
                 "setup_url": provider.setup_url,
                 "documentation_url": provider.documentation_url,
+                "pricing_url": provider.pricing_url,
                 "free_label": provider.free_label,
                 "free_description": provider.free_description,
                 "platform_ready": bool(ready_connections),

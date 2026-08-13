@@ -77,9 +77,8 @@ const appNavItems = [
   { label: '求职助手', icon: '◉', path: '/career', enabled: true },
   { label: '面经库', icon: '⌘', path: '/interviews', enabled: true },
   { label: '技能库', icon: '✦', path: '/skills', enabled: true },
-  { label: '可观测性', icon: '◌', path: '/observability', enabled: true, requiredRole: 'admin' },
+  { label: 'LangSmith', icon: '◌', path: '/observability', enabled: true, requiredRole: 'admin' },
   { label: '管理台', icon: '⚙', path: '/admin', enabled: true, requiredRole: 'admin' },
-  { label: '知识库', icon: '▤', enabled: false }
 ]
 
 const currentRoute = ref(normalizeRoute(window.location.pathname))
@@ -1055,7 +1054,7 @@ onBeforeUnmount(() => {
       <div class="brand">
         <div class="brand-icon">AI</div>
         <div>
-          <strong>AI 行政助手</strong>
+          <strong>Find Job</strong>
           <span>Agent 内容工坊</span>
         </div>
       </div>

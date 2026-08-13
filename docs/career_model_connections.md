@@ -52,20 +52,24 @@ CAREER_CREDENTIAL_MASTER_KEY=<Fernet.generate_key() 生成的 URL-safe Base64 �
 
 ## 官方免费模型选择
 
-聊天输入框旁的模型下拉列表直接展示真正的免费模型，并以“【免费】”标记。尚未由管理员接入的候选项显示为“【免费·待接入】”且不可选择；已通过连通性测试、保存为 `free_quota` 的连接会变成可选项。免费不代表匿名调用：云端 API 仍需由平台管理员注册账号并申请 API Key。
+聊天输入框旁的模型下拉只展示 `readiness=ready` 的真实可调用连接；免费连接额外以“【免费】”标记。尚未接入的候选模型不会再混入聊天下拉，而是统一放在“申请免费模型”目录中。管理员可从目录打开 API Key 申请、官方接入文档和费用说明，并一键预填连接参数；只有完成真实连通性测试并保存后，连接才会进入聊天下拉。免费不代表匿名调用：云端 API 仍需由平台管理员注册账号并申请 API Key。
+
+模型主标签统一使用“`Provider · Model ID`”，连接的自定义显示名称仅作为辅助说明。因此，即使两个连接都被命名为“DeepSeek 模型连接”，`deepseek-v4-pro` 与 `deepseek-v4-flash` 也会被明确区分。免费目录请求失败时会单独提示并支持重试，不会阻断会话历史和已配置连接的加载。
 
 管理员把 Key 测试并保存后，Key 仅保留在服务端，访客不需要自行配置 Key。免费优先路由只会选择状态为“可调用”的免费连接，不会把 DeepSeek、Qwen Plus 等按量付费模型误当作免费模型。
 
-当前目录与接入入口：
+当前目录与官方接入入口：
 
-| 服务商 | 免费方式 | API Base URL | 申请入口 |
-| --- | --- | --- | --- |
-| Google Gemini | Gemini Developer API Free Tier | `https://generativelanguage.googleapis.com/v1beta/openai` | <https://aistudio.google.com/apikey> |
-| OpenRouter | `openrouter/free` 免费模型路由 | `https://openrouter.ai/api/v1` | <https://openrouter.ai/keys> |
-| ModelScope | 选定开源模型免费日额度 | `https://api-inference.modelscope.cn/v1` | <https://modelscope.cn/my/myaccesstoken> |
-| 硅基流动 SiliconFlow | 实名认证后可调用标记为免费的开源模型；带 `Pro/` 前缀的是付费版本 | `https://api.siliconflow.cn/v1` | <https://cloud.siliconflow.cn/account/ak> |
-| NVIDIA NIM | 部分模型免费原型端点 | `https://integrate.api.nvidia.com/v1` | <https://build.nvidia.com> |
-| 阿里云百炼 Qwen | 新用户限时免费额度，适用于云端 Vision | `https://dashscope.aliyuncs.com/compatible-mode/v1` | <https://bailian.console.aliyun.com> |
+| 服务商 | 免费方式 | API Base URL | Key 申请 | 接入/额度说明 | 费用与实时目录 |
+| --- | --- | --- | --- | --- | --- |
+| Google Gemini | 标准 Free Tier；地区和项目级限额以 AI Studio 为准 | `https://generativelanguage.googleapis.com/v1beta/openai` | [创建 Key](https://aistudio.google.com/apikey) | [OpenAI compatibility](https://ai.google.dev/gemini-api/docs/openai) | [Pricing](https://ai.google.dev/gemini-api/docs/pricing) |
+| OpenRouter | `openrouter/free` 动态路由；未购额度账号为 50 次/日、20 RPM | `https://openrouter.ai/api/v1` | [创建 Key](https://openrouter.ai/settings/keys) | [Free Models Router](https://openrouter.ai/docs/guides/routing/routers/free-router) | [Pricing](https://openrouter.ai/pricing) |
+| ModelScope | 带魔搭标识的 API-Inference 模型至少 50 次/日，热门模型可能另有限额 | `https://api-inference.modelscope.cn/v1` | [Access Token](https://modelscope.cn/my/myaccesstoken) | [API-Inference 文档](https://modelscope.cn/docs/model-service/API-Inference/intro) | [免费调用说明](https://www.modelscope.cn/learn/434367) |
+| 硅基流动 SiliconFlow | 实名认证后可用免费模型；带 `Pro/` 前缀的同系列模型收费 | `https://api.siliconflow.cn/v1` | [创建 Key](https://cloud.siliconflow.cn/account/ak) | [快速开始](https://docs.siliconflow.cn/cn/userguide/quickstart) | [模型定价](https://siliconflow.cn/pricing) |
+| NVIDIA NIM | Build 免费托管端点仅供开发和试用，不允许作为生产额度使用 | `https://integrate.api.nvidia.com/v1` | [创建 Key](https://build.nvidia.com/settings/api-keys) | [NIM LLM API](https://docs.api.nvidia.com/nim/reference/llm-apis) | [实时模型目录](https://build.nvidia.com/explore/discover?api-key=true) |
+| 阿里云百炼 Qwen | 中国内地（北京）新用户限时额度；`qwen3.6-flash` 当前为 100 万 Token、90 天 | `https://dashscope.aliyuncs.com/compatible-mode/v1` | [创建 Key](https://bailian.console.aliyun.com/cn-beijing/?tab=app#/api-key) | [新人免费额度](https://help.aliyun.com/zh/model-studio/new-free-quota/) | [模型定价](https://help.aliyun.com/zh/model-studio/model-pricing) |
+
+目录中的模型 ID 是经过核对的调用标识，但“有这个模型”不等于“当前账号仍有免费额度”。ModelScope、OpenRouter 和 NVIDIA 的可用模型会动态变化，管理员保存连接前必须以官方实时目录为准并执行真实连通性测试。硅基流动的 Qwen 3 8B 调用标识是 `Qwen/Qwen3-8B`（不是 `Qwen/Qwen-3-8B`）；NVIDIA 目录使用当前仍明确提供免费端点的 `meta/llama-3.3-70b-instruct`，不再预置状态不稳定的 Stockmark 端点。Gemini 3.5 Flash-Lite 支持图片输入，因此目录会将其标记为 Vision 模型。
 
 ### 2026-08-07：上线优先的云端 Vision 选择
 
