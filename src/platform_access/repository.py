@@ -356,6 +356,27 @@ class PlatformAccessRepository:
             )
         return {"id": str(challenge_id), "email": normalized_email, "purpose": purpose, "expires_at": expires_at}
 
+    def discard_email_challenge(self, challenge_id: str) -> None:
+        """在验证码邮件未成功投递时移除挑战，避免 60 秒冷却阻塞用户修复配置后的立即重试。
+
+        原始验证码从不写入数据库；这里仅删除尚未送达对应的摘要记录，不影响任何已成功投递的挑战。
+        """
+
+        try:
+            normalized_id = UUID(challenge_id)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("验证码会话无效，无法清理") from exc
+        with self._database.transaction() as connection:
+            connection.execute(
+                text(
+                    """
+                    DELETE FROM career_assistant.platform_email_challenges
+                    WHERE id = :id AND consumed_at IS NULL
+                    """,
+                ),
+                {"id": normalized_id},
+            )
+
     def consume_email_challenge(self, *, challenge_id: str, purpose: str, code_digest: str) -> dict[str, object]:
         """验证并消费挑战，错误验证码只递增次数，超过阈值即失效。"""
 

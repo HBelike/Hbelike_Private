@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
 const emit = defineEmits(['authenticated'])
 
@@ -45,8 +45,25 @@ const primaryLabel = computed(() => {
 })
 
 const showAccountTabs = computed(() => !requiresBootstrap.value && !verificationStage.value && publicRegistrationEnabled.value)
+const visibleEmail = computed(() => email.value.trim())
+const isCodeStage = computed(() => verificationStage.value && !requiresCliBootstrap.value)
+const flowStep = computed(() => (isCodeStage.value ? 2 : 1))
+const maskedEmail = computed(() => {
+  const value = visibleEmail.value
+  const atIndex = value.indexOf('@')
+  if (atIndex < 2) return value
+  return `${value.slice(0, 2)}${'•'.repeat(Math.min(6, Math.max(2, atIndex - 2)))}${value.slice(atIndex)}`
+})
 
-onMounted(loadBootstrapStatus)
+onMounted(() => {
+  window.addEventListener('popstate', syncModeFromLocation)
+  syncModeFromLocation()
+  void loadBootstrapStatus()
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('popstate', syncModeFromLocation)
+})
 
 async function loadBootstrapStatus() {
   loading.value = true
@@ -61,9 +78,12 @@ async function loadBootstrapStatus() {
     requiresBootstrap.value = Boolean(payload.requires_bootstrap)
     publicRegistrationEnabled.value = payload.public_registration_enabled !== false
     cliBootstrapOnly.value = Boolean(payload.cli_bootstrap_only)
-    if (requiresBootstrap.value) mode.value = 'register'
+    if (requiresBootstrap.value) {
+      mode.value = 'register'
+      replaceModeInLocation('register')
+    }
     if (!requiresBootstrap.value && !publicRegistrationEnabled.value && mode.value === 'register') {
-      mode.value = 'login'
+      switchMode('login', { replace: true })
     }
   } catch (error) {
     errorMessage.value = readableError(error, '账户服务暂不可用。请确认后端服务和 PostgreSQL 已启动。')
@@ -72,7 +92,32 @@ async function loadBootstrapStatus() {
   }
 }
 
-function switchMode(nextMode) {
+function syncModeFromLocation() {
+  if (window.location.pathname === '/register') {
+    mode.value = 'register'
+    return
+  }
+  if (window.location.pathname === '/forgot-password') {
+    mode.value = 'reset'
+    return
+  }
+  const requestedMode = new URLSearchParams(window.location.search).get('auth')
+  if (requestedMode === 'register' || requestedMode === 'reset') {
+    mode.value = requestedMode
+    return
+  }
+  mode.value = 'login'
+}
+
+function replaceModeInLocation(nextMode) {
+  const nextUrl = new URL(window.location.href)
+  nextUrl.pathname = authPathForMode(nextMode)
+  nextUrl.searchParams.delete('auth')
+  window.history.replaceState({}, '', `${nextUrl.pathname}${nextUrl.search}${nextUrl.hash}`)
+}
+
+function switchMode(nextMode, { replace = false } = {}) {
+  if (nextMode === 'register' && !publicRegistrationEnabled.value && !requiresBootstrap.value) return
   mode.value = nextMode
   verificationStage.value = false
   challengeId.value = ''
@@ -80,6 +125,16 @@ function switchMode(nextMode) {
   password.value = ''
   confirmPassword.value = ''
   clearMessages()
+  const nextUrl = new URL(window.location.href)
+  nextUrl.pathname = authPathForMode(nextMode)
+  nextUrl.searchParams.delete('auth')
+  window.history[replace ? 'replaceState' : 'pushState']({}, '', `${nextUrl.pathname}${nextUrl.search}${nextUrl.hash}`)
+}
+
+function authPathForMode(nextMode) {
+  if (nextMode === 'register') return '/register'
+  if (nextMode === 'reset') return '/forgot-password'
+  return '/login'
 }
 
 function clearMessages() {
@@ -94,6 +149,26 @@ function validatePassword() {
   }
   if (mode.value !== 'login' && password.value !== confirmPassword.value) {
     errorMessage.value = '两次输入的密码不一致。'
+    return false
+  }
+  return true
+}
+
+function validateRegistrationFields() {
+  if (!email.value.trim() || !displayName.value.trim()) {
+    errorMessage.value = '请填写邮箱和显示名称。'
+    return false
+  }
+  if (!validateEmail(email.value)) {
+    errorMessage.value = '请输入有效的邮箱地址。'
+    return false
+  }
+  return validatePassword()
+}
+
+function validateVerificationCode() {
+  if (!/^\d{6}$/.test(verificationCode.value.trim())) {
+    errorMessage.value = '请输入邮件中的 6 位数字验证码。'
     return false
   }
   return true
@@ -115,15 +190,8 @@ async function submit() {
 }
 
 async function submitRegistration() {
-  if (!email.value.trim() || !displayName.value.trim()) {
-    errorMessage.value = '请填写邮箱和显示名称。'
-    return
-  }
-  if (!verificationStage.value && !validatePassword()) return
-  if (verificationStage.value && !verificationCode.value.trim()) {
-    errorMessage.value = '请输入 6 位邮箱验证码。'
-    return
-  }
+  if (!verificationStage.value && !validateRegistrationFields()) return
+  if (verificationStage.value && !validateVerificationCode()) return
 
   submitting.value = true
   try {
@@ -166,7 +234,7 @@ async function submitReset() {
     errorMessage.value = '请输入有效的邮箱地址。'
     return
   }
-  if (verificationStage.value && (!verificationCode.value.trim() || !validatePassword())) return
+  if (verificationStage.value && (!validateVerificationCode() || !validatePassword())) return
 
   submitting.value = true
   try {
@@ -186,13 +254,20 @@ async function submitReset() {
     if (!response.ok) throw new Error(await responseError(response, '密码重置失败'))
     const payload = await response.json()
     if (!verificationStage.value) {
+      // 后端为未注册邮箱返回泛化结果，不显示不存在账号的提示。
+      // 此时没有 challenge，前端不能进入验证码提交阶段。
+      if (!payload.challenge_id) {
+        successMessage.value = '若该邮箱已完成绑定，验证码会在几分钟内送达。请检查收件箱和垃圾邮件；未收到可稍后重试。'
+        return
+      }
       challengeId.value = payload.challenge_id
       verificationStage.value = true
-      successMessage.value = '验证码已发送，请输入验证码和新密码。'
+      successMessage.value = '验证码已发送，请输入验证码并设置新密码。'
     } else {
       successMessage.value = '密码已更新，请使用新密码登录。'
       verificationStage.value = false
       mode.value = 'login'
+      replaceModeInLocation('login')
       password.value = ''
       confirmPassword.value = ''
       verificationCode.value = ''
@@ -202,6 +277,15 @@ async function submitReset() {
   } finally {
     submitting.value = false
   }
+}
+
+function returnToEntry() {
+  verificationStage.value = false
+  challengeId.value = ''
+  verificationCode.value = ''
+  password.value = ''
+  confirmPassword.value = ''
+  clearMessages()
 }
 
 async function submitLogin() {
@@ -263,13 +347,19 @@ function readableError(error, fallback) {
 
     <section class="login-form-panel">
       <div class="login-form-wrap">
-        <div class="login-form-heading">
-          <p class="login-kicker">SECURE ACCESS</p>
+        <div class="login-form-heading" :class="{ 'is-code-stage': isCodeStage }">
+          <div class="login-heading-topline">
+            <p class="login-kicker">ACCOUNT ACCESS</p>
+            <span v-if="!loading && !requiresCliBootstrap" class="login-heading-status">邮箱验证</span>
+          </div>
           <h2>{{ panelTitle }}</h2>
           <p>{{ panelDescription }}</p>
         </div>
 
-        <div v-if="loading" class="login-loading" role="status">正在连接账户服务…</div>
+        <div v-if="loading" class="login-loading" role="status">
+          <span class="login-loading-dot" aria-hidden="true"></span>
+          正在连接账户服务…
+        </div>
         <template v-else>
           <section v-if="requiresCliBootstrap" class="login-cli-bootstrap" aria-live="polite">
             <strong>管理员尚未初始化</strong>
@@ -280,50 +370,88 @@ function readableError(error, fallback) {
 
           <template v-else>
             <nav v-if="showAccountTabs" class="login-mode-tabs" aria-label="账户操作">
-              <button :class="{ active: mode === 'login' }" type="button" @click="switchMode('login')">登录</button>
-              <button :class="{ active: mode === 'register' }" type="button" @click="switchMode('register')">注册</button>
+              <button :class="{ active: mode === 'login' }" type="button" @click="switchMode('login')">
+                登录
+                <small>已有账号</small>
+              </button>
+              <button :class="{ active: mode === 'register' }" type="button" @click="switchMode('register')">
+                注册账号
+                <small>绑定邮箱</small>
+              </button>
             </nav>
 
-          <form class="login-form" @submit.prevent="submit">
-            <template v-if="mode === 'login' && !requiresBootstrap">
-              <label><span>登录邮箱 <small>历史账号可填用户名</small></span><input v-model="identity" autocomplete="username" maxlength="160" placeholder="name@example.com" /></label>
-              <label><span>密码</span><input v-model="password" type="password" autocomplete="current-password" placeholder="输入密码" /></label>
-            </template>
+            <section v-if="isCodeStage" class="verification-flow" aria-live="polite">
+              <div class="verification-flow-mark" aria-hidden="true">{{ flowStep }}</div>
+              <div>
+                <strong>验证码已发送</strong>
+                <p>请查收 <b>{{ maskedEmail }}</b>，输入验证码继续。</p>
+              </div>
+            </section>
 
-            <template v-else-if="(mode === 'register' || requiresBootstrap) && !verificationStage">
-              <label><span>邮箱</span><input v-model="email" type="email" autocomplete="email" maxlength="254" placeholder="name@example.com" /></label>
-              <label><span>显示名称</span><input v-model="displayName" autocomplete="name" maxlength="120" placeholder="例如：徐兴龙" /></label>
-              <label><span>设置密码 <small>至少 8 位</small></span><input v-model="password" type="password" autocomplete="new-password" minlength="8" placeholder="输入至少 8 位密码" /></label>
-              <label><span>确认密码</span><input v-model="confirmPassword" type="password" autocomplete="new-password" minlength="8" placeholder="再次输入密码" /></label>
-            </template>
-
-            <template v-else-if="mode === 'reset' && !verificationStage">
-              <label><span>已验证邮箱</span><input v-model="email" type="email" autocomplete="email" maxlength="254" placeholder="name@example.com" /></label>
-            </template>
-
-            <template v-else>
-              <label><span>邮箱验证码</span><input v-model="verificationCode" autocomplete="one-time-code" inputmode="numeric" maxlength="6" placeholder="输入 6 位验证码" /></label>
-              <template v-if="mode === 'reset'">
-                <label><span>新密码 <small>至少 8 位</small></span><input v-model="password" type="password" autocomplete="new-password" minlength="8" placeholder="输入至少 8 位新密码" /></label>
-                <label><span>确认新密码</span><input v-model="confirmPassword" type="password" autocomplete="new-password" minlength="8" placeholder="再次输入新密码" /></label>
+            <form class="login-form" @submit.prevent="submit">
+              <template v-if="mode === 'login' && !requiresBootstrap">
+                <label>
+                  <span>登录邮箱 <small>历史账号可填用户名</small></span>
+                  <input v-model.trim="identity" autocomplete="username" maxlength="160" placeholder="name@example.com" autofocus />
+                </label>
+                <label>
+                  <span>密码</span>
+                  <input v-model="password" type="password" autocomplete="current-password" placeholder="输入密码" />
+                </label>
               </template>
-            </template>
 
-            <p v-if="successMessage" class="login-success">{{ successMessage }}</p>
-            <p v-if="errorMessage" class="login-error" role="alert">{{ errorMessage }}</p>
-            <button class="login-submit" type="submit" :disabled="submitting">{{ submitting ? '正在处理中…' : primaryLabel }}</button>
-          </form>
+              <template v-else-if="(mode === 'register' || requiresBootstrap) && !verificationStage">
+                <label>
+                  <span>常用邮箱</span>
+                  <input v-model.trim="email" type="email" autocomplete="email" maxlength="254" placeholder="name@example.com" autofocus />
+                </label>
+                <label>
+                  <span>显示名称</span>
+                  <input v-model.trim="displayName" autocomplete="name" maxlength="120" placeholder="例如：兴兴" />
+                </label>
+                <div class="login-password-grid">
+                  <label><span>设置密码 <small>至少 8 位</small></span><input v-model="password" type="password" autocomplete="new-password" minlength="8" placeholder="至少 8 位" /></label>
+                  <label><span>确认密码</span><input v-model="confirmPassword" type="password" autocomplete="new-password" minlength="8" placeholder="再次输入" /></label>
+                </div>
+              </template>
 
-          <div class="login-switches">
-            <button v-if="!requiresBootstrap && mode === 'login'" type="button" @click="switchMode('reset')">忘记密码？</button>
-            <button v-if="!requiresBootstrap && mode === 'reset'" type="button" @click="switchMode('login')">返回登录</button>
-            <button v-if="verificationStage" type="button" @click="switchMode(requiresBootstrap ? 'register' : mode)">修改邮箱或重新发送</button>
-          </div>
+              <template v-else-if="mode === 'reset' && !verificationStage">
+                <label>
+                  <span>已绑定邮箱</span>
+                  <input v-model.trim="email" type="email" autocomplete="email" maxlength="254" placeholder="name@example.com" autofocus />
+                  <small class="login-field-hint">系统会向该邮箱发送一次性验证码，用于确认重置密码。</small>
+                </label>
+              </template>
+
+              <template v-else>
+                <label>
+                  <span>6 位验证码</span>
+                  <input class="verification-code-input" v-model.trim="verificationCode" autocomplete="one-time-code" inputmode="numeric" maxlength="6" placeholder="000000" autofocus />
+                </label>
+                <template v-if="mode === 'reset'">
+                  <div class="login-password-grid">
+                    <label><span>新密码 <small>至少 8 位</small></span><input v-model="password" type="password" autocomplete="new-password" minlength="8" placeholder="设置新密码" /></label>
+                    <label><span>确认新密码</span><input v-model="confirmPassword" type="password" autocomplete="new-password" minlength="8" placeholder="再次输入" /></label>
+                  </div>
+                </template>
+              </template>
+
+              <p v-if="successMessage" class="login-success" role="status">{{ successMessage }}</p>
+              <p v-if="errorMessage" class="login-error" role="alert">{{ errorMessage }}</p>
+              <button class="login-submit" type="submit" :disabled="submitting">{{ submitting ? '正在处理中…' : primaryLabel }}</button>
+            </form>
+
+            <div class="login-switches">
+              <button v-if="!requiresBootstrap && mode === 'login'" type="button" @click="switchMode('reset')">忘记密码？</button>
+              <button v-if="!requiresBootstrap && mode === 'login' && publicRegistrationEnabled" type="button" @click="switchMode('register')">还没有账号，立即注册</button>
+              <button v-if="!requiresBootstrap && mode === 'reset' && !verificationStage" type="button" @click="switchMode('login')">返回登录</button>
+              <button v-if="verificationStage" type="button" @click="returnToEntry">修改邮箱或重新发送</button>
+            </div>
           </template>
         </template>
 
         <p v-if="requiresCliBootstrap" class="login-footer">管理员完成服务器端初始化后，刷新本页并使用初始化邮箱登录。</p>
-        <p v-else class="login-footer">验证码有效期为 10 分钟；连续 7 天未操作将自动退出，单次登录最长保留 30 天。</p>
+        <p v-else class="login-footer">验证码有效期为 10 分钟；注册后即绑定该邮箱，后续可使用验证码找回密码。</p>
       </div>
     </section>
   </main>

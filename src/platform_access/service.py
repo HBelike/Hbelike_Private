@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
@@ -18,6 +19,9 @@ from src.platform_access.security import (
     normalize_email,
     verify_password,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -206,8 +210,17 @@ class PlatformAccessService:
         challenge = self._repository.create_email_challenge(email=email, purpose=purpose, payload=payload, code_digest=code_digest, expires_at=expires_at)
         try:
             self._email_delivery.send_verification_code(recipient=email, code=code, purpose=purpose)
-        except EmailDeliveryError:
-            # 挑战即使已创建也不能被猜中使用；错误直接返回，让用户修复邮件配置后重新申请。
+        except EmailDeliveryError as exc:
+            # 邮件未送达时立即删除挑战，避免用户修复发送配置后还被发送冷却时间阻塞。
+            # 删除失败不能遮蔽原始的 Resend 错误，否则浏览器无法得到可执行的修复提示。
+            try:
+                self._repository.discard_email_challenge(str(challenge["id"]))
+            except Exception:
+                logger.exception(
+                    "验证码邮件投递失败后的挑战清理异常：purpose=%s reason=%s",
+                    purpose,
+                    exc.reason,
+                )
             raise
         return {"accepted": True, "challenge_id": challenge["id"], "expires_at": expires_at.isoformat()}
 

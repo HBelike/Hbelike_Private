@@ -138,7 +138,7 @@ const wechatTitle = computed(() => {
 })
 
 const activeRoute = computed(() => {
-  if (currentRoute.value === '/login') {
+  if (isAuthRoute(currentRoute.value)) {
     return { path: '/login', label: '登录', description: '平台账号访问' }
   }
   if (currentRoute.value === '/career') {
@@ -288,7 +288,7 @@ function contentIdFromLocation() {
 
 function normalizeRoute(pathname) {
   if (!pathname || pathname === '/') return '/review'
-  if (pathname === '/login') return '/login'
+  if (pathname === '/login' || pathname === '/register' || pathname === '/forgot-password') return pathname
   if (pathname === '/career') return '/career'
   if (pathname === '/interviews') return '/interviews'
   if (pathname === '/skills' || pathname.startsWith('/skills/')) return '/skills'
@@ -298,6 +298,10 @@ function normalizeRoute(pathname) {
     return routeItems.some((item) => item.path === pathname) ? pathname : '/review'
   }
   return '/review'
+}
+
+function isAuthRoute(route) {
+  return route === '/login' || route === '/register' || route === '/forgot-password'
 }
 
 async function navigateTo(path) {
@@ -392,7 +396,7 @@ async function loadCurrentUser() {
 function handleAuthenticated(user) {
   authUser.value = user
   authReady.value = true
-  const nextPath = currentRoute.value === '/login' ? '/review' : currentRoute.value
+  const nextPath = isAuthRoute(currentRoute.value) ? '/review' : currentRoute.value
   window.history.replaceState({}, '', nextPath)
   currentRoute.value = nextPath
   refreshCurrentPage()
@@ -1008,7 +1012,7 @@ onMounted(async () => {
   }
   await loadCurrentUser()
   if (!authUser.value) {
-    if (currentRoute.value !== '/login') {
+    if (!isAuthRoute(currentRoute.value)) {
       window.history.replaceState({}, '', '/login')
       currentRoute.value = '/login'
     }
