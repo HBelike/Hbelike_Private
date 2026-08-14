@@ -4,7 +4,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Mapping
 
 import requests
 
@@ -55,6 +55,7 @@ class DeepSeekProvider:
         timeout_seconds: float | None = None,
         max_tokens: int | None = None,
         retry_empty_content: bool = True,
+        trace_metadata: Mapping[str, Any] | None = None,
     ) -> DeepSeekChatResponse:
         """发送请求，并记录不含正文的 LangSmith 生命周期 Trace。
 
@@ -75,6 +76,7 @@ class DeepSeekProvider:
                 retry_empty_content=retry_empty_content,
             ),
             summarize=self._trace_summary,
+            metadata=trace_metadata,
         )
 
     def _chat_without_trace(

@@ -16,6 +16,7 @@ import httpx
 
 from src.career_assistant.contracts import AttachmentDescriptor
 from src.career_assistant.settings import DocumentUnderstandingSettings
+from src.observability.langsmith_runtime import trace_operation
 
 
 class DocumentUnderstandingError(RuntimeError):
@@ -124,6 +125,34 @@ class DoclingServiceDocumentParser:
         ``DocumentUnderstandingError``，由上层统一终止本轮并清理临时材料。
         """
 
+        document_format = self._trace_document_format(attachment)
+        return trace_operation(
+            run_name="career.document.docling_parse",
+            run_type="tool",
+            inputs={
+                "document_format": document_format,
+                "input_bytes": attachment.size_bytes,
+                "max_attempts": self._settings.max_attempts,
+                "force_ocr": self._settings.force_ocr,
+                "table_mode": self._settings.table_mode,
+            },
+            metadata={
+                "component": "career_document_understanding",
+                "parser": self._PARSER_NAME,
+                "document_format": document_format,
+                "privacy_mode": "metadata_only",
+            },
+            tags=("career", "document", "docling", "tool"),
+            execute=lambda: self._parse_document_untraced(attachment),
+            summarize=self._summarize_trace_result,
+        )
+
+    def _parse_document_untraced(
+        self,
+        attachment: AttachmentDescriptor,
+    ) -> DocumentUnderstandingResult:
+        """执行原有 Docling 解析流程；原始附件始终留在本进程与 Docling 服务间。"""
+
         attachment.validate()
         document_format = self._document_format_for(attachment)
         if not attachment.temporary_path.is_file():
@@ -165,6 +194,26 @@ class DoclingServiceDocumentParser:
                 self._http_error_message(response.status_code),
             )
         return self._result_from_response(response)
+
+    @classmethod
+    def _trace_document_format(cls, attachment: AttachmentDescriptor) -> str:
+        """仅为 Trace 生成非敏感格式标签，不提前改变业务校验顺序。"""
+
+        key = (attachment.media_type, attachment.temporary_path.suffix.lower())
+        return cls._DOCUMENT_FORMATS.get(key, "unsupported")
+
+    @staticmethod
+    def _summarize_trace_result(
+        result: DocumentUnderstandingResult,
+    ) -> dict[str, str | int | float | None]:
+        """返回可观测统计，明确排除 OCR 正文、文件标识与服务地址。"""
+
+        return {
+            "parser": result.parser_name,
+            "status": result.status,
+            "output_characters": len(result.analysis_text),
+            "processing_time_seconds": result.processing_time_seconds,
+        }
 
     def _request_document(
         self,

@@ -11,6 +11,7 @@ from typing import Any
 import requests
 
 from src.config.config_manager import AppConfig
+from src.observability.langsmith_runtime import trace_llm_call
 
 
 class QwenVideoQualityApiError(RuntimeError):
@@ -50,10 +51,11 @@ class QwenVideoQualityProvider:
         if not frame_paths:
             raise ValueError("视觉质检至少需要一张视频关键帧")
         api_key = self._read_api_key()
+        quality_instruction = self._quality_instruction(expected_contract)
         content: list[dict[str, Any]] = [
             {
                 "type": "text",
-                "text": self._quality_instruction(expected_contract),
+                "text": quality_instruction,
             }
         ]
         for frame_path in frame_paths:
@@ -70,17 +72,15 @@ class QwenVideoQualityProvider:
             "max_tokens": 800,
             "response_format": {"type": "json_object"},
         }
-        try:
-            response = requests.post(
-                self._chat_url(),
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                json=payload,
-                timeout=self.config.video_quality_assurance_timeout_seconds,
-            )
-        except requests.RequestException as exc:
-            raise QwenVideoQualityApiError(f"视觉质检请求失败：{exc}") from exc
-
-        response_payload = self._parse_response(response)
+        response_payload = trace_llm_call(
+            run_name="media.video.qwen_quality.assess",
+            provider="qwen-openai-compatible",
+            model=self.config.video_quality_assurance_model,
+            message_count=1 + len(frame_paths),
+            input_characters=len(quality_instruction),
+            execute=lambda: self._request_assessment(api_key=api_key, payload=payload),
+            summarize=self._trace_summary,
+        )
         content_text = self._extract_content(response_payload)
         structured = self._parse_json_object(content_text)
         score = self._normalize_score(structured.get("score"))
@@ -98,6 +98,34 @@ class QwenVideoQualityProvider:
             summary=summary,
             raw_response=response_payload,
         )
+
+    def _request_assessment(self, *, api_key: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """执行一次 Qwen-VL HTTP 调用；关键帧读取与结果归一化不重复建 Trace。"""
+
+        try:
+            response = requests.post(
+                self._chat_url(),
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json=payload,
+                timeout=self.config.video_quality_assurance_timeout_seconds,
+            )
+        except requests.RequestException as exc:
+            raise QwenVideoQualityApiError(f"视觉质检请求失败：{exc}") from exc
+        return self._parse_response(response)
+
+    @classmethod
+    def _trace_summary(cls, response_payload: dict[str, Any]) -> dict[str, Any]:
+        """只记录输出规模和 token 用量，不上传质检结论或再生成指令。"""
+
+        try:
+            output_characters = len(cls._extract_content(response_payload))
+        except QwenVideoQualityApiError:
+            output_characters = 0
+        usage = response_payload.get("usage")
+        return {
+            "output_characters": output_characters,
+            "usage": usage if isinstance(usage, dict) else {},
+        }
 
     def _quality_instruction(self, expected_contract: dict[str, Any]) -> str:
         return (

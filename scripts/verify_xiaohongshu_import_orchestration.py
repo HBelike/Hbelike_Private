@@ -19,6 +19,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 import sys
 from types import SimpleNamespace
+from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 from uuid import UUID, uuid4
 
@@ -421,7 +422,28 @@ def verify_mixed_result_job() -> None:
         include_images=True,
         auto_import=False,
     )
-    service.run_xiaohongshu_import(ORGANIZATION_ID, job.id)
+    trace_summaries: list[dict[str, object]] = []
+
+    def trace_operation_stub(**kwargs):  # type: ignore[no-untyped-def]
+        result = kwargs["execute"]()
+        trace_summaries.append(dict(kwargs["summarize"](result)))
+        return result
+
+    with patch(
+        "src.career_assistant.interview_library.collection.trace_operation",
+        side_effect=trace_operation_stub,
+    ):
+        public_result = service.run_xiaohongshu_import(ORGANIZATION_ID, job.id)
+
+    assert public_result is None
+    assert trace_summaries == [
+        {
+            "status": "succeeded",
+            "completed": True,
+            "count": 2,
+            "error_class": None,
+        }
+    ]
 
     completed = repository.jobs[job.id]
     assert completed.status is CollectionJobStatus.SUCCEEDED
@@ -502,7 +524,31 @@ def verify_entry_failure_is_terminal() -> None:
         include_images=False,
         auto_import=False,
     )
-    service.run_xiaohongshu_import(ORGANIZATION_ID, job.id)
+    trace_summaries: list[dict[str, object]] = []
+
+    def trace_operation_stub(**kwargs):  # type: ignore[no-untyped-def]
+        result = kwargs["execute"]()
+        trace_summaries.append(dict(kwargs["summarize"](result)))
+        return result
+
+    with patch(
+        "src.career_assistant.interview_library.collection.trace_operation",
+        side_effect=trace_operation_stub,
+    ):
+        public_result = service.run_xiaohongshu_import(ORGANIZATION_ID, job.id)
+
+    assert public_result is None
+    assert trace_summaries == [
+        {
+            "status": "failed",
+            "completed": False,
+            "count": 0,
+            "error_class": "CollectionOperationError",
+        }
+    ]
+    captured_trace = repr(trace_summaries)
+    assert "xiaohongshu.com" not in captured_trace
+    assert "测试用公开页面" not in captured_trace
 
     failed = repository.jobs[job.id]
     assert failed.status is CollectionJobStatus.FAILED

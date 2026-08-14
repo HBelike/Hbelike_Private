@@ -52,6 +52,7 @@ from src.career_assistant.model_clients import (
     OpenAICompatibleChatClient,
 )
 from src.career_assistant.model_gateway import ModelGateway, ModelReadiness
+from src.observability.langsmith_runtime import trace_operation
 
 
 MAX_ARTICLE_BYTES: Final[int] = 3 * 1024 * 1024
@@ -398,6 +399,45 @@ class InterviewEvidenceAnalyzer:
         markdown_content: str,
     ) -> InterviewEvidenceAnalysis:
         """执行一次面经甄别；网络或配置失败时返回待处理结果而非抛弃正文。"""
+
+        return trace_operation(
+            run_name="career.interview_evidence.analyze",
+            run_type="chain",
+            inputs={
+                "input_characters": len(markdown_content),
+                "has_title": bool(title),
+                "has_source_url": bool(source_url),
+            },
+            metadata={
+                "component": "interview_evidence_analyzer",
+                "source_kind": "public_material",
+                "stage": "evidence_analysis",
+            },
+            execute=lambda: self._analyze(
+                organization_id,
+                source_url=source_url,
+                title=title,
+                markdown_content=markdown_content,
+            ),
+            summarize=lambda result: {
+                "status": result.analyzer_status,
+                "is_valid_interview": result.is_valid_interview,
+                "question_count": len(result.questions),
+                "has_normalized_markdown": bool(result.normalized_markdown),
+                "output_characters": len(result.normalized_markdown or ""),
+            },
+            tags=("career.interview", "analysis"),
+        )
+
+    def _analyze(
+        self,
+        organization_id: UUID,
+        *,
+        source_url: str,
+        title: str | None,
+        markdown_content: str,
+    ) -> InterviewEvidenceAnalysis:
+        """执行一次真实甄别；原始材料只在进程内传递，不进入 Trace。"""
 
         local = self._metadata_extractor.extract(
             markdown_content,
@@ -752,6 +792,38 @@ class InterviewCollectionService:
         organization_id: UUID,
         job_id: UUID,
     ) -> None:
+        """建立小红书公开资料导入父链，不上传 URL、正文、图片或组织标识。"""
+
+        trace_operation(
+            run_name="career.interview_collection.xiaohongshu_import",
+            run_type="chain",
+            inputs={
+                "source_kind": "xiaohongshu_public_url",
+                "background_job": True,
+            },
+            metadata={
+                "component": "interview_collection",
+                "source_kind": "xiaohongshu_public_url",
+                "privacy_mode": "metadata_only",
+            },
+            tags=("career", "interview-library", "xiaohongshu"),
+            execute=lambda: self._run_xiaohongshu_import_untraced(
+                organization_id,
+                job_id,
+            ),
+            summarize=lambda result: {
+                "status": result["status"],
+                "completed": result["completed"],
+                "count": result["count"],
+                "error_class": result["error_class"],
+            },
+        )
+
+    def _run_xiaohongshu_import_untraced(
+        self,
+        organization_id: UUID,
+        job_id: UUID,
+    ) -> dict[str, object]:
         """按“发现 → 正文 → OCR → LLM → 入库”执行一项小红书公开导入任务。
 
         由 FastAPI ``BackgroundTasks`` 调用。任务内部每处理一篇笔记就更新一次进度，
@@ -764,13 +836,29 @@ class InterviewCollectionService:
             existing_job = self._repository.get_collection_job(organization_id, job_id)
             if existing_job is None:
                 LOGGER.warning("小红书导入任务不存在或已失去归属：%s", job_id)
-            else:
-                LOGGER.info(
-                    "小红书导入任务已被其他后台调用抢占或已结束，跳过重复执行：job=%s status=%s",
-                    job_id,
-                    existing_job.status.value,
-                )
-            return
+                return {
+                    "status": "skipped",
+                    "completed": False,
+                    "count": 0,
+                    "error_class": "CollectionJobUnavailable",
+                }
+
+            LOGGER.info(
+                "小红书导入任务已被其他后台调用抢占或已结束，跳过重复执行：job=%s status=%s",
+                job_id,
+                existing_job.status.value,
+            )
+            existing_summary = self._summary_from_metadata(existing_job.metadata_json)
+            return {
+                "status": existing_job.status.value,
+                "completed": existing_job.status is CollectionJobStatus.SUCCEEDED,
+                "count": existing_summary["processed_count"],
+                "error_class": (
+                    "ExistingCollectionJobFailed"
+                    if existing_job.status is CollectionJobStatus.FAILED
+                    else None
+                ),
+            }
 
         existing_metadata = dict(job.metadata_json)
         include_images = bool(existing_metadata.get("include_images", True))
@@ -895,6 +983,12 @@ class InterviewCollectionService:
                     "summary": summary,
                 },
             )
+            return {
+                "status": "succeeded",
+                "completed": True,
+                "count": summary["processed_count"],
+                "error_class": None,
+            }
         except CollectionOperationError as exc:
             self._finish_xiaohongshu_job_failed(
                 organization_id,
@@ -903,7 +997,13 @@ class InterviewCollectionService:
                 error_code=exc.code,
                 error_message=exc.message,
             )
-        except Exception:
+            return {
+                "status": "failed",
+                "completed": False,
+                "count": summary["processed_count"],
+                "error_class": exc.__class__.__name__,
+            }
+        except Exception as exc:
             LOGGER.exception("小红书导入任务发生未预期错误：job=%s", job.id)
             self._finish_xiaohongshu_job_failed(
                 organization_id,
@@ -912,6 +1012,12 @@ class InterviewCollectionService:
                 error_code="xiaohongshu_import_failed",
                 error_message="小红书公开资料导入未完成，请查看已生成的候选结果后重试。",
             )
+            return {
+                "status": "failed",
+                "completed": False,
+                "count": summary["processed_count"],
+                "error_class": exc.__class__.__name__,
+            }
 
     def _process_xiaohongshu_note(
         self,
@@ -1591,6 +1697,38 @@ class InterviewCollectionService:
         source_url: str,
     ) -> tuple[InterviewCollectionJobRecord, InterviewCollectionCandidateRecord]:
         """读取用户明确提交的公开文章，生成待选择候选项。"""
+
+        return trace_operation(
+            run_name="career.interview_collection.public_url_import",
+            run_type="chain",
+            inputs={
+                "requested_count": 1,
+            },
+            metadata={
+                "component": "interview_collection",
+                "source_kind": "public_url",
+                "stage": "candidate_import",
+            },
+            execute=lambda: self._collect_public_url(
+                organization_id,
+                source_url=source_url,
+            ),
+            summarize=lambda result: {
+                "status": result[0].status.value,
+                "candidate_count": 1,
+                "candidate_status": result[1].status.value,
+                "output_characters": len(result[1].extracted_markdown or ""),
+            },
+            tags=("career.interview", "public_url_import"),
+        )
+
+    def _collect_public_url(
+        self,
+        organization_id: UUID,
+        *,
+        source_url: str,
+    ) -> tuple[InterviewCollectionJobRecord, InterviewCollectionCandidateRecord]:
+        """执行一次公开页面读取与候选持久化；仅由观测包装入口调用。"""
 
         job = self._repository.create_collection_job(
             organization_id=organization_id,

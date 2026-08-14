@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import urlparse
 
 
@@ -15,6 +16,8 @@ from src.career_assistant.free_model_catalog import (
     FREE_MODEL_PROVIDERS,
     build_free_model_catalog_payload,
 )
+from src.career_assistant.model_gateway import ModelReadiness
+from src.career_assistant.persistence.model_profile_repository import ModelCostTier
 
 
 def _assert_https_url(value: str, field_name: str) -> None:
@@ -53,6 +56,10 @@ def main() -> None:
 
     gemini_models = {item.model_id: item for item in providers["gemini"].templates}
     assert gemini_models["gemini-3.5-flash-lite"].supports_vision is True
+    assert providers["gemini"].setup_url == "https://aistudio.google.com/app/apikey"
+    assert providers["modelscope"].free_label == "体验额度"
+    assert providers["siliconflow"].free_label == "部分模型可能免费"
+    assert providers["nvidia"].free_label == "开发试用"
 
     siliconflow_ids = {item.model_id for item in providers["siliconflow"].templates}
     assert "Qwen/Qwen3-8B" in siliconflow_ids
@@ -67,6 +74,25 @@ def main() -> None:
     assert all(item["pricing_url"] for item in payload)
     assert all(item["platform_ready"] is False for item in payload)
     assert all(item["visitor_ready"] is False for item in payload)
+    assert all(item["availability_label"] == "需管理员申请并保存 API Key" for item in payload)
+
+    ready_gemini = SimpleNamespace(
+        readiness=ModelReadiness.READY,
+        profile=SimpleNamespace(
+            id="gemini-ready-profile",
+            provider_key="gemini",
+            model_id="gemini-3.5-flash-lite",
+            display_name="Gemini 简历理解",
+            cost_tier=ModelCostTier.FREE_QUOTA,
+        ),
+    )
+    ready_payload = {
+        item["provider_key"]: item
+        for item in build_free_model_catalog_payload([ready_gemini])
+    }
+    assert ready_payload["gemini"]["availability_label"] == "该服务商已有可用模型"
+    assert ready_payload["qwen"]["availability_label"] == "需管理员申请并保存 API Key"
+    assert ready_payload["gemini"]["configured_profiles"][0]["model_id"] == "gemini-3.5-flash-lite"
 
     print("career_free_model_catalog_ok")
 

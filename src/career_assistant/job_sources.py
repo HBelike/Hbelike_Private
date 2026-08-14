@@ -12,6 +12,8 @@ from urllib.parse import urlparse
 
 import httpx
 
+from src.observability.langsmith_runtime import trace_operation
+
 
 _MAX_REDIRECTS: Final = 3
 _MAX_RESPONSE_BYTES: Final = 1_000_000
@@ -97,6 +99,22 @@ class JobPostingExtractor:
     def extract(self, raw_url: str) -> JobPostingSnapshot:
         """读取有限 HTML 内容并生成仅供当前分析使用的快照。"""
 
+        return trace_operation(
+            run_name="career.job_source.fetch",
+            run_type="tool",
+            inputs={"request_count": 1},
+            metadata={
+                "component": "career_job_source",
+                "privacy_mode": "metadata_only",
+            },
+            tags=("career", "job-source", "tool"),
+            execute=lambda: self._extract_untraced(raw_url),
+            summarize=self._summarize_trace_result,
+        )
+
+    def _extract_untraced(self, raw_url: str) -> JobPostingSnapshot:
+        """执行原有受限抓取；URL、主机、标题和正文均不进入 Trace。"""
+
         current_url = self._validate_public_url(raw_url)
         owns_client = self._client is None
         client = self._client or httpx.Client(
@@ -131,6 +149,18 @@ class JobPostingExtractor:
         finally:
             if owns_client:
                 client.close()
+
+    @staticmethod
+    def _summarize_trace_result(
+        snapshot: JobPostingSnapshot,
+    ) -> dict[str, str | int]:
+        """只暴露页面提取是否成功及字符数，不暴露抓取内容。"""
+
+        return {
+            "status": "completed",
+            "title_characters": len(snapshot.title),
+            "visible_text_characters": len(snapshot.visible_text),
+        }
 
     @staticmethod
     def _parse_html(url: str, html: str) -> JobPostingSnapshot:

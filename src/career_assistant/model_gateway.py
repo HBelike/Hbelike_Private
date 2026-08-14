@@ -20,6 +20,7 @@ from src.career_assistant.persistence.model_profile_repository import (
     ModelProfileRecord,
 )
 from src.career_assistant.settings import ModelGatewaySettings
+from src.observability.langsmith_runtime import trace_operation
 
 
 class ModelResolutionReason(StrEnum):
@@ -100,10 +101,45 @@ class ModelGateway:
         ``CREDENTIAL_REQUIRED``，由 WebUI 明确提示用户配置对应免费额度 Key。
         """
 
+        return trace_operation(
+            run_name="career.model.route",
+            run_type="chain",
+            inputs={
+                "selection_mode": selection.mode.value,
+                "required_capability_count": len(selection.required_capabilities),
+            },
+            metadata={
+                "component": "career_model_gateway",
+                "selection_mode": selection.mode.value,
+            },
+            execute=lambda: self._resolve_without_trace(organization_id, selection),
+            summarize=self._summarize_resolution,
+            tags=("career", "model-routing"),
+        )
+
+    def _resolve_without_trace(
+        self,
+        organization_id: UUID,
+        selection: ModelSelectionRequest,
+    ) -> ModelResolution:
+        """执行原始路由逻辑，组织、档案及凭证标识均不进入 Trace。"""
+
         selection.validate()
         if selection.mode is ModelSelectionMode.SPECIFIC_PROFILE:
             return self._resolve_specific_profile(organization_id, selection)
         return self._resolve_free_quota_first(organization_id, selection)
+
+    @staticmethod
+    def _summarize_resolution(resolution: ModelResolution) -> dict[str, str]:
+        """仅返回路由结果标签，不暴露组织、档案、凭证或环境变量标识。"""
+
+        return {
+            "provider": resolution.profile.provider_key,
+            "model": resolution.profile.model_id,
+            "reason_code": resolution.reason.value,
+            "readiness_status": resolution.readiness.value,
+            "status": "completed",
+        }
 
     def _resolve_specific_profile(
         self,

@@ -86,6 +86,7 @@ from src.career_assistant.model_clients import (
 )
 from src.career_assistant.privacy import SensitiveDataRedactor
 from src.career_assistant.response_runner import CareerResponseRunner
+from src.observability.langsmith_runtime import trace_operation, trace_stream
 from src.career_assistant.persistence import (
     CareerConversationRepository,
     CareerDatabase,
@@ -649,10 +650,9 @@ def submit_intake(
             model_selection=selection,
             interview_evidence=interview_evidence,
         )
-        result = services.intake_graph.run(inbound_message)
-        response_result = services.response_runner.run(
+        result, response_result = _run_career_turn(
+            services,
             inbound_message,
-            result,
         )
     except (LookupError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -767,10 +767,10 @@ async def submit_intake_with_materials(
             attachments=tuple(attachments),
             interview_evidence=interview_evidence,
         )
-        result = services.intake_graph.run(inbound_message)
-        response_result = services.response_runner.run(
+        result, response_result = _run_career_turn(
+            services,
             inbound_message,
-            result,
+            attachment_count=len(attachments),
         )
     except OSError as exc:
         services.temporary_attachment_store.cleanup(tuple(attachments))
@@ -1692,7 +1692,79 @@ def _stream_career_response(
     )
 
 
+def _run_career_turn(
+    services: CareerAssistantServices,
+    inbound_message: CareerInboundMessage,
+    *,
+    attachment_count: int = 0,
+):
+    """执行一次非流式求职对话，并建立与流式接口一致的根 Trace。"""
+
+    def execute_turn():
+        intake_result = services.intake_graph.run(inbound_message)
+        response_result = services.response_runner.run(
+            inbound_message,
+            intake_result,
+        )
+        return intake_result, response_result
+
+    return trace_operation(
+        run_name="career.turn",
+        run_type="chain",
+        inputs={
+            "attachment_count": attachment_count,
+            "interview_evidence_count": len(inbound_message.interview_evidence),
+            "has_text": bool(inbound_message.text.strip()),
+            "has_job_url": bool((inbound_message.job_url or "").strip()),
+        },
+        metadata={
+            "component": "career_assistant",
+            "stage": "turn",
+            "streaming": False,
+            "privacy_mode": "metadata_only",
+        },
+        tags=("career", "agent", "turn"),
+        execute=execute_turn,
+        summarize=lambda _: {"status": "completed"},
+    )
+
+
 def _stream_career_response_events(
+    services: CareerAssistantServices,
+    inbound_message: CareerInboundMessage,
+    *,
+    attachment_count: int = 0,
+) -> Iterator[str]:
+    """建立一次求职对话的根 Trace，并原样透传浏览器 SSE 事件。"""
+
+    yield from trace_stream(
+        run_name="career.turn",
+        run_type="chain",
+        inputs={
+            "attachment_count": attachment_count,
+            "interview_evidence_count": len(inbound_message.interview_evidence),
+            "has_text": bool(inbound_message.text.strip()),
+            "has_job_url": bool((inbound_message.job_url or "").strip()),
+        },
+        metadata={
+            "component": "career_assistant",
+            "stage": "turn",
+            "privacy_mode": "metadata_only",
+        },
+        tags=("career", "agent", "turn"),
+        execute=lambda: _stream_career_response_events_untraced(
+            services,
+            inbound_message,
+            attachment_count=attachment_count,
+        ),
+        summarize_chunk=lambda chunk, index: {
+            "event_index": index,
+            "event_bytes": len(chunk.encode("utf-8")),
+        },
+    )
+
+
+def _stream_career_response_events_untraced(
     services: CareerAssistantServices,
     inbound_message: CareerInboundMessage,
     *,

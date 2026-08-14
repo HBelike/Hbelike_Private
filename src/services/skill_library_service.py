@@ -16,6 +16,7 @@ from typing import Any
 import requests
 
 from src.config.config_manager import AppConfig
+from src.observability.langsmith_runtime import trace_operation
 from src.providers.deepseek_provider import DeepSeekMessage, DeepSeekProvider, parse_json_object_from_text
 
 
@@ -257,6 +258,36 @@ class SkillLibraryService:
         }
 
     def search_skills(self, query: str) -> SkillSearchResult:
+        """搜索 Skill，并只向 LangSmith 暴露检索规模与执行结果元数据。"""
+
+        return trace_operation(
+            run_name="skills.search",
+            run_type="chain",
+            inputs={"query_characters": len(query.strip())},
+            metadata={
+                "component": "skill_library",
+                "search_scope": "github_open_skill",
+            },
+            tags=("skills", "search", "github"),
+            execute=lambda: self._search_skills_untraced(query),
+            summarize=self._summarize_search_trace,
+        )
+
+    @staticmethod
+    def _summarize_search_trace(result: SkillSearchResult) -> dict[str, Any]:
+        """构造不包含关键词、链接、正文、路径或用户标识的检索摘要。"""
+
+        return {
+            "status": "completed",
+            "result_count": len(result.items),
+            "used_llm": result.used_llm,
+            "cache_hit": result.cache_hit,
+            "elapsed_ms": result.elapsed_ms,
+            "search_scope": result.search_scope,
+            "model": result.model or "none",
+        }
+
+    def _search_skills_untraced(self, query: str) -> SkillSearchResult:
         """搜索 GitHub 开放 Skill，并在限定时间内保持页面可用。
 
         旧实现会在一次 HTTP 请求中串行执行两次 LLM、最多八次文件下载和八次 Star

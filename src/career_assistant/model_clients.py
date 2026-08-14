@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 import httpx
 
 from src.career_assistant.persistence.model_profile_repository import ModelProfileRecord
+from src.observability.langsmith_runtime import trace_operation, trace_stream
 
 
 class ModelInvocationError(RuntimeError):
@@ -107,15 +108,29 @@ class OpenAICompatibleChatClient:
             credential = os.getenv(credential_env_name, "").strip()
         if not credential:
             raise ModelInvocationError("免费模型额度凭证尚未配置")
-        return self._request_completion(
-            ModelConnectionTarget(
-                provider_key=profile.provider_key,
-                model_id=profile.model_id,
-                api_base_url=profile.api_base_url,
+        target = ModelConnectionTarget(
+            provider_key=profile.provider_key,
+            model_id=profile.model_id,
+            api_base_url=profile.api_base_url,
+        )
+        return trace_operation(
+            run_name="career.chat.completion",
+            run_type="llm",
+            execute=lambda: self._request_completion(
+                target,
+                credential,
+                messages,
+                max_tokens=self._completion_max_tokens,
             ),
-            credential,
-            messages,
-            max_tokens=self._completion_max_tokens,
+            summarize=lambda result: {
+                "output_characters": len(result),
+                "has_output": bool(result),
+            },
+            metadata={
+                **self._trace_metadata(target, streaming=False),
+                **self._trace_message_metrics(messages),
+            },
+            tags=("career", "chat", "privacy:metadata-only"),
         )
 
     def test_connection(
@@ -132,16 +147,31 @@ class OpenAICompatibleChatClient:
         credential = api_key.strip()
         if not credential:
             raise ModelInvocationError("请填写 API Key 后再测试连接")
-        return self._request_completion(
-            target,
-            credential,
-            [
-                ChatMessage(role="system", content="你正在进行 API 连通性验证。"),
-                ChatMessage(role="user", content="你好，请仅回复 OK。"),
-            ],
-            # 推理模型可能先产生内部 reasoning，再输出最终 content。4 个 token
-            # 会让这类模型只来得及开始推理，进而被误判为“无返回内容”。
-            max_tokens=96,
+        messages = [
+            ChatMessage(role="system", content="你正在进行 API 连通性验证。"),
+            ChatMessage(role="user", content="你好，请仅回复 OK。"),
+        ]
+        return trace_operation(
+            run_name="career.model.connectivity_test",
+            run_type="llm",
+            execute=lambda: self._request_completion(
+                target,
+                credential,
+                messages,
+                # 推理模型可能先产生内部 reasoning，再输出最终 content。4 个 token
+                # 会让这类模型只来得及开始推理，进而被误判为“无返回内容”。
+                max_tokens=96,
+            ),
+            summarize=lambda result: {
+                "output_characters": len(result),
+                "has_output": bool(result),
+            },
+            metadata={
+                **self._trace_metadata(target, streaming=False),
+                **self._trace_message_metrics(messages),
+                "operation": "connectivity_test",
+            },
+            tags=("career", "chat", "connectivity-test", "privacy:metadata-only"),
         )
 
     def stream_complete(
@@ -164,12 +194,70 @@ class OpenAICompatibleChatClient:
             model_id=profile.model_id,
             api_base_url=profile.api_base_url,
         )
-        yield from self._stream_request_completion(
-            target,
-            credential,
-            messages,
-            max_tokens=self._completion_max_tokens,
+        yield from trace_stream(
+            run_name="career.chat.stream",
+            run_type="llm",
+            execute=lambda: self._stream_request_completion(
+                target,
+                credential,
+                messages,
+                max_tokens=self._completion_max_tokens,
+            ),
+            summarize_chunk=lambda chunk, index: {
+                "chunk_index": index,
+                "output_characters": len(chunk),
+            },
+            metadata={
+                **self._trace_metadata(target, streaming=True),
+                **self._trace_message_metrics(messages),
+            },
+            tags=("career", "chat", "stream", "privacy:metadata-only"),
         )
+
+    @classmethod
+    def _trace_message_metrics(
+        cls,
+        messages: list[ChatMessage],
+    ) -> dict[str, object]:
+        """构造不包含对话正文、附件 Data URL 或凭证的规模摘要。"""
+
+        return {
+            "message_count": len(messages),
+            "input_characters": sum(cls._message_character_count(item) for item in messages),
+        }
+
+    @staticmethod
+    def _trace_metadata(
+        target: ModelConnectionTarget,
+        *,
+        streaming: bool,
+    ) -> dict[str, object]:
+        """只记录定位 Provider 调用所需的非敏感维度。"""
+
+        return {
+            "provider": target.provider_key,
+            "model": target.model_id,
+            "streaming": streaming,
+            "privacy_mode": "metadata_only",
+        }
+
+    @staticmethod
+    def _message_character_count(message: ChatMessage) -> int:
+        """统计输入规模；多模态 Data URL 只计长度，不返回任何内容。"""
+
+        if isinstance(message.content, str):
+            return len(message.content)
+        count = 0
+        for part in message.content:
+            text = part.get("text")
+            if isinstance(text, str):
+                count += len(text)
+            image_url = part.get("image_url")
+            if isinstance(image_url, dict):
+                url = image_url.get("url")
+                if isinstance(url, str):
+                    count += len(url)
+        return count
 
     def _request_completion(
         self,

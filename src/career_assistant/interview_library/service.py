@@ -22,6 +22,7 @@ from src.career_assistant.interview_library.models import (
 )
 from src.career_assistant.interview_library.repository import InterviewLibraryRepository
 from src.career_assistant.interview_library.retrieval import InterviewRetrievalService
+from src.observability.langsmith_runtime import trace_operation
 
 
 LOGGER = logging.getLogger(__name__)
@@ -62,6 +63,37 @@ class InterviewLibraryService:
         self._retrieval_service = retrieval_service
 
     def ingest(
+        self,
+        organization_id: UUID,
+        draft: InterviewExperienceDraft,
+        *,
+        trigger_type: IngestionTriggerType,
+    ) -> InterviewExperienceRecord:
+        """建立面经解析、切片与索引父链，只记录规模和来源类别。"""
+
+        return trace_operation(
+            run_name="career.interview_library.ingest",
+            run_type="chain",
+            inputs={
+                "source_type": draft.source_type.value,
+                "trigger_type": trigger_type.value,
+                "content_characters": len(draft.markdown_content),
+                "tag_count": len(draft.tags),
+            },
+            metadata={
+                "component": "interview_library",
+                "privacy_mode": "metadata_only",
+            },
+            tags=("career", "interview-library", "rag"),
+            execute=lambda: self._ingest_untraced(
+                organization_id,
+                draft,
+                trigger_type=trigger_type,
+            ),
+            summarize=lambda _: {"completed": True},
+        )
+
+    def _ingest_untraced(
         self,
         organization_id: UUID,
         draft: InterviewExperienceDraft,

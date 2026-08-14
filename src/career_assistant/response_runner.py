@@ -68,6 +68,16 @@ class CareerResponseRunner:
         self._max_attempts = max_attempts
         self._retry_backoff_seconds = float(retry_backoff_seconds)
 
+    @staticmethod
+    def _model_resolution_label(resolution: ModelResolution) -> str:
+        """用真实 Model ID 区分同一服务商下的多个连接。"""
+
+        display_name = resolution.profile.display_name.strip()
+        model_id = resolution.profile.model_id.strip()
+        if not display_name or display_name.casefold() == model_id.casefold():
+            return model_id
+        return f"{display_name} · {model_id}"
+
     def run(
         self,
         inbound_message: CareerInboundMessage,
@@ -98,7 +108,7 @@ class CareerResponseRunner:
         if resolution.readiness is not ModelReadiness.READY:
             return self._finish_with_advisory(
                 active_turn,
-                f"已安全接收本轮材料。已选择“{resolution.profile.display_name}”，"
+                f"已安全接收本轮材料。已选择“{self._model_resolution_label(resolution)}”，"
                 "但其免费额度凭证尚未在服务端配置，因此本轮不会伪造分析结论。"
                 "原始文件已删除，历史中仅保留脱敏摘要。",
                 resolution,
@@ -161,7 +171,7 @@ class CareerResponseRunner:
                 event_type="done",
                 result=self._finish_with_advisory(
                     active_turn,
-                    f"已选择“{resolution.profile.display_name}”，但其 API Key 尚未可用，"
+                    f"已选择“{self._model_resolution_label(resolution)}”，但其 API Key 尚未可用，"
                     "因此本轮不会伪造分析结论。请在“模型与连接”中重新保存后重试。",
                     resolution,
                 ),

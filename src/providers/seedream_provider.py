@@ -10,6 +10,7 @@ from typing import Any
 import requests
 
 from src.config.config_manager import AppConfig
+from src.observability.langsmith_runtime import trace_llm_call
 
 
 class SeedreamApiError(RuntimeError):
@@ -59,6 +60,33 @@ class SeedreamProvider:
             "Content-Type": "application/json",
         }
 
+        response_payload = trace_llm_call(
+            run_name="media.image.seedream.generate",
+            provider="volcengine-ark",
+            model=self.config.image_model,
+            message_count=1,
+            input_characters=len(normalized_prompt),
+            execute=lambda: self._request_generation(endpoint=endpoint, headers=headers, payload=payload),
+            summarize=self._trace_summary,
+        )
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        source_url = self._save_first_image(response_payload, output_path)
+        return SeedreamImageResult(
+            output_path=output_path,
+            source_url=source_url,
+            raw_response=response_payload,
+        )
+
+    def _request_generation(
+        self,
+        *,
+        endpoint: str,
+        headers: dict[str, str],
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """只执行 Seedream 模型 HTTP 请求；图片下载不属于 LLM Trace。"""
+
         try:
             response = requests.post(
                 endpoint,
@@ -76,14 +104,20 @@ class SeedreamProvider:
             response_payload = response.json()
         except ValueError as exc:
             raise SeedreamApiError("Seedream 返回内容不是合法 JSON") from exc
+        if not isinstance(response_payload, dict):
+            raise SeedreamApiError("Seedream JSON 响应不是对象")
+        return response_payload
 
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        source_url = self._save_first_image(response_payload, output_path)
-        return SeedreamImageResult(
-            output_path=output_path,
-            source_url=source_url,
-            raw_response=response_payload,
-        )
+    @staticmethod
+    def _trace_summary(response_payload: dict[str, Any]) -> dict[str, Any]:
+        """返回图片响应的匿名计数和用量，不上传 URL、Base64 或生成图片。"""
+
+        data = response_payload.get("data")
+        usage = response_payload.get("usage")
+        return {
+            "image_count": len(data) if isinstance(data, list) else 0,
+            "usage": usage if isinstance(usage, dict) else {},
+        }
 
     def _build_endpoint(self) -> str:
         """拼接图片生成接口地址。"""

@@ -21,6 +21,7 @@ from src.career_assistant.settings import (
     CloudVisionConnectionSettings,
     CloudVisionSettings,
 )
+from src.observability.langsmith_runtime import trace_operation
 
 
 class CloudVisionError(RuntimeError):
@@ -85,6 +86,29 @@ class OpenAICompatibleCloudVisionClient:
             self._client.close()
 
     def analyze_image(self, media_type: str, image_bytes: bytes) -> CloudVisionResult:
+        """在 metadata-only Span 内执行单次视觉 Provider 调用。"""
+
+        return trace_operation(
+            run_name="career.vision.provider_call",
+            run_type="llm",
+            execute=lambda: self._analyze_image(media_type, image_bytes),
+            summarize=lambda result: {
+                "provider": result.provider_key,
+                "model": result.model_id,
+                "output_characters": len(result.analysis_text),
+                "has_output": bool(result.analysis_text),
+            },
+            metadata={
+                "provider": self._settings.provider_key,
+                "model": self._settings.model_id,
+                "media_type": media_type,
+                "image_bytes": len(image_bytes),
+                "privacy_mode": "metadata_only",
+            },
+            tags=("career", "vision", "provider", "privacy:metadata-only"),
+        )
+
+    def _analyze_image(self, media_type: str, image_bytes: bytes) -> CloudVisionResult:
         """调用当前连接对应的视觉模型并返回可送入文本模型的结果。"""
 
         if not self._settings.enabled:
@@ -232,6 +256,29 @@ class CloudVisionRouter:
             client.close()
 
     def analyze_image(self, media_type: str, image_bytes: bytes) -> CloudVisionResult:
+        """用一个 Router Span 覆盖主连接、重试与显式备用连接。"""
+
+        return trace_operation(
+            run_name="career.vision.route",
+            run_type="chain",
+            execute=lambda: self._analyze_image(media_type, image_bytes),
+            summarize=lambda result: {
+                "provider": result.provider_key,
+                "model": result.model_id,
+                "output_characters": len(result.analysis_text),
+                "has_output": bool(result.analysis_text),
+            },
+            metadata={
+                "max_attempts": self._settings.max_attempts,
+                "connection_count": len(self._clients),
+                "media_type": media_type,
+                "image_bytes": len(image_bytes),
+                "privacy_mode": "metadata_only",
+            },
+            tags=("career", "vision", "router", "privacy:metadata-only"),
+        )
+
+    def _analyze_image(self, media_type: str, image_bytes: bytes) -> CloudVisionResult:
         """优先主模型；只有可恢复错误才转向管理员指定的下一条连接。"""
 
         last_error: CloudVisionError | None = None

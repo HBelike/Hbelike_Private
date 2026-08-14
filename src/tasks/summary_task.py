@@ -206,7 +206,16 @@ class SummaryTask(BaseTask):
         last_error: Exception | None = None
 
         for attempt_index, messages in enumerate(attempts, start=1):
-            response = provider.chat(messages)
+            response = provider.chat(
+                messages,
+                trace_metadata={
+                    "attempt_index": attempt_index,
+                    "phase": "initial" if attempt_index == 1 else "repair",
+                    "reason_code": "initial_generation"
+                    if attempt_index == 1
+                    else "quality_contract_repair",
+                },
+            )
             try:
                 parsed = parse_json_object_from_text(response.content)
                 normalized = self._normalize_model_output(

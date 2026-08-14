@@ -11,6 +11,7 @@ import httpx
 
 from src.career_assistant.contracts import AttachmentDescriptor
 from src.career_assistant.settings import LegacyOfficeConversionSettings
+from src.observability.langsmith_runtime import trace_operation
 
 
 class LegacyOfficeConversionError(RuntimeError):
@@ -62,6 +63,31 @@ class GotenbergOfficeConverter:
 
     def convert_to_pdf(self, attachment: AttachmentDescriptor) -> AttachmentDescriptor:
         """匿名上传旧版 Office 文件，接收 PDF 并保存在同一临时目录。"""
+
+        suffix = attachment.temporary_path.suffix.lower()
+        return trace_operation(
+            run_name="career.document.legacy_office_convert",
+            run_type="tool",
+            inputs={
+                "input_bytes": attachment.size_bytes,
+            },
+            metadata={
+                "component": "legacy_office_converter",
+                "format": suffix.removeprefix(".") or "unknown",
+                "provider": "gotenberg",
+                "stage": "document_conversion",
+            },
+            execute=lambda: self._convert_to_pdf(attachment),
+            summarize=lambda converted: {
+                "status": "completed",
+                "output_bytes": converted.size_bytes,
+                "format": "pdf",
+            },
+            tags=("career.document", "upstream.tool"),
+        )
+
+    def _convert_to_pdf(self, attachment: AttachmentDescriptor) -> AttachmentDescriptor:
+        """执行一次真实转换；仅由带隐私边界的公开方法调用。"""
 
         attachment.validate()
         suffix = attachment.temporary_path.suffix.lower()

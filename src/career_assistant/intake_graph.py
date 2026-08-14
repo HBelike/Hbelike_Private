@@ -29,6 +29,7 @@ from src.career_assistant.job_sources import (
 from src.career_assistant.persistence import MessageRecord, MessageRole
 from src.career_assistant.privacy import SensitiveDataRedactor
 from src.career_assistant.resume_normalizer import ResumeNormalizer
+from src.observability.langsmith_runtime import ensure_langsmith_privacy_defaults
 
 
 @dataclass(frozen=True)
@@ -184,11 +185,25 @@ class CareerIntakeGraph:
         active_turn = self._agent_loop.start_turn(inbound_message)
         final_state: CareerIntakeGraphState | None = None
         try:
+            # LangGraph 会自动建立图与节点层级；先启用全局输入/输出隐藏，避免简历、
+            # 职位描述和聊天正文作为 Graph state 离开本机。
+            ensure_langsmith_privacy_defaults()
             for part in self._graph.stream(
                 {
                     "inbound_message": inbound_message,
                     "active_turn": active_turn,
                     "completed_steps": (),
+                },
+                config={
+                    "run_name": "career.intake.graph",
+                    "tags": ["career", "langgraph", "intake"],
+                    "metadata": {
+                        "privacy_mode": "metadata_only",
+                        "attachment_count": len(inbound_message.attachments),
+                        "interview_evidence_count": len(inbound_message.interview_evidence),
+                        "has_text": bool(inbound_message.text.strip()),
+                        "has_job_url": bool((inbound_message.job_url or "").strip()),
+                    },
                 },
                 stream_mode=["updates", "values"],
                 version="v2",

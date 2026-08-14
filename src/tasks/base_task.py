@@ -5,6 +5,7 @@ import traceback
 from abc import ABC, abstractmethod
 from typing import Any
 
+from src.observability.langsmith_runtime import trace_operation
 from src.repositories.error_event_repository import ErrorEventRepository
 from src.repositories.task_run_repository import TaskRunRepository
 from src.tasks.task_context import TaskContext
@@ -32,6 +33,33 @@ class BaseTask(ABC):
             metadata={"phase": "created"},
         )
         self.logger.info("任务创建：%s run_id=%s", self.task_name, task_run.run_id)
+
+        return trace_operation(
+            run_name=f"wechat.task.{self.task_name}",
+            run_type="chain",
+            inputs={
+                "task_name": self.task_name,
+                "task_run_id": task_run.run_id,
+            },
+            metadata={
+                "component": "wechat_task",
+                "task_name": self.task_name,
+                "task_run_id": task_run.run_id,
+                "privacy_mode": "metadata_only",
+            },
+            tags=("wechat", "task", f"task:{self.task_name}"),
+            execute=lambda: self._run_task_lifecycle(
+                context=context,
+                task_run=task_run,
+            ),
+            summarize=lambda result: {
+                "status": "succeeded",
+                "metadata_field_count": len(result.metadata),
+            },
+        )
+
+    def _run_task_lifecycle(self, context: TaskContext, task_run: Any) -> TaskResult:
+        """执行一次任务生命周期；由可选的 LangSmith chain 父 Trace 包裹。"""
 
         try:
             self.task_run_repository.mark_running(task_run.id)

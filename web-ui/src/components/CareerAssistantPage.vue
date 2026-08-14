@@ -274,7 +274,7 @@ function configureCatalogModel(offer, model) {
 
 function catalogModelStatus(offer, model) {
   const existing = configuredCatalogProfile(offer, model)
-  return existing ? readinessText(existing.readiness) : '待接入'
+  return existing ? readinessText(existing.readiness) : '未配置 API Key'
 }
 
 function providerOption(providerKey) {
@@ -288,6 +288,34 @@ function modelPrimaryLabel(item) {
   const profile = item?.profile ?? item
   if (!profile) return '未知模型'
   return `${providerOption(profile.provider_key).label} · ${profile.model_id}`
+}
+
+function normalizeModelLabel(value) {
+  return String(value ?? '').trim().toLocaleLowerCase().replace(/[\s·._-]+/g, '')
+}
+
+function modelSecondaryLabel(item) {
+  const profile = item?.profile ?? item
+  if (!profile) return ''
+  const displayName = String(profile.display_name ?? '').trim()
+  if (!displayName) return ''
+  const providerLabel = providerOption(profile.provider_key).label
+  const normalizedDisplayName = normalizeModelLabel(displayName)
+  const redundantLabels = new Set([
+    normalizeModelLabel(providerLabel),
+    normalizeModelLabel(profile.model_id),
+    normalizeModelLabel(`${providerLabel} 模型连接`),
+    normalizeModelLabel(`${providerLabel} model connection`),
+    normalizeModelLabel(modelPrimaryLabel(profile))
+  ])
+  return redundantLabels.has(normalizedDisplayName) ? '' : displayName
+}
+
+function modelChoiceLabel(item) {
+  const secondaryLabel = modelSecondaryLabel(item)
+  return secondaryLabel
+    ? `${modelPrimaryLabel(item)}（${secondaryLabel}）`
+    : modelPrimaryLabel(item)
 }
 
 async function loadFreeModelCatalog() {
@@ -1104,10 +1132,10 @@ onMounted(refreshData)
               <option v-if="!hasReadyModel" value="">尚未配置可用模型</option>
               <option v-if="hasReadyFreeModel" value="free_quota_first">【免费】自动选择可用模型</option>
               <optgroup v-if="readyFreeModelProfiles.length" label="已接入的免费模型">
-                <option v-for="item in readyFreeModelProfiles" :key="item.profile.id" :value="item.profile.id">【免费】{{ modelPrimaryLabel(item) }}（{{ item.profile.display_name }}）</option>
+                <option v-for="item in readyFreeModelProfiles" :key="item.profile.id" :value="item.profile.id">【免费】{{ modelChoiceLabel(item) }}</option>
               </optgroup>
               <optgroup v-if="readyOtherModelProfiles.length" label="已配置的其他模型">
-                <option v-for="item in readyOtherModelProfiles" :key="item.profile.id" :value="item.profile.id">{{ modelPrimaryLabel(item) }}（{{ item.profile.display_name }}）</option>
+                <option v-for="item in readyOtherModelProfiles" :key="item.profile.id" :value="item.profile.id">{{ modelChoiceLabel(item) }}</option>
               </optgroup>
             </select>
             <button class="chip-button free-model-entry-button" type="button" @click="openFreeModelDirectory">{{ hasReadyModel ? '申请免费模型' : '配置可用模型' }}</button>
@@ -1165,7 +1193,7 @@ onMounted(refreshData)
             <button v-for="item in modelProfiles" :key="item.profile.id" class="connection-card" type="button" @click="editModelConnection(item)">
               <span class="connection-drag">⠿</span>
               <span class="provider-avatar">{{ item.profile.provider_key.slice(0, 2).toUpperCase() }}</span>
-              <span class="connection-card-copy"><strong>{{ modelPrimaryLabel(item) }}</strong><small>{{ item.profile.display_name }}</small></span>
+              <span class="connection-card-copy"><strong>{{ modelPrimaryLabel(item) }}</strong><small v-if="modelSecondaryLabel(item)">自定义名称：{{ modelSecondaryLabel(item) }}</small></span>
               <span class="connection-meta"><span :class="`readiness ${item.readiness}`">{{ readinessText(item.readiness) }}</span><small>顺序 {{ item.profile.priority }}</small></span>
             </button>
           </div>
@@ -1192,13 +1220,14 @@ onMounted(refreshData)
               <header>
                 <span class="provider-avatar large">{{ providerOption(offer.provider_key).short }}</span>
                 <div><strong>{{ offer.display_name }}</strong><small>{{ offer.free_label }}</small></div>
-                <span class="catalog-readiness" :class="{ ready: offer.platform_ready }">{{ offer.platform_ready ? '已有连接' : '待接入' }}</span>
+                <span class="catalog-readiness" :class="{ ready: offer.platform_ready }">{{ offer.platform_ready ? '已有可用模型' : '未配置 Key' }}</span>
               </header>
               <p>{{ offer.free_description }}</p>
+              <div class="catalog-access-summary" :class="{ ready: offer.platform_ready }">{{ offer.availability_label }}</div>
               <div class="free-model-template-list">
                 <div v-for="model in offer.models" :key="model.model_id" class="free-model-template">
                   <div><strong>{{ model.display_name }}</strong><code>{{ model.model_id }}</code></div>
-                  <button type="button" @click="configureCatalogModel(offer, model)">{{ configuredCatalogProfile(offer, model) ? '编辑连接' : '配置此模型' }}</button>
+                  <button type="button" @click="configureCatalogModel(offer, model)">{{ configuredCatalogProfile(offer, model) ? '编辑连接' : '填写 Key 并测试' }}</button>
                   <small>{{ catalogModelStatus(offer, model) }}</small>
                 </div>
               </div>
@@ -1295,7 +1324,7 @@ onMounted(refreshData)
 .test-connection-button:disabled { cursor:wait; opacity:.6; }
 .free-model-directory { background:linear-gradient(180deg,#fbfdf8 0,#fff 160px); }
 .free-directory-intro { display:flex; align-items:flex-start; justify-content:space-between; gap:24px; margin:18px 0 20px; border-bottom:1px solid #e7ecdf; padding-bottom:18px; }.free-directory-intro > div { max-width:690px; }.free-directory-intro span { color:#8aa34c; font-size:10px; font-weight:900; letter-spacing:.14em; }.free-directory-intro h3 { margin:5px 0 4px; font-size:20px; }.free-directory-intro p { margin:0; color:#778372; font-size:12px; line-height:1.65; }.free-directory-intro > strong { flex:0 0 auto; border-radius:999px; background:#eaf3d8; color:#66852d; padding:7px 10px; font-size:11px; }
-.free-provider-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; }.free-provider-card { display:flex; min-width:0; flex-direction:column; border:1px solid #dfe8d4; border-radius:18px; background:#fff; padding:16px; box-shadow:0 8px 24px rgba(65,82,50,.05); }.free-provider-card > header { display:grid; grid-template-columns:44px minmax(0,1fr) auto; align-items:center; gap:11px; }.free-provider-card > header strong,.free-provider-card > header small { display:block; }.free-provider-card > header strong { color:#31402e; font-size:14px; }.free-provider-card > header small { margin-top:3px; color:#839078; font-size:11px; }.catalog-readiness { border-radius:999px; background:#f4eee1; color:#9a7327; padding:5px 7px; font-size:10px; font-weight:850; }.catalog-readiness.ready { background:#eaf4d8; color:#5f8228; }.free-provider-card > p { min-height:44px; margin:13px 0; color:#727f6c; font-size:12px; line-height:1.65; }.free-model-template-list { display:grid; gap:8px; }.free-model-template { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:4px 10px; border:1px solid #e7ecdf; border-radius:12px; background:#fafcf7; padding:10px; }.free-model-template > div { min-width:0; }.free-model-template strong,.free-model-template code { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.free-model-template strong { color:#445340; font-size:12px; }.free-model-template code { margin-top:3px; color:#84917d; font-size:10px; }.free-model-template button { grid-row:1 / 3; grid-column:2; align-self:center; border:1px solid #b9cf8e; border-radius:9px; background:#f0f7e3; color:#5d7d28; padding:7px 9px; font-size:11px; font-weight:850; }.free-model-template > small { color:#96a08f; font-size:10px; }.free-provider-card > footer { display:flex; flex-wrap:wrap; gap:8px 14px; margin-top:auto; padding-top:14px; }.free-provider-card > footer a { color:#557825; font-size:11px; font-weight:850; text-decoration:none; }.free-provider-card > footer a:hover { text-decoration:underline; }
+.free-provider-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; }.free-provider-card { display:flex; min-width:0; flex-direction:column; border:1px solid #dfe8d4; border-radius:18px; background:#fff; padding:16px; box-shadow:0 8px 24px rgba(65,82,50,.05); }.free-provider-card > header { display:grid; grid-template-columns:44px minmax(0,1fr) auto; align-items:center; gap:11px; }.free-provider-card > header strong,.free-provider-card > header small { display:block; }.free-provider-card > header strong { color:#31402e; font-size:14px; }.free-provider-card > header small { margin-top:3px; color:#839078; font-size:11px; }.catalog-readiness { border-radius:999px; background:#f4eee1; color:#9a7327; padding:5px 7px; font-size:10px; font-weight:850; }.catalog-readiness.ready { background:#eaf4d8; color:#5f8228; }.free-provider-card > p { min-height:44px; margin:13px 0 9px; color:#727f6c; font-size:12px; line-height:1.65; }.catalog-access-summary { margin-bottom:12px; border-left:3px solid #d9b86c; border-radius:0 9px 9px 0; background:#fff9eb; color:#866922; padding:8px 10px; font-size:11px; font-weight:800; line-height:1.5; }.catalog-access-summary.ready { border-left-color:#8dac4b; background:#f0f7e5; color:#5d7d28; }.free-model-template-list { display:grid; gap:8px; }.free-model-template { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:4px 10px; border:1px solid #e7ecdf; border-radius:12px; background:#fafcf7; padding:10px; }.free-model-template > div { min-width:0; }.free-model-template strong,.free-model-template code { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.free-model-template strong { color:#445340; font-size:12px; }.free-model-template code { margin-top:3px; color:#84917d; font-size:10px; }.free-model-template button { grid-row:1 / 3; grid-column:2; align-self:center; border:1px solid #b9cf8e; border-radius:9px; background:#f0f7e3; color:#5d7d28; padding:7px 9px; font-size:11px; font-weight:850; }.free-model-template > small { color:#96a08f; font-size:10px; }.free-provider-card > footer { display:flex; flex-wrap:wrap; gap:8px 14px; margin-top:auto; padding-top:14px; }.free-provider-card > footer a { color:#557825; font-size:11px; font-weight:850; text-decoration:none; }.free-provider-card > footer a:hover { text-decoration:underline; }
 .catalog-load-error { display:flex; align-items:center; justify-content:space-between; gap:14px; flex-wrap:wrap; }.catalog-load-error > div { min-width:0; flex:1 1 420px; }.catalog-load-error span { display:block; }.catalog-load-error button { flex:0 0 auto; background:#fff; }
 /* 只维护电脑与手机两档；手机端保留一个页面级滚动面。 */
 @media (max-width:640px) { .career-workspace { height:auto; min-height:calc(100dvh - 92px); grid-template-columns:1fr; grid-template-rows:auto auto; align-content:start; gap:10px; overflow:visible; }.career-chat-panel { height:auto; min-height:520px; overflow:visible; }.chat-header { min-height:60px; padding:12px 14px; }.message-list { min-height:270px; flex:none; overflow:visible; padding:14px; }.composer { position:sticky; z-index:5; bottom:0; padding:10px 12px max(12px, env(safe-area-inset-bottom)); box-shadow:0 -10px 22px rgba(47,62,37,.08); }.composer-toolbar,.composer-footer { align-items:flex-start; flex-direction:column; }.session-tools { margin-left:0; }.career-history-panel { height:auto; max-height:none; overflow:visible; }.conversation-list { grid-template-columns:1fr; max-height:200px; flex:none; overflow:auto; }.model-settings,.model-form,.provider-picker-grid,.provider-picker-grid-expanded { grid-template-columns:1fr; }.message,.agent-message { max-width:94%; }.model-select { max-width:100%; }.send-button { align-self:stretch; min-height:44px; }.career-error-toast { width:calc(100vw - 28px); gap:12px; padding:17px; }.career-error-toast strong { font-size:16px; }.career-error-toast p { font-size:15px; }.model-dialog-backdrop { align-items:end; padding:0; }.model-dialog { max-height:90dvh; border-radius:22px 22px 0 0; }.model-dialog-header,.model-dialog-body,.model-dialog-footer { padding-right:18px; padding-left:18px; }.connection-toolbar,.connection-card { align-items:flex-start; }.connection-toolbar { flex-direction:column; }.connection-toolbar-actions { width:100%; justify-content:stretch; }.connection-toolbar-actions button { flex:1; }.connection-card { grid-template-columns:18px 38px minmax(0,1fr); }.connection-meta { grid-column:3; justify-items:start; }.connection-form-grid,.capability-fieldset { grid-template-columns:1fr; }.dialog-primary-button,.dialog-secondary-button { min-height:44px; }.free-directory-intro { align-items:flex-start; flex-direction:column; gap:10px; }.free-provider-grid { grid-template-columns:1fr; }.free-provider-card { padding:14px; }.free-provider-card > header { grid-template-columns:40px minmax(0,1fr); }.free-provider-card > header .catalog-readiness { grid-column:2; justify-self:start; }.free-provider-card > p { min-height:0; }.free-model-template { grid-template-columns:1fr; }.free-model-template button { grid-row:auto; grid-column:auto; min-height:42px; }.free-provider-card > footer a { min-height:36px; display:inline-flex; align-items:center; } }

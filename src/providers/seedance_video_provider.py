@@ -9,6 +9,7 @@ from typing import Any
 import requests
 
 from src.config.config_manager import AppConfig
+from src.observability.langsmith_runtime import trace_llm_call
 
 
 class SeedanceVideoApiError(RuntimeError):
@@ -72,16 +73,42 @@ class SeedanceVideoProvider:
             image_urls=normalized_image_urls,
             duration_seconds=duration_seconds,
         )
-        response_payload = self._post_json(
-            url=self._build_generation_url(),
-            payload=payload,
-            api_key=api_key,
+        response_payload = trace_llm_call(
+            run_name="media.video.seedance.submit",
+            provider="volcengine-ark",
+            model=self.config.video_model,
+            message_count=1 + len(normalized_image_urls),
+            input_characters=len(normalized_prompt),
+            execute=lambda: self._post_json(
+                url=self._build_generation_url(),
+                payload=payload,
+                api_key=api_key,
+            ),
+            summarize=self._trace_summary,
         )
         task_id = self._extract_task_id(response_payload)
         return SeedanceVideoTaskResult(
             task_id=task_id,
             raw_response=response_payload,
         )
+
+    @staticmethod
+    def _trace_summary(response_payload: dict[str, Any]) -> dict[str, Any]:
+        """只记录任务是否创建及服务端用量，不上传任务 ID 或媒体 URL。"""
+
+        data = response_payload.get("data")
+        task_id_candidates = [
+            response_payload.get("id"),
+            response_payload.get("task_id"),
+            response_payload.get("taskId"),
+        ]
+        if isinstance(data, dict):
+            task_id_candidates.extend([data.get("id"), data.get("task_id"), data.get("taskId")])
+        usage = response_payload.get("usage")
+        return {
+            "task_created": any(isinstance(value, str) and bool(value.strip()) for value in task_id_candidates),
+            "usage": usage if isinstance(usage, dict) else {},
+        }
 
     def create_reference_video_task(self, prompt: str, image_urls: list[str]) -> SeedanceVideoTaskResult:
         """兼容旧调用方；新代码应使用 ``create_video_task``。"""

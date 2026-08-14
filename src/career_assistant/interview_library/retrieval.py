@@ -19,6 +19,7 @@ from src.career_assistant.interview_library.embedding import (
 from src.career_assistant.interview_library.models import InterviewChunkCandidate
 from src.career_assistant.interview_library.repository import InterviewLibraryRepository
 from src.career_assistant.settings import InterviewRetrievalSettings
+from src.observability.langsmith_runtime import trace_operation
 
 
 LOGGER = logging.getLogger(__name__)
@@ -103,6 +104,42 @@ class InterviewRetrievalService:
         experience_ids: tuple[UUID, ...] = (),
     ) -> InterviewRetrievalResult:
         """按关键词与语义双路召回，失败时透明降级为关键词检索。"""
+
+        return trace_operation(
+            run_name="interview.rag.retrieve",
+            run_type="retriever",
+            execute=lambda: self._retrieve(
+                organization_id,
+                query,
+                limit=limit,
+                experience_ids=experience_ids,
+            ),
+            summarize=lambda result: {
+                "retrieval_mode": result.retrieval_mode,
+                "result_count": len(result.candidates),
+                "degraded": result.degraded_reason is not None,
+            },
+            metadata={
+                "vector_indexing_enabled": self.vector_indexing_enabled,
+                "lexical_candidate_limit": self._settings.lexical_candidate_limit,
+                "semantic_candidate_limit": self._settings.semantic_candidate_limit,
+                "query_characters": len(query),
+                "requested_limit": limit or self._settings.final_limit,
+                "selected_experience_count": len(experience_ids),
+                "privacy_mode": "metadata_only",
+            },
+            tags=("career", "interview", "rag", "retrieval", "privacy:metadata-only"),
+        )
+
+    def _retrieve(
+        self,
+        organization_id: UUID,
+        query: str,
+        *,
+        limit: int | None = None,
+        experience_ids: tuple[UUID, ...] = (),
+    ) -> InterviewRetrievalResult:
+        """执行关键词/语义双路召回，原始查询与片段均不进入追踪数据。"""
 
         requested_limit = limit or self._settings.final_limit
         if not 1 <= requested_limit <= self._settings.final_limit:

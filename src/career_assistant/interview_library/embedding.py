@@ -12,6 +12,7 @@ from dataclasses import dataclass
 import httpx
 
 from src.career_assistant.settings import InterviewEmbeddingSettings
+from src.observability.langsmith_runtime import trace_operation
 
 
 class InterviewEmbeddingError(RuntimeError):
@@ -82,6 +83,33 @@ class OpenAICompatibleEmbeddingClient:
         base_url = os.getenv(self._settings.api_base_url_env or "", "").strip().rstrip("/")
         if not base_url.startswith("https://"):
             raise InterviewEmbeddingError("Embedding API Base URL 必须使用 HTTPS")
+
+        return trace_operation(
+            run_name="interview.embedding.batch",
+            run_type="embedding",
+            execute=lambda: self._embed_texts(texts, credential, base_url),
+            summarize=lambda result: {
+                "vector_count": len(result.vectors),
+                "dimensions": len(result.vectors[0]) if result.vectors else 0,
+            },
+            metadata={
+                "provider": self._settings.provider_key,
+                "model": self._settings.model_id,
+                "text_count": len(texts),
+                "input_characters": sum(len(text) for text in texts),
+                "expected_dimensions": self._settings.expected_dimensions,
+                "privacy_mode": "metadata_only",
+            },
+            tags=("career", "interview", "embedding", "privacy:metadata-only"),
+        )
+
+    def _embed_texts(
+        self,
+        texts: list[str],
+        credential: str,
+        base_url: str,
+    ) -> EmbeddingBatch:
+        """执行一次 Embedding HTTP 请求；追踪层只记录规模与维度。"""
 
         try:
             response = self._client.post(

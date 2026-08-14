@@ -13,6 +13,7 @@ from typing import Any
 import requests
 
 from src.config.config_manager import AppConfig
+from src.observability.langsmith_runtime import trace_llm_call
 
 
 class DoubaoTtsApiError(RuntimeError):
@@ -117,6 +118,31 @@ class DoubaoTtsProvider:
         voice_type: str,
     ) -> tuple[str, dict[str, Any]]:
         """执行一条 V3 单向流式合成请求，并保存 NDJSON 音频分片。"""
+        return trace_llm_call(
+            run_name="media.audio.doubao_tts.synthesize",
+            provider="doubao-speech",
+            model=voice_type,
+            message_count=1,
+            input_characters=len(text),
+            execute=lambda: self._synthesize_single_without_trace(
+                text=text,
+                output_path=output_path,
+                api_key=api_key,
+                voice_type=voice_type,
+            ),
+            summarize=self._trace_summary,
+        )
+
+    def _synthesize_single_without_trace(
+        self,
+        *,
+        text: str,
+        output_path: Path,
+        api_key: str,
+        voice_type: str,
+    ) -> tuple[str, dict[str, Any]]:
+        """执行真实 TTS HTTP 流；音频拼接由调用方完成且不产生 LLM Trace。"""
+
         reqid = uuid.uuid4().hex
         payload = self._build_payload(text=text, voice_type=voice_type)
         headers = {
@@ -147,6 +173,18 @@ class DoubaoTtsProvider:
             raise DoubaoTtsApiError(f"豆包 TTS 请求失败：{exc}") from exc
 
         return reqid, raw_response
+
+    @staticmethod
+    def _trace_summary(result: tuple[str, dict[str, Any]]) -> dict[str, Any]:
+        """返回匿名音频规模与用量，不上传文本、reqid 或音频内容。"""
+
+        _, raw_response = result
+        usage = raw_response.get("usage")
+        return {
+            "response_chunk_count": raw_response.get("response_chunk_count", 0),
+            "audio_bytes": raw_response.get("audio_bytes", 0),
+            "usage": usage if isinstance(usage, dict) else {},
+        }
 
     @staticmethod
     def _split_text_by_utf8_bytes(text: str, max_utf8_bytes: int) -> list[str]:

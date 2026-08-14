@@ -9,6 +9,7 @@ from src.config.config_manager import AppConfig, ConfigManager
 from src.platform_access.runtime_config import apply_pipeline_config
 from src.database.database_manager import DatabaseManager
 from src.logging.logger_manager import LoggerManager
+from src.observability.langsmith_runtime import trace_operation
 from src.repositories.error_event_repository import ErrorEventRepository
 from src.repositories.task_run_repository import TaskRunRepository
 from src.scheduler.scheduler_manager import SchedulerManager
@@ -214,7 +215,30 @@ class Application:
 
         lock = self._create_pipeline_execution_lock()
         with lock.hold(owner):
-            return handler()
+            return trace_operation(
+                run_name="wechat.content_pipeline",
+                run_type="chain",
+                inputs={"trigger": owner},
+                metadata={
+                    "component": "wechat_content_pipeline",
+                    "trigger": owner,
+                    "privacy_mode": "metadata_only",
+                },
+                tags=("wechat", "multi-agent", "pipeline"),
+                execute=handler,
+                summarize=self._summarize_pipeline_result,
+            )
+
+    @staticmethod
+    def _summarize_pipeline_result(result: Any) -> dict[str, Any]:
+        """只向 LangSmith 返回任务数量，不发送文章、Prompt 或媒体地址。"""
+
+        if isinstance(result, list):
+            return {
+                "completed": True,
+                "task_count": len(result),
+            }
+        return {"completed": True}
 
     def _run_scheduled_pipeline_if_available(self, *, owner: str, handler: Any) -> None:
         """调度任务遇到手动运行时安全跳过，保持常驻 Scheduler 进程继续工作。"""

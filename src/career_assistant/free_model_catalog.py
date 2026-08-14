@@ -55,7 +55,7 @@ FREE_MODEL_PROVIDERS: tuple[FreeModelProvider, ...] = (
         display_name="Google Gemini",
         api_base_url="https://generativelanguage.googleapis.com/v1beta/openai",
         website_url="https://aistudio.google.com",
-        setup_url="https://aistudio.google.com/apikey",
+        setup_url="https://aistudio.google.com/app/apikey",
         documentation_url="https://ai.google.dev/gemini-api/docs/openai",
         pricing_url="https://ai.google.dev/gemini-api/docs/pricing",
         free_label="免费层",
@@ -83,8 +83,8 @@ FREE_MODEL_PROVIDERS: tuple[FreeModelProvider, ...] = (
         pricing_url="https://help.aliyun.com/zh/model-studio/model-pricing",
         free_label="新用户免费额度",
         free_description=(
-            "百炼为中国内地（北京）的新用户提供部分模型限时额度；qwen3.6-flash 当前为"
-            "100 万 Token、有效期 90 天，实际额度、区域和到期后的计费以控制台为准。"
+            "百炼会按账号、模型和地域发放限时免费额度，新用户额度通常有有效期；"
+            "具体 Token 数、可用模型、地域和到期后的计费，以当前控制台为准。"
         ),
         templates=(
             # 此通用 Vision-Language 模型可作为管理员另行保存的会话模型；
@@ -121,10 +121,10 @@ FREE_MODEL_PROVIDERS: tuple[FreeModelProvider, ...] = (
         setup_url="https://modelscope.cn/my/myaccesstoken",
         documentation_url="https://modelscope.cn/docs/model-service/API-Inference/intro",
         pricing_url="https://www.modelscope.cn/learn/434367",
-        free_label="免费日额度",
+        free_label="体验额度",
         free_description=(
-            "API Inference 为选定开源模型提供免费层；当前说明为带魔搭标识的模型至少 50 次/日，"
-            "热门模型可能有单独日限额，实际目录与额度以模型页实时状态为准。"
+            "API Inference 的部分开源模型或账号可能提供体验额度，但官方没有承诺统一、长期固定的"
+            "免费调用量；实际可用模型、限流和额度以模型页与账号控制台为准。"
         ),
         templates=(
             FreeModelTemplate("Qwen/Qwen2.5-7B-Instruct", "Qwen 2.5 7B Instruct"),
@@ -139,10 +139,10 @@ FREE_MODEL_PROVIDERS: tuple[FreeModelProvider, ...] = (
         setup_url="https://cloud.siliconflow.cn/account/ak",
         documentation_url="https://docs.siliconflow.cn/cn/userguide/quickstart",
         pricing_url="https://siliconflow.cn/pricing",
-        free_label="认证后免费模型",
+        free_label="部分模型可能免费",
         free_description=(
-            "完成实名认证后可调用免费模型；目录仅列价格页标记为 0 元的型号，"
-            "固定限流以账号等级为准，带 Pro/ 前缀的同系列模型属于收费版本。"
+            "部分模型或活动账号可能提供免费额度，目录中的候选模型仍需在控制台核对当前价格和准入；"
+            "带 Pro/ 前缀或价格页未标记免费的模型不能按免费连接保存。"
         ),
         templates=(
             FreeModelTemplate("Qwen/Qwen2.5-7B-Instruct", "Qwen 2.5 7B Instruct"),
@@ -158,10 +158,10 @@ FREE_MODEL_PROVIDERS: tuple[FreeModelProvider, ...] = (
         setup_url="https://build.nvidia.com/settings/api-keys",
         documentation_url="https://docs.api.nvidia.com/nim/reference/llm-apis",
         pricing_url="https://build.nvidia.com/explore/discover?api-key=true",
-        free_label="免费原型端点",
+        free_label="开发试用",
         free_description=(
-            "NVIDIA Build 托管端点仅用于开发和试用，存在限流、拥塞与模型下线风险，"
-            "试用条款不允许生产用途；可用模型和额度以 Build 目录实时状态为准。"
+            "NVIDIA Build 可提供受限的开发试用额度，存在限流、拥塞与模型下线风险；"
+            "它不是长期免费生产额度，可用模型、试用资格和使用边界以 Build 控制台为准。"
         ),
         templates=(
             FreeModelTemplate("meta/llama-3.3-70b-instruct", "Llama 3.3 70B Instruct"),
@@ -204,7 +204,7 @@ def build_free_model_catalog_payload(
                 "platform_ready": bool(ready_connections),
                 "visitor_ready": bool(ready_connections),
                 "availability_label": (
-                    "平台已启用，访客无需配置 Key"
+                    "该服务商已有可用模型"
                     if ready_connections
                     else "需管理员申请并保存 API Key"
                 ),

@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 
 
@@ -93,6 +94,22 @@ def main() -> None:
         _AgentLoop(_Repository([_message(active_turn)])),
         model_gateway=object(),
     )
+    assert runner._model_resolution_label(
+        SimpleNamespace(
+            profile=SimpleNamespace(
+                display_name="DeepSeek 模型连接",
+                model_id="deepseek-v4-pro",
+            )
+        )
+    ) == "DeepSeek 模型连接 · deepseek-v4-pro"
+    assert runner._model_resolution_label(
+        SimpleNamespace(
+            profile=SimpleNamespace(
+                display_name="deepseek-v4-flash",
+                model_id="deepseek-v4-flash",
+            )
+        )
+    ) == "deepseek-v4-flash"
     normal_messages = runner._build_prompt(
         active_turn,
         ModelTurnContext(
