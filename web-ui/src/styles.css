@@ -220,6 +220,10 @@ body.auth-page-active {
   line-height: 1.7;
 }
 
+.login-form-heading + .login-method-tabs {
+  margin-top: 18px;
+}
+
 .login-form { display: grid; gap: 20px; }
 
 .login-method-tabs {
@@ -255,17 +259,6 @@ body.auth-page-active {
   background: #ffffff;
   box-shadow: 0 2px 9px rgba(40, 60, 35, 0.09);
   color: #557c2f;
-}
-
-.login-method-tabs button.active::after {
-  position: absolute;
-  right: 28%;
-  bottom: 5px;
-  left: 28%;
-  height: 2px;
-  border-radius: 999px;
-  background: #8eaf48;
-  content: "";
 }
 
 .login-switches button,
@@ -515,31 +508,27 @@ body.auth-page-active {
 .login-cli-bootstrap .login-hint { color: #738364; }
 .login-footer { margin-top: 30px; text-align: center; }
 .login-register-entry {
-  display: grid;
-  grid-template-columns: 1fr auto;
+  display: flex;
   align-items: center;
-  gap: 16px;
-  margin-top: 18px;
-  border-top: 1px solid #e3eadc;
-  padding-top: 18px;
-  color: #687564;
+  justify-content: center;
+  gap: 6px;
+  margin-top: 16px;
+  color: #778076;
   font-size: 13px;
 }
 .login-register-entry button {
-  min-height: 38px;
-  border: 1px solid #bfd39d;
-  border-radius: 9px;
-  background: #f5faec;
-  padding: 0 15px;
+  min-height: auto;
+  border: 0;
+  background: transparent;
+  padding: 2px;
   color: #4d7427;
   font-size: 13px;
   font-weight: 800;
-  transition: border-color 0.18s ease, background-color 0.18s ease, transform 0.18s ease;
+  cursor: pointer;
+  transition: color 0.18s ease;
 }
 .login-register-entry button:hover {
-  border-color: #8fb650;
-  background: #edf6dd;
-  transform: translateY(-1px);
+  color: #2f5b1c;
 }
 .login-switches {
   display: flex;
@@ -661,15 +650,6 @@ body.auth-page-active {
 
   .login-footer {
     margin-top: 14px;
-  }
-
-  .login-register-entry {
-    grid-template-columns: 1fr;
-    gap: 10px;
-  }
-
-  .login-register-entry button {
-    width: 100%;
   }
 
   .login-mobile-brand {

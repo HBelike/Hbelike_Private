@@ -429,7 +429,7 @@ function readableError(error, fallback) {
 
         <div class="login-form-heading" :class="{ 'is-code-stage': isCodeStage }">
           <h2>{{ panelTitle }}</h2>
-          <p>{{ panelDescription }}</p>
+          <p v-if="mode !== 'login' || requiresBootstrap">{{ panelDescription }}</p>
         </div>
 
         <div v-if="loading" class="login-loading" role="status">
@@ -554,8 +554,8 @@ function readableError(error, fallback) {
             </form>
 
             <div v-if="!requiresBootstrap && mode === 'login' && publicRegistrationEnabled" class="login-register-entry">
-              <span>第一次使用职业工作台？</span>
-              <button type="button" @click="switchMode('register')">创建新账号</button>
+              <span>没有账号？</span>
+              <button type="button" @click="switchMode('register')">创建账号</button>
             </div>
 
             <div class="login-switches">
