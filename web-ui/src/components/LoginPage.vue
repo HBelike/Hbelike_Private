@@ -5,10 +5,12 @@ const emit = defineEmits(['authenticated'])
 
 const loading = ref(true)
 const submitting = ref(false)
+const sendingLoginCode = ref(false)
 const requiresBootstrap = ref(false)
 const publicRegistrationEnabled = ref(true)
 const cliBootstrapOnly = ref(false)
 const mode = ref('login')
+const loginMethod = ref('code')
 const verificationStage = ref(false)
 const challengeId = ref('')
 const identity = ref('')
@@ -34,13 +36,16 @@ const panelDescription = computed(() => {
   if (requiresBootstrap.value) return '首个账户将获得管理员权限。使用邮箱完成验证后，即可配置成员、角色与平台能力。'
   if (mode.value === 'register') return '注册后默认获得基础访问权限。高级管理功能需由管理员单独授权。'
   if (mode.value === 'reset') return '验证码仅发送到已验证邮箱，用于确认本次密码重置操作。'
-  return '使用邮箱或用户名，继续访问你的职业工作台。'
+  return loginMethod.value === 'code'
+    ? '输入已注册邮箱，使用一次性验证码安全登录。'
+    : '输入注册邮箱和密码，继续访问你的职业工作台。'
 })
 
 const primaryLabel = computed(() => {
   if (requiresBootstrap.value) return verificationStage.value ? '验证并进入平台' : '发送管理员验证码'
   if (mode.value === 'register') return verificationStage.value ? '验证并创建账户' : '发送注册验证码'
   if (mode.value === 'reset') return verificationStage.value ? '保存新密码' : '发送重置验证码'
+  if (loginMethod.value === 'code') return '登录'
   return '登录'
 })
 
@@ -132,6 +137,16 @@ function switchMode(nextMode, { replace = false } = {}) {
   window.history[replace ? 'replaceState' : 'pushState']({}, '', `${nextUrl.pathname}${nextUrl.search}${nextUrl.hash}`)
 }
 
+function switchLoginMethod(nextMethod) {
+  if (nextMethod === loginMethod.value || submitting.value) return
+  loginMethod.value = nextMethod
+  verificationStage.value = false
+  challengeId.value = ''
+  verificationCode.value = ''
+  password.value = ''
+  clearMessages()
+}
+
 function authPathForMode(nextMode) {
   if (nextMode === 'register') return '/register'
   if (nextMode === 'reset') return '/forgot-password'
@@ -187,7 +202,66 @@ async function submit() {
     await submitReset()
     return
   }
+  if (loginMethod.value === 'code') {
+    await submitEmailCodeLogin()
+    return
+  }
   await submitLogin()
+}
+
+async function submitEmailCodeLogin() {
+  if (!validateEmail(email.value)) {
+    errorMessage.value = '请输入有效的注册邮箱。'
+    return
+  }
+  if (!challengeId.value) {
+    errorMessage.value = '请先获取登录验证码。'
+    return
+  }
+  if (!validateVerificationCode()) return
+
+  submitting.value = true
+  try {
+    const response = await fetch('/api/auth/email-login/verify', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ challenge_id: challengeId.value, code: verificationCode.value.trim() })
+    })
+    if (!response.ok) throw new Error(await responseError(response, '验证码登录失败'))
+    const payload = await response.json()
+    emit('authenticated', payload.user)
+  } catch (error) {
+    errorMessage.value = readableError(error, '验证码登录失败，请稍后再试。')
+  } finally {
+    submitting.value = false
+  }
+}
+
+async function sendEmailLoginCode() {
+  clearMessages()
+  if (!validateEmail(email.value)) {
+    errorMessage.value = '请输入有效的注册邮箱。'
+    return
+  }
+
+  sendingLoginCode.value = true
+  try {
+    const response = await fetch('/api/auth/email-login/send-code', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: email.value.trim() })
+    })
+    if (!response.ok) throw new Error(await responseError(response, '获取验证码失败'))
+    const payload = await response.json()
+    challengeId.value = payload.challenge_id
+    successMessage.value = '验证码已发送，请在 10 分钟内完成登录。'
+  } catch (error) {
+    errorMessage.value = readableError(error, '获取验证码失败，请稍后再试。')
+  } finally {
+    sendingLoginCode.value = false
+  }
 }
 
 async function submitRegistration() {
@@ -371,6 +445,32 @@ function readableError(error, fallback) {
           </section>
 
           <template v-else>
+            <div
+              v-if="mode === 'login'"
+              class="login-method-tabs"
+              role="tablist"
+              aria-label="选择登录方式"
+            >
+              <button
+                type="button"
+                role="tab"
+                :aria-selected="loginMethod === 'code'"
+                :class="{ active: loginMethod === 'code' }"
+                @click="switchLoginMethod('code')"
+              >
+                验证码登录
+              </button>
+              <button
+                type="button"
+                role="tab"
+                :aria-selected="loginMethod === 'password'"
+                :class="{ active: loginMethod === 'password' }"
+                @click="switchLoginMethod('password')"
+              >
+                密码登录
+              </button>
+            </div>
+
             <section v-if="isCodeStage" class="verification-flow" aria-live="polite">
               <div class="verification-flow-mark" aria-hidden="true">{{ flowStep }}</div>
               <div>
@@ -381,17 +481,35 @@ function readableError(error, fallback) {
 
             <form class="login-form" @submit.prevent="submit">
               <template v-if="mode === 'login' && !requiresBootstrap">
-                <label for="login-identity">
-                  <span>邮箱或用户名</span>
-                  <input id="login-identity" v-model.trim="identity" autocomplete="username" maxlength="160" placeholder="name@example.com" autofocus />
-                </label>
-                <div class="login-field">
-                  <div class="login-label-row">
-                    <label for="login-password">密码</label>
-                    <button type="button" @click="switchMode('reset')">忘记密码？</button>
+                <template v-if="loginMethod === 'password'">
+                  <label for="login-identity">
+                    <span>邮箱</span>
+                    <input id="login-identity" v-model.trim="identity" autocomplete="username" maxlength="160" placeholder="name@example.com" autofocus />
+                  </label>
+                  <div class="login-field">
+                    <div class="login-label-row">
+                      <label for="login-password">密码</label>
+                      <button type="button" @click="switchMode('reset')">忘记密码？</button>
+                    </div>
+                    <input id="login-password" v-model="password" type="password" autocomplete="current-password" placeholder="输入密码" />
                   </div>
-                  <input id="login-password" v-model="password" type="password" autocomplete="current-password" placeholder="输入密码" />
-                </div>
+                </template>
+                <template v-else>
+                  <label for="login-email">
+                    <span>邮箱</span>
+                    <input id="login-email" v-model.trim="email" type="email" autocomplete="email" maxlength="254" placeholder="name@example.com" autofocus />
+                  </label>
+                  <div class="login-field">
+                    <label for="login-code">6 位验证码</label>
+                    <div class="login-code-row">
+                      <input id="login-code" class="verification-code-input" v-model.trim="verificationCode" autocomplete="one-time-code" inputmode="numeric" maxlength="6" placeholder="000000" />
+                      <button type="button" class="login-code-send" :disabled="sendingLoginCode || submitting" @click="sendEmailLoginCode">
+                        {{ sendingLoginCode ? '发送中…' : challengeId ? '重新获取' : '获取验证码' }}
+                      </button>
+                    </div>
+                    <small class="login-field-hint">验证码将发送到该邮箱，10 分钟内有效。</small>
+                  </div>
+                </template>
               </template>
 
               <template v-else-if="(mode === 'register' || requiresBootstrap) && !verificationStage">

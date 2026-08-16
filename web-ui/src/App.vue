@@ -28,6 +28,7 @@ const selectedSkill = ref(null)
 const installedSkillQuery = ref('')
 const skillSearchQuery = ref('')
 const skillSearchResults = ref([])
+const skillSearchSnapshot = ref(null)
 const skillsLoading = ref(false)
 const skillSearchLoading = ref(false)
 const skillSaving = ref(false)
@@ -552,10 +553,12 @@ async function loadSkillDetail(skillId) {
   }
 }
 
-async function searchSkills() {
+async function searchSkills(forceRefresh = false) {
   skillSearchLoading.value = true
   skillErrorMessage.value = ''
-  skillMessage.value = '正在搜索 GitHub 开放 Skill；若外部服务超时，会自动展示本地已安装结果。'
+  skillMessage.value = forceRefresh
+    ? '正在刷新 GitHub 开放 Skill 快照…'
+    : '正在读取关键词快照；首次搜索会请求 GitHub。'
 
   try {
     const response = await fetch('/api/skills/search', {
@@ -564,7 +567,8 @@ async function searchSkills() {
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        query: skillSearchQuery.value
+        query: skillSearchQuery.value,
+        force_refresh: forceRefresh
       })
     })
     const payload = await response.json().catch(() => ({}))
@@ -573,6 +577,11 @@ async function searchSkills() {
     }
 
     skillSearchResults.value = payload.items ?? []
+    skillSearchSnapshot.value = {
+      snapshotAt: payload.snapshot_at ?? null,
+      cacheState: payload.cache_state ?? 'local',
+      dataSource: payload.data_source ?? 'local_installed'
+    }
     const elapsed = Number.isFinite(payload.elapsed_ms) ? `（${(payload.elapsed_ms / 1000).toFixed(1)} 秒）` : ''
     if (payload.fallback_reason) {
       skillMessage.value = `${payload.fallback_reason}${elapsed}`
@@ -590,6 +599,30 @@ async function searchSkills() {
   } finally {
     skillSearchLoading.value = false
   }
+}
+
+function skillSnapshotSourceLabel(source) {
+  return ({
+    github_live: 'GitHub 实时结果',
+    github_snapshot: 'GitHub 周期快照',
+    local_installed: '本地已安装 Skill'
+  })[source] ?? '本地结果'
+}
+
+function skillSnapshotStateLabel(state) {
+  return ({
+    live: '刚刚刷新',
+    fresh: '快照有效期内',
+    stale: '历史快照',
+    local: '本地数据'
+  })[state] ?? '快照数据'
+}
+
+function skillSnapshotTime(value) {
+  if (!value) return '暂无 GitHub 快照时间'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return String(value)
+  return `更新于 ${date.toLocaleString('zh-CN', { hour12: false })}`
 }
 
 async function selectSearchResult(result) {
@@ -1210,7 +1243,7 @@ onBeforeUnmount(() => {
                 </div>
               </div>
 
-              <form class="skill-search-row" @submit.prevent="searchSkills">
+              <form class="skill-search-row" @submit.prevent="searchSkills(false)">
                 <input
                   v-model="skillSearchQuery"
                   type="text"
@@ -1219,11 +1252,24 @@ onBeforeUnmount(() => {
                 <button type="submit" class="refresh-button" :disabled="skillSearchLoading">
                   {{ skillSearchLoading ? '搜索中...' : '搜索 Skill' }}
                 </button>
+                <button
+                  type="button"
+                  class="secondary-button"
+                  :disabled="skillSearchLoading || !skillSearchQuery.trim()"
+                  @click="searchSkills(true)"
+                >
+                  刷新 GitHub
+                </button>
               </form>
 
               <div class="skill-info-strip">
                 <span>GitHub 搜索 SKILL.md</span>
                 <span>find-skills 质量策略</span>
+                <template v-if="skillSearchSnapshot">
+                  <span>{{ skillSnapshotSourceLabel(skillSearchSnapshot.dataSource) }}</span>
+                  <span>{{ skillSnapshotStateLabel(skillSearchSnapshot.cacheState) }}</span>
+                  <span>{{ skillSnapshotTime(skillSearchSnapshot.snapshotAt) }}</span>
+                </template>
               </div>
 
               <section v-if="skillErrorMessage" class="alert danger">

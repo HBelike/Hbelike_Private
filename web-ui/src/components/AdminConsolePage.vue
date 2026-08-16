@@ -6,6 +6,10 @@ const saving = ref(false)
 const errorMessage = ref('')
 const successMessage = ref('')
 const version = ref(null)
+const githubSnapshot = ref(null)
+const snapshotLoading = ref(true)
+const snapshotRefreshing = ref(false)
+const snapshotError = ref('')
 
 const form = reactive({
   top_n: 5,
@@ -15,7 +19,52 @@ const form = reactive({
   video_prompt: ''
 })
 
-onMounted(loadConfig)
+onMounted(() => {
+  void loadConfig()
+  void loadGithubSnapshot()
+})
+
+async function loadGithubSnapshot() {
+  snapshotLoading.value = true
+  snapshotError.value = ''
+  try {
+    const response = await fetch('/api/admin/github-snapshot', { credentials: 'include', cache: 'no-store' })
+    if (!response.ok) throw new Error(await responseError(response, '无法读取 GitHub 热门项目快照'))
+    githubSnapshot.value = (await response.json()).item ?? null
+  } catch (error) {
+    snapshotError.value = error instanceof Error ? error.message : '无法读取 GitHub 热门项目快照'
+  } finally {
+    snapshotLoading.value = false
+  }
+}
+
+async function refreshGithubSnapshot() {
+  if (snapshotRefreshing.value) return
+  snapshotRefreshing.value = true
+  snapshotError.value = ''
+  successMessage.value = ''
+  try {
+    const response = await fetch('/api/admin/github-snapshot/refresh', {
+      method: 'POST',
+      credentials: 'include'
+    })
+    if (!response.ok) throw new Error(await responseError(response, '刷新 GitHub 热门项目失败'))
+    const payload = await response.json()
+    githubSnapshot.value = payload.item ?? null
+    successMessage.value = `GitHub 热门项目快照已刷新，共 ${githubSnapshot.value?.project_count ?? 0} 个项目。`
+  } catch (error) {
+    snapshotError.value = error instanceof Error ? error.message : '刷新 GitHub 热门项目失败'
+  } finally {
+    snapshotRefreshing.value = false
+  }
+}
+
+function snapshotTime(value) {
+  if (!value) return '暂无更新时间'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return String(value)
+  return date.toLocaleString('zh-CN', { hour12: false })
+}
 
 async function loadConfig() {
   loading.value = true
@@ -111,6 +160,27 @@ async function responseError(response, fallback) {
           <div class="admin-card-heading">
             <div><p class="eyebrow">DISCOVERY</p><h3>GitHub 热门项目筛选</h3></div>
           </div>
+          <div class="github-snapshot-bar">
+            <div class="github-snapshot-meta">
+              <strong>当前项目快照</strong>
+              <span v-if="snapshotLoading">正在读取…</span>
+              <template v-else-if="githubSnapshot">
+                <span>{{ githubSnapshot.week_start }} 至 {{ githubSnapshot.week_end }}</span>
+                <span>{{ githubSnapshot.project_count }} 个项目</span>
+                <span>更新于 {{ snapshotTime(githubSnapshot.updated_at) }}</span>
+              </template>
+              <span v-else>尚无快照，请先显式刷新 GitHub。</span>
+            </div>
+            <button
+              class="secondary-button"
+              type="button"
+              :disabled="snapshotRefreshing"
+              @click="refreshGithubSnapshot"
+            >
+              {{ snapshotRefreshing ? '正在刷新…' : '刷新 GitHub 热门项目' }}
+            </button>
+          </div>
+          <p v-if="snapshotError" class="github-snapshot-error">{{ snapshotError }}</p>
           <div class="admin-field-grid">
             <label>
               <span>本期项目数量</span>

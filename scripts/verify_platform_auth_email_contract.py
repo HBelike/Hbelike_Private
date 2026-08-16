@@ -44,7 +44,29 @@ class FakeAuthService:
             created_at=now,
         )
         self.last_reset: tuple[str, str, str] | None = None
+        self.last_login_email: str | None = None
         self.reject_registration_delivery = False
+
+    def send_login_code(self, *, email: str) -> dict[str, object]:
+        """模拟邮箱验证码登录第一步。"""
+
+        self.last_login_email = email
+        return {
+            "accepted": True,
+            "challenge_id": "33333333-3333-3333-3333-333333333333",
+            "expires_at": "2026-08-13T00:10:00+00:00",
+        }
+
+    def authenticate_with_code(self, **_: object) -> AuthenticatedSession:
+        """模拟验证码登录成功后的会话。"""
+
+        now = datetime.now(UTC)
+        return AuthenticatedSession(
+            user=self.user,
+            raw_token="email-login-session-token",
+            expires_at=now + timedelta(days=7),
+            absolute_expires_at=now + timedelta(days=30),
+        )
 
     def send_registration_code(self, **_: object) -> dict[str, object]:
         """模拟发送注册验证码或供应商拒绝投递。"""
@@ -121,6 +143,25 @@ def main() -> None:
                 assert verify_response.status_code == 200
                 assert verify_response.json()["user"]["email"] == "contract-test@example.com"
                 assert "platform_session=" in verify_response.headers.get("set-cookie", "")
+
+                login_code_response = client.post(
+                    "/api/auth/email-login/send-code",
+                    json={"email": "candidate@qq.com"},
+                )
+                assert login_code_response.status_code == 200
+                assert login_code_response.json()["challenge_id"] == "33333333-3333-3333-3333-333333333333"
+                assert service.last_login_email == "candidate@qq.com"
+
+                login_verify_response = client.post(
+                    "/api/auth/email-login/verify",
+                    json={
+                        "challenge_id": "33333333-3333-3333-3333-333333333333",
+                        "code": "123456",
+                    },
+                )
+                assert login_verify_response.status_code == 200
+                assert login_verify_response.json()["user"]["email"] == "contract-test@example.com"
+                assert "platform_session=" in login_verify_response.headers.get("set-cookie", "")
 
                 reset_send_response = client.post(
                     "/api/auth/password-reset/send-code",

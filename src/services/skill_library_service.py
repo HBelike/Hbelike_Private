@@ -73,6 +73,9 @@ class SkillSearchResult:
     status_message: str = ""
     cache_hit: bool = False
     elapsed_ms: int = 0
+    snapshot_at: str | None = None
+    cache_state: str = "local"
+    data_source: str = "local_installed"
 
 
 class SkillSearchBudgetExceeded(RuntimeError):
@@ -111,7 +114,7 @@ class SkillLibraryService:
     github_file_fetch_workers = 4
     github_file_candidate_limit = 8
     github_result_limit = 8
-    open_skill_cache_ttl = timedelta(minutes=20)
+    open_skill_cache_ttl = timedelta(hours=6)
     open_skill_cache_max_entries = 40
 
     def __init__(self, config: AppConfig) -> None:
@@ -257,19 +260,23 @@ class SkillLibraryService:
             "failed": failed,
         }
 
-    def search_skills(self, query: str) -> SkillSearchResult:
+    def search_skills(self, query: str, *, force_refresh: bool = False) -> SkillSearchResult:
         """搜索 Skill，并只向 LangSmith 暴露检索规模与执行结果元数据。"""
 
         return trace_operation(
             run_name="skills.search",
             run_type="chain",
-            inputs={"query_characters": len(query.strip())},
+            inputs={"query_characters": len(query.strip()), "force_refresh": force_refresh},
             metadata={
                 "component": "skill_library",
                 "search_scope": "github_open_skill",
             },
             tags=("skills", "search", "github"),
-            execute=lambda: self._search_skills_untraced(query),
+            execute=(
+                lambda: self._search_skills_untraced(query, force_refresh=True)
+                if force_refresh
+                else self._search_skills_untraced(query)
+            ),
             summarize=self._summarize_search_trace,
         )
 
@@ -287,7 +294,7 @@ class SkillLibraryService:
             "model": result.model or "none",
         }
 
-    def _search_skills_untraced(self, query: str) -> SkillSearchResult:
+    def _search_skills_untraced(self, query: str, *, force_refresh: bool = False) -> SkillSearchResult:
         """搜索 GitHub 开放 Skill，并在限定时间内保持页面可用。
 
         旧实现会在一次 HTTP 请求中串行执行两次 LLM、最多八次文件下载和八次 Star
@@ -296,7 +303,7 @@ class SkillLibraryService:
         """
 
         started_at = time.monotonic()
-        normalized_query = query.strip()
+        normalized_query = self._normalize_open_skill_cache_query(query)
         skills = self.list_skills()
         if not normalized_query:
             return SkillSearchResult(
@@ -311,21 +318,43 @@ class SkillLibraryService:
                 normalized_query="",
                 status_message="已展示本地已安装 Skill。",
                 elapsed_ms=self._elapsed_ms(started_at),
+                cache_state="local",
+                data_source="local_installed",
             )
 
-        cached_result = self._read_open_skill_search_cache(normalized_query)
-        if cached_result is not None:
+        cached_snapshot = self._read_open_skill_search_cache(normalized_query)
+        if cached_snapshot is not None and not force_refresh:
+            cached_result, created_at, is_fresh = cached_snapshot
             return replace(
                 cached_result,
                 cache_hit=True,
-                status_message="已命中最近 20 分钟的 GitHub Skill 搜索缓存；Star 数据来自周缓存。",
+                status_message=(
+                    "已读取最近 6 小时的 GitHub Skill 关键词快照；Star 数据来自周快照。"
+                    if is_fresh
+                    else "当前展示历史 GitHub Skill 关键词快照；如需更新，请点击“刷新 GitHub”。"
+                ),
                 elapsed_ms=self._elapsed_ms(started_at),
+                snapshot_at=created_at.isoformat(),
+                cache_state="fresh" if is_fresh else "stale",
+                data_source="github_snapshot",
             )
 
         deadline = started_at + self.open_skill_search_budget_seconds
         try:
             open_result = self._search_open_skills(query=normalized_query, deadline=deadline)
         except SkillSearchBudgetExceeded:
+            if cached_snapshot is not None:
+                cached_result, created_at, _is_fresh = cached_snapshot
+                return replace(
+                    cached_result,
+                    cache_hit=True,
+                    fallback_reason="GitHub 刷新超时，当前继续展示上次关键词快照。",
+                    status_message="刷新失败，旧快照仍可使用。",
+                    elapsed_ms=self._elapsed_ms(started_at),
+                    snapshot_at=created_at.isoformat(),
+                    cache_state="stale",
+                    data_source="github_snapshot",
+                )
             return self._local_fallback_result(
                 query=normalized_query,
                 skills=skills,
@@ -334,6 +363,18 @@ class SkillLibraryService:
             )
         except Exception as exc:
             self.logger.warning("GitHub 开放 Skill 搜索失败，使用本地回退：%s", exc.__class__.__name__)
+            if cached_snapshot is not None:
+                cached_result, created_at, _is_fresh = cached_snapshot
+                return replace(
+                    cached_result,
+                    cache_hit=True,
+                    fallback_reason=f"GitHub 刷新失败，当前继续展示上次关键词快照：{exc.__class__.__name__}。",
+                    status_message="刷新失败，旧快照仍可使用。",
+                    elapsed_ms=self._elapsed_ms(started_at),
+                    snapshot_at=created_at.isoformat(),
+                    cache_state="stale",
+                    data_source="github_snapshot",
+                )
             return self._local_fallback_result(
                 query=normalized_query,
                 skills=skills,
@@ -342,12 +383,16 @@ class SkillLibraryService:
             )
 
         if open_result.items:
+            snapshot_at = datetime.now(UTC).isoformat()
             completed_result = replace(
                 open_result,
-                status_message="已完成 GitHub 开放 Skill 搜索；Star 数据从周缓存读取，不阻塞本次检索。",
+                status_message="已刷新 GitHub 开放 Skill；结果已保存为关键词快照，Star 数据来自周快照。",
                 elapsed_ms=self._elapsed_ms(started_at),
+                snapshot_at=snapshot_at,
+                cache_state="live",
+                data_source="github_live",
             )
-            self._write_open_skill_search_cache(normalized_query, completed_result)
+            self._write_open_skill_search_cache(normalized_query, completed_result, created_at=snapshot_at)
             return completed_result
 
         return self._local_fallback_result(
@@ -380,6 +425,8 @@ class SkillLibraryService:
             normalized_query=normalized_query or query,
             status_message="已优先保留本地 Skill 可用性。",
             elapsed_ms=self._elapsed_ms(started_at),
+            cache_state="local",
+            data_source="local_installed",
         )
 
     def save_skill(
@@ -645,8 +692,11 @@ find-skills 的本地说明片段：
                 return raw_response.text
         return content
 
-    def _read_open_skill_search_cache(self, query: str) -> SkillSearchResult | None:
-        """读取仍在有效期内的 GitHub Skill 检索缓存。"""
+    def _read_open_skill_search_cache(
+        self,
+        query: str,
+    ) -> tuple[SkillSearchResult, datetime, bool] | None:
+        """读取 GitHub Skill 关键词快照；过期快照继续保留并交给页面显式标记。"""
 
         cache = self._load_open_skill_search_cache()
         entries = cache.get("entries", {})
@@ -656,14 +706,20 @@ find-skills 的本地说明片段：
         if not isinstance(record, dict):
             return None
         created_at = self._parse_cache_datetime(record.get("created_at"))
-        if created_at is None or datetime.now(UTC) - created_at >= self.open_skill_cache_ttl:
+        if created_at is None:
             return None
         result = self._deserialize_open_skill_search_result(record.get("result"))
         if result is None or not result.items:
             return None
-        return result
+        return result, created_at, datetime.now(UTC) - created_at < self.open_skill_cache_ttl
 
-    def _write_open_skill_search_cache(self, query: str, result: SkillSearchResult) -> None:
+    def _write_open_skill_search_cache(
+        self,
+        query: str,
+        result: SkillSearchResult,
+        *,
+        created_at: str | None = None,
+    ) -> None:
         """持久化公开 GitHub 搜索结果，避免短时间重复请求外部 API。"""
 
         try:
@@ -673,24 +729,22 @@ find-skills 的本地说明片段：
                 entries = {}
                 cache["entries"] = entries
             entries[self._open_skill_cache_key(query)] = {
-                "created_at": datetime.now(UTC).isoformat(),
+                "created_at": created_at or datetime.now(UTC).isoformat(),
                 "result": self._serialize_open_skill_search_result(result),
             }
 
-            fresh_entries: list[tuple[str, dict[str, Any]]] = []
-            now = datetime.now(UTC)
+            retained_entries: list[tuple[str, dict[str, Any]]] = []
             for key, value in entries.items():
                 if not isinstance(value, dict):
                     continue
-                created_at = self._parse_cache_datetime(value.get("created_at"))
-                if created_at is None or now - created_at >= self.open_skill_cache_ttl:
+                if self._parse_cache_datetime(value.get("created_at")) is None:
                     continue
-                fresh_entries.append((key, value))
-            fresh_entries.sort(
+                retained_entries.append((key, value))
+            retained_entries.sort(
                 key=lambda item: str(item[1].get("created_at", "")),
                 reverse=True,
             )
-            cache["entries"] = dict(fresh_entries[: self.open_skill_cache_max_entries])
+            cache["entries"] = dict(retained_entries[: self.open_skill_cache_max_entries])
             self._save_open_skill_search_cache(cache)
         except OSError:
             # 缓存写入失败不能让已经得到的 GitHub 搜索结果变成错误响应。
@@ -722,8 +776,14 @@ find-skills 的本地说明片段：
     def _open_skill_cache_key(self, query: str) -> str:
         """使用归一化查询生成不暴露用户原文的缓存键。"""
 
-        normalized = re.sub(r"\s+", " ", query.strip().casefold())
+        normalized = self._normalize_open_skill_cache_query(query)
         return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _normalize_open_skill_cache_query(query: str) -> str:
+        """统一关键词大小写与空白，确保语义相同的输入复用同一份快照。"""
+
+        return re.sub(r"\s+", " ", query.strip().casefold())
 
     def _serialize_open_skill_search_result(self, result: SkillSearchResult) -> dict[str, Any]:
         """将公开 GitHub 结果转换为可持久化 JSON。"""

@@ -232,7 +232,9 @@ class GeneratedContentRepository:
                 SELECT id, week_end, title, video_script, voiceover_text
                 FROM generated_contents
                 WHERE video_script IS NOT NULL
+                  AND TRIM(video_script) != ''
                   AND voiceover_text IS NOT NULL
+                  AND TRIM(voiceover_text) != ''
                 ORDER BY id DESC
                 LIMIT 1
                 """
@@ -248,6 +250,37 @@ class GeneratedContentRepository:
             video_script=str(row["video_script"] or "").strip(),
             voiceover_text=str(row["voiceover_text"] or "").strip(),
         )
+
+    def update_media_plan(
+            self,
+            content_id: int,
+            *,
+            video_script: str,
+            voiceover_text: str,
+    ) -> None:
+        """保存 ShortVideoPromptTask 生成的统一视频脚本和可配音文本。"""
+
+        normalized_video_script = video_script.strip()
+        normalized_voiceover_text = voiceover_text.strip()
+        if not normalized_video_script:
+            raise ValueError("视频脚本不能为空")
+        if not normalized_voiceover_text:
+            raise ValueError("配音文本不能为空")
+
+        with self.database_manager.connection() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE generated_contents
+                SET video_script = ?,
+                    voiceover_text = ?,
+                    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                WHERE id = ?
+                """,
+                (normalized_video_script, normalized_voiceover_text, content_id),
+            )
+
+        if cursor.rowcount != 1:
+            raise RuntimeError(f"未找到 generated_contents 记录：content_id={content_id}")
 
     def latest_for_storyboard_generation(self) -> GeneratedContentForStoryboard | None:
         """读取最新一条可生成短视频蓝图的内容记录。"""

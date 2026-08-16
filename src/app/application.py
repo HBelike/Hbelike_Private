@@ -95,7 +95,7 @@ class Application:
                 self.logger.info("应用退出")
 
     def run_manual_pipeline(self) -> list[TaskResult]:
-        """供管理员手动触发的完整流水线入口，返回每个 Task 的可审计结果。"""
+        """手动消费最近 GitHub 快照并生成内容，不在每次运行时重复搜索 GitHub。"""
 
         self.initialize()
         self._run_startup_self_check()
@@ -104,8 +104,18 @@ class Application:
             handler=self._run_once_pipeline_unlocked,
         )
 
+    def refresh_github_snapshot(self) -> TaskResult:
+        """显式刷新 GitHub 周榜快照；仅由定时任务或管理员刷新入口调用。"""
+
+        self.initialize()
+        results = self._run_exclusive_pipeline(
+            owner="github_snapshot_refresh",
+            handler=lambda: [self._run_task(SearchTask)],
+        )
+        return results[0]
+
     def _run_once_pipeline(self) -> list[TaskResult]:
-        """开发验证模式：按完整顺序执行一次当前所有任务。"""
+        """手动执行一次内容流水线，复用最近一次 GitHub 周榜快照。"""
 
         return self._run_exclusive_pipeline(
             owner="once_pipeline",
@@ -113,10 +123,10 @@ class Application:
         )
 
     def _run_once_pipeline_unlocked(self) -> list[TaskResult]:
-        """在已持有流水线锁的前提下按完整顺序执行所有任务。"""
+        """在已持有流水线锁时从 SummaryTask 开始消费现有周榜快照。"""
 
         task_classes: tuple[type[BaseTask], ...] = (
-            SearchTask, SummaryTask, ShortVideoPromptTask, ImageTask, AudioTask,
+            SummaryTask, ShortVideoPromptTask, ImageTask, AudioTask,
             VideoClipPlanTask, StorageTask, SeedanceClipTask, SeedanceClipStatusTask,
             VideoVisualQualityTask, SeedanceClipTask, SeedanceClipStatusTask,
             VideoNarrationTimelineTask, SegmentedAudioTask, VideoAssemblyTask,

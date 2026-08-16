@@ -8,14 +8,26 @@
 
 不在本次范围内：自动公开发布、视频内硬字幕烧录、云端对象存储的实际开通。公众号仍保留人工审核后进入草稿箱的边界。
 
+## 内容职责分层
+
+为避免一次 DeepSeek 调用同时生成长文章、五张图 Prompt、七段视频脚本和旁白而触发输出截断，当前链路按产物所有权拆分：
+
+- `SummaryTask`：只生成标题、摘要与深度文章，并从已校验文章中编译五份共享 `ContentBrief`。
+- `ShortVideoPromptTask`：基于 `ContentBrief` 生成渐进式讲稿、统一旁白与七段视频分镜，并回写 `video_script`、`voiceover_text`。
+- `ImageTask`：基于同一 `ContentBrief` 生成五张图片各自的 Ark 最终 Prompt，再调用 Seedream。
+- `VideoClipPlanTask`：把分镜翻译为 Seedance 分片计划，不重新总结项目事实。
+- `AudioTask`、`SeedanceClipTask`：只消费已生成的旁白与分片 Prompt，不承担内容创作。
+
+因此文章、图片、视频均引用同一份项目事实合同，但每个 Task 只生成自己负责的产物。`content_id` 继续作为全部正文、Prompt、分镜与媒体素材的隔离键。
+
 ## 运行调用链
 
 ```text
 Application
   -> SearchTask
-  -> SummaryTask
-  -> ShortVideoPromptTask
-  -> ImageTask
+  -> SummaryTask（文章 + ContentBrief）
+  -> ShortVideoPromptTask（讲稿 + 旁白 + 分镜）
+  -> ImageTask（图片最终 Prompt + 原始图片）
   -> VideoClipPlanTask
   -> AudioTask
   -> StorageTask

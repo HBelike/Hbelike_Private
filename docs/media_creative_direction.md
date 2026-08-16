@@ -23,12 +23,13 @@
 
 ## 数据合同
 
-`SummaryTask` 对每一个热门仓库保存：
+`SummaryTask` 的模型调用只生成 `title`、`digest` 和深度 `article_markdown`。文章通过完整性校验后，任务再从文章中确定性编译每个热门仓库的共享 `ContentBrief`：
 
 ```text
-summary_text
-raw_prompt
-prompt_stage = summary_storyboard_v2
+repository_full_name / rank
+summary_text / project_summary_text
+project_analysis_markdown
+prompt_stage = content_brief_v1
 visual_brief
   -> diagram_type / teaching_goal / visual_thesis
   -> nodes / relationships / reading_order / chinese_labels
@@ -38,25 +39,31 @@ video_brief
   -> camera / transition / audio_directive
 ```
 
-`ImageTask` 读取这份合同，将其编译成 `ark_final_v2` Prompt，并把最终 Prompt 与同一 `content_id` 的媒体素材 metadata 一起保存。预览页仅回填该 `content_id` 下的最终 Prompt；GitHub 或本地兜底素材不会伪装成 Ark 最终提示词。
+为兼容现有数据库，`ContentBrief` 暂时仍保存于 `generated_contents.image_prompts_json`，但它不是可直接提交给图片模型的最终 Prompt。它只承载文章、图片和视频共同依赖的事实、机制与视觉意图，避免三个任务各自重新理解项目后产生内容漂移。
 
-`ShortVideoPromptTask` 读取同一合同，生成七段 `scene_contract` 和每段可直接交给 Seedance 的 `seedance_scene_prompt`。`VideoClipPlanTask` 必须原样保留这份详细 Prompt，只追加连续性与全局负面约束，不能再次压缩成旧的通用模板。
+`ImageTask` 读取 `ContentBrief`，将其编译成 `ark_final_v2` Prompt，并把最终 Prompt 与同一 `content_id` 的媒体素材 metadata 一起保存。预览页仅回填该 `content_id` 下的最终 Prompt；GitHub 或本地兜底素材不会伪装成 Ark 最终提示词。
+
+`ShortVideoPromptTask` 读取同一 `ContentBrief`，独立生成渐进式讲稿、统一旁白、七段 `scene_contract` 和每段可直接交给 Seedance 的 `seedance_scene_prompt`，再把讲稿与旁白回写当前内容记录。`VideoClipPlanTask` 必须原样保留这份详细 Prompt，只追加连续性与全局负面约束，不能再次压缩成旧的通用模板。
 
 ## 调用链
 
 ```text
 main.py
   -> SummaryTask
+     -> DeepSeek（仅标题、摘要、深度文章）
      -> MediaCreativeBriefService.normalize_visual_brief()
      -> MediaCreativeBriefService.normalize_video_brief()
      -> GeneratedContentRepository
+  -> ShortVideoPromptTask
+     -> DeepSeek（渐进式讲稿与七段分镜）
+     -> GeneratedContentRepository.update_media_plan()
+     -> MediaCreativeBriefService.build_hyperframes_blueprint()
+     -> VideoStoryboardRepository
   -> ImageTask
+     -> ContentBrief
      -> ImagePromptDesignService.build_project_architecture_prompt()
      -> Ark Seedream（仅在显式运行图片任务时）
      -> MediaAssetRepository
-  -> ShortVideoPromptTask
-     -> MediaCreativeBriefService.build_hyperframes_blueprint()
-     -> VideoStoryboardRepository
   -> VideoClipPlanTask
      -> VideoClipPlanRepository
   -> 人工审核通过后

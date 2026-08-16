@@ -72,6 +72,7 @@ class SkillSearchRequest(BaseModel):
     """技能库搜索接口的请求体。"""
 
     query: str = Field(default="", max_length=300)
+    force_refresh: bool = False
 
 
 class SkillSaveRequest(BaseModel):
@@ -180,6 +181,9 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             "status_message": result.status_message,
             "cache_hit": result.cache_hit,
             "elapsed_ms": result.elapsed_ms,
+            "snapshot_at": result.snapshot_at,
+            "cache_state": result.cache_state,
+            "data_source": result.data_source,
         }
 
     def skill_save_payload(result: SkillSaveResult) -> dict[str, Any]:
@@ -282,7 +286,10 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     def search_skills(request: SkillSearchRequest) -> dict[str, Any]:
         """按 find-skills 思路检索 GitHub 开放 Skill，超时回退本地结果。"""
 
-        result = skill_library_service.search_skills(query=request.query)
+        result = skill_library_service.search_skills(
+            query=request.query,
+            force_refresh=request.force_refresh,
+        )
         return skill_search_payload(result)
 
     @app.post("/api/skills/save")

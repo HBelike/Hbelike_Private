@@ -6,10 +6,30 @@ const loadingRuns = ref(true)
 const errorMessage = ref('')
 const successMessage = ref('')
 const pipelineRuns = ref([])
+const githubSnapshot = ref(null)
+const snapshotLoading = ref(true)
+const snapshotError = ref('')
 let pipelinePollTimer = null
 
-onMounted(loadPipelineRuns)
+onMounted(() => {
+  void loadPipelineRuns()
+  void loadGithubSnapshot()
+})
 onBeforeUnmount(stopPipelinePolling)
+
+async function loadGithubSnapshot() {
+  snapshotLoading.value = true
+  snapshotError.value = ''
+  try {
+    const response = await fetch('/api/admin/github-snapshot', { credentials: 'include', cache: 'no-store' })
+    if (!response.ok) throw new Error(await responseError(response, '无法读取 GitHub 热门项目快照'))
+    githubSnapshot.value = (await response.json()).item ?? null
+  } catch (error) {
+    snapshotError.value = error instanceof Error ? error.message : '无法读取 GitHub 热门项目快照'
+  } finally {
+    snapshotLoading.value = false
+  }
+}
 
 /**
  * 读取管理员手动运行记录，并依据是否存在活跃任务决定是否继续轮询。
@@ -98,6 +118,13 @@ function pipelineTime(value) {
   return date.toLocaleString('zh-CN', { hour12: false })
 }
 
+function snapshotTime(value) {
+  if (!value) return '暂无更新时间'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return String(value)
+  return date.toLocaleString('zh-CN', { hour12: false })
+}
+
 async function responseError(response, fallback) {
   try {
     const payload = await response.json()
@@ -114,7 +141,7 @@ async function responseError(response, fallback) {
       <div>
         <p class="eyebrow">Manual run</p>
         <h2 id="manual-pipeline-title">手动运行本周工作流</h2>
-        <p>按当前已保存的配置依次执行选题、总结、图片、视频蓝图、排版和草稿创建。</p>
+        <p>读取最近一次 GitHub 周榜快照，依次执行总结、图片、视频蓝图、排版和草稿创建；不会自动请求 GitHub。</p>
       </div>
       <span class="manual-pipeline-badge" :class="{ running: runningPipeline }">
         {{ runningPipeline ? '任务运行中' : '管理员操作' }}
@@ -123,9 +150,25 @@ async function responseError(response, fallback) {
 
     <div v-if="errorMessage" class="manual-pipeline-alert danger" role="alert">{{ errorMessage }}</div>
     <div v-if="successMessage" class="manual-pipeline-alert success" role="status">{{ successMessage }}</div>
+    <div class="manual-snapshot-summary">
+      <strong>本次使用的 GitHub 快照</strong>
+      <span v-if="snapshotLoading">正在读取…</span>
+      <template v-else-if="githubSnapshot">
+        <span>{{ githubSnapshot.week_start }} 至 {{ githubSnapshot.week_end }}</span>
+        <span>{{ githubSnapshot.project_count }} 个项目</span>
+        <span>更新于 {{ snapshotTime(githubSnapshot.updated_at) }}</span>
+      </template>
+      <span v-else>暂无快照，请先到管理台点击“刷新 GitHub 热门项目”。</span>
+    </div>
+    <div v-if="snapshotError" class="manual-pipeline-alert danger" role="alert">{{ snapshotError }}</div>
 
     <div class="manual-pipeline-actions">
-      <button class="refresh-button" type="button" :disabled="runningPipeline" @click="startPipeline">
+      <button
+        class="refresh-button"
+        type="button"
+        :disabled="runningPipeline || snapshotLoading || !githubSnapshot"
+        @click="startPipeline"
+      >
         {{ runningPipeline ? '完整流程运行中…' : '运行完整流程' }}
       </button>
       <button class="secondary-button" type="button" :disabled="loadingRuns" @click="loadPipelineRuns">

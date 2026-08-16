@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -136,7 +138,27 @@ def main() -> int:
         second = service.search_skills("sample")
         assert first.items and not first.cache_hit
         assert second.items and second.cache_hit
+        assert second.cache_state == "fresh"
         assert remote_calls == 1
+
+        # 过期快照仍可读取，普通搜索不得因此再次访问 GitHub。
+        cache_payload = json.loads(service.open_skill_cache_path.read_text(encoding="utf-8"))
+        cache_record = next(iter(cache_payload["entries"].values()))
+        cache_record["created_at"] = (datetime.now(UTC) - timedelta(hours=7)).isoformat()
+        service.open_skill_cache_path.write_text(
+            json.dumps(cache_payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        stale = service.search_skills("  SAMPLE  ")
+        assert stale.items and stale.cache_hit
+        assert stale.cache_state == "stale"
+        assert remote_calls == 1
+
+        # 只有显式刷新才允许绕过快照并重新请求 GitHub。
+        refreshed = service.search_skills("sample", force_refresh=True)
+        assert refreshed.items and not refreshed.cache_hit
+        assert refreshed.cache_state == "live"
+        assert remote_calls == 2
 
     print("skill_search_performance_ok")
     return 0

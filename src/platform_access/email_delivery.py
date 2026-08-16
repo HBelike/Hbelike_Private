@@ -51,6 +51,7 @@ class ResendEmailDelivery:
 
         subject = "职业智能工作台验证码"
         purpose_label = {
+            "login": "登录平台",
             "register": "完成注册",
             "bootstrap": "初始化管理员账号",
             "bind_email": "绑定登录邮箱",

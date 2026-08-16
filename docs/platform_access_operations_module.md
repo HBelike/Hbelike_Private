@@ -6,7 +6,7 @@
 
 ## 方案与取舍
 
-- **身份与会话**：PostgreSQL 保存账号、邮箱身份、角色和会话摘要，浏览器只保存 HttpOnly Cookie。密码使用标准库 `scrypt` 加盐散列；验证码使用服务端 HMAC 摘要，不保存明文密码、验证码或 API Key。
+- **身份与会话**：PostgreSQL 保存账号、邮箱身份、角色和会话摘要，浏览器只保存 HttpOnly Cookie。登录页支持“邮箱 + 验证码”和“邮箱 + 密码”两种入口，两者验证成功后共用同一套服务端会话。密码使用标准库 `scrypt` 加盐散列；验证码使用服务端 HMAC 摘要，不保存明文密码、验证码或 API Key。
 - **注册与角色**：首个管理员通过邮箱验证码 bootstrap；其余用户可公开注册并默认获得 `viewer`。`viewer` 只能查看，`operator` 可执行人工导入和手动任务，`admin` 可管理账号、运行配置与 LangSmith 观测。存量管理员可先按旧用户名登录，再绑定邮箱。
 - **会话策略**：每次有效请求将空闲会话续至最多 7 天，但任何会话从登录时起最长 30 天；密码重置会撤销该账号的全部旧会话。
 - **邮件投递**：验证码使用 Resend HTTP API；服务端只读取 `RESEND_API_KEY`、`RESEND_FROM_ADDRESS` 与 `PLATFORM_EMAIL_CODE_SECRET`。验证码有效 10 分钟、60 秒发送冷却、最多 5 次输入尝试。
@@ -21,6 +21,7 @@
 LoginPage
   -> /api/auth/bootstrap-status
   -> /api/auth/bootstrap/send-code | /api/auth/register/send-code
+  -> /api/auth/email-login/send-code | /api/auth/email-login/verify
   -> /api/auth/*/verify | /api/auth/login
   -> HttpOnly platform_session Cookie
   -> /api/auth/me
@@ -52,3 +53,11 @@ LoginPage
 - **调用链**：`LoginPage.vue` 根据 `/login`、`/register`、`/forgot-password` 选择表单状态，仍调用原有 `/api/auth/*` 接口；本次没有修改认证协议、数据表或邮件投递逻辑。
 - **验证结果**：本地桌面端三条认证路由完成视觉检查；`390×844` 登录页无横向溢出，前端控制台无 error，`npm run build` 与 `git diff --check` 通过。
 - **发布边界**：当前调整只在本地工作区验证，未提交、未推送、未更新生产环境；需在用户明确授权后再发布。
+
+## 登录双通道调整（2026-08-16）
+
+- **设计目标**：登录入口允许用户在“邮箱 + 验证码”和“邮箱 + 密码”之间直接切换，注册与密码找回继续使用原有独立入口。
+- **技术取舍**：验证码登录只新增发送与校验接口，校验成功后复用现有 `platform_session` 会话；前端始终展示邮箱和 6 位验证码输入框，将“获取验证码”和“登录”拆成两个独立动作，避免发送失败时用户无处输入验证码。数据库迁移 `20260816_09` 仅把 `platform_email_challenges.purpose` 的允许值扩展为包含 `login`。
+- **调用链**：`LoginPage.vue -> /api/auth/email-login/send-code -> PlatformAccessService.send_login_code() -> ResendEmailDelivery`；校验阶段为 `LoginPage.vue -> /api/auth/email-login/verify -> PlatformAccessService.authenticate_with_code() -> platform_session Cookie`。
+- **验证结果**：本地 PostgreSQL 已升级至 `20260816_09`；真实发送接口向 QQ 邮箱返回 `accepted=true`，认证接口契约脚本、Python 编译检查和前端生产构建通过；桌面端两种方式切换正常，`390×844` 手机视口无横向溢出，浏览器控制台无错误。
+- **功能边界**：本次未修改注册、密码重置、角色授权和生产部署配置，改动仅保留在本地工作区。

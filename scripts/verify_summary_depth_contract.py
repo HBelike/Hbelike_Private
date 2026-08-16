@@ -1,15 +1,18 @@
-"""离线验证 SummaryTask 的长文深度合同与视频证据传递。
+"""离线验证 SummaryTask 的长文合同、共享 ContentBrief 与视频证据传递。
 
 本脚本不读取 API Key、不调用 GitHub 或 DeepSeek。它只验证：
 1. Top 5 每个项目都必须有至少 500 个中文字符的技术拆解；
 2. 每个项目必须包含固定分析标签和真实 stars / 本周增长数字；
-3. 重试提示词不会再把长文错误地压缩成短文；
-4. 短视频任务会读取每个项目的证据卡，而不是只截取正文前 1800 字符。
+3. SummaryTask 只请求文章字段，不再同时索要图、视频和旁白；
+4. 短视频任务会读取每个项目的证据卡，并生成同源旁白。
 """
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from pathlib import Path
+import logging
+import sqlite3
 import sys
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -17,7 +20,10 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.providers.github_client import GitHubRepositoryEvidence
-from src.repositories.generated_content_repository import GeneratedContentForStoryboard
+from src.repositories.generated_content_repository import (
+    GeneratedContentForStoryboard,
+    GeneratedContentRepository,
+)
 from src.repositories.weekly_ranking_repository import WeeklyRankingRecord
 from src.tasks.short_video_prompt_task import ShortVideoPromptTask
 from src.tasks.summary_task import SummaryTask
@@ -137,6 +143,7 @@ def main() -> None:
     rankings = build_rankings()
     evidence = build_evidence(rankings)
     task = object.__new__(SummaryTask)
+    task.logger = logging.getLogger("verify_summary_depth_contract")
     article = build_article(rankings)
 
     project_sections = task._validate_article_depth(
@@ -188,6 +195,9 @@ def main() -> None:
     assert "不少于 500 个中文字符" in main_prompt
     assert "source_evidence" in main_prompt
     assert "article_markdown 1900 字以内" not in main_prompt
+    assert "JSON 只能包含 title、digest、article_markdown 三个字段" in main_prompt
+    assert "video_script 必须" not in main_prompt
+    assert "image_prompts 必须" not in main_prompt
 
     retry_messages = task._build_retry_messages(
         rankings=rankings,
@@ -198,6 +208,23 @@ def main() -> None:
     retry_prompt = retry_messages[-1].content
     assert "不要缩短项目拆解" in retry_prompt
     assert "1600字以内" not in retry_prompt
+    assert "字段必须只有以下三个" in retry_prompt
+    assert "voiceover_text:" not in retry_prompt
+
+    normalized = task._normalize_model_output(
+        parsed={
+            "title": "离线长文合同验证",
+            "digest": "验证文章阶段只产出事实正文，并确定性构造下游共享内容简报。",
+            "article_markdown": article,
+        },
+        rankings=rankings,
+        highest_star_repository=rankings[0],
+        ranking_evidence=evidence,
+    )
+    assert set(normalized) == {"title", "digest", "article_markdown", "image_prompts"}
+    assert len(normalized["image_prompts"]) == len(rankings)
+    assert all(item["prompt_stage"] == "content_brief_v1" for item in normalized["image_prompts"])
+    assert all(item["project_analysis_markdown"] for item in normalized["image_prompts"])
 
     content = GeneratedContentForStoryboard(
         id=1,
@@ -207,22 +234,67 @@ def main() -> None:
         article_markdown=article,
         video_script="离线验证脚本。",
         voiceover_text="离线验证脚本。",
-        image_prompts=[
-            {
-                "repository_full_name": item.full_name,
-                "summary_text": f"图 {index} 用于解释第 {index} 个项目的工程关系。",
-                "project_analysis_markdown": project_sections[item.full_name],
-                "visual_brief": {},
-                "video_brief": {},
-            }
-            for index, item in enumerate(rankings, start=1)
-        ],
+        image_prompts=normalized["image_prompts"],
     )
     video_task = object.__new__(ShortVideoPromptTask)
     video_prompt = video_task._build_script_messages(content=content, video_instruction="")[-1].content
     assert "project_evidence_card" in video_prompt
     assert "example-org/project-5" in video_prompt
     assert "文章正文：" not in video_prompt
+
+    voiceover = video_task._build_voiceover_text(
+        {
+            "scenes": [
+                {"narration": "先看本周主线。"},
+                {"narration": "再解释第一个项目。"},
+                {"narration": "最后收束工程启发。"},
+            ],
+            "progressive_script": "不应使用这条兜底文本。",
+        }
+    )
+    assert voiceover == "先看本周主线。\n再解释第一个项目。\n最后收束工程启发。"
+
+    # SummaryTask 创建记录时媒体字段为空；只有 ShortVideoPromptTask 回写后，
+    # 后续 AudioTask / VideoTask 才能读取该内容，避免误用旧脚本。
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE generated_contents (
+            id INTEGER PRIMARY KEY,
+            week_end TEXT NOT NULL,
+            title TEXT NOT NULL,
+            video_script TEXT,
+            voiceover_text TEXT,
+            updated_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO generated_contents (id, week_end, title, video_script, voiceover_text)
+        VALUES (1, '2026-08-14', '离线媒体计划验证', '', '')
+        """
+    )
+
+    class InMemoryDatabaseManager:
+        @contextmanager
+        def connection(self):
+            yield conn
+            conn.commit()
+
+    content_repository = GeneratedContentRepository(InMemoryDatabaseManager())
+    assert content_repository.latest_for_video_generation() is None
+    content_repository.update_media_plan(
+        1,
+        video_script="渐进式视频讲稿。",
+        voiceover_text="统一旁白文本。",
+    )
+    media_plan = content_repository.latest_for_video_generation()
+    assert media_plan is not None
+    assert media_plan.video_script == "渐进式视频讲稿。"
+    assert media_plan.voiceover_text == "统一旁白文本。"
+    conn.close()
 
     print(
         "摘要深度合同验证通过："

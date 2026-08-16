@@ -112,6 +112,29 @@ class PlatformAccessService:
             raise PermissionError("邮箱或密码不正确")
         return self._create_session(user)
 
+    def send_login_code(self, *, email: str) -> dict[str, object]:
+        """向已注册且可用的邮箱账号发送一次性登录验证码。"""
+
+        normalized_email = normalize_email(email)
+        candidate = self._repository.find_user_by_email(normalized_email)
+        if candidate is None or not candidate[0].is_active or candidate[0].email_verified_at is None:
+            raise PermissionError("该邮箱尚未注册或未完成验证")
+        return self._send_challenge(
+            email=normalized_email,
+            purpose="login",
+            payload={"user_id": str(candidate[0].id)},
+        )
+
+    def authenticate_with_code(self, *, challenge_id: str, code: str) -> AuthenticatedSession:
+        """消费邮箱登录验证码并创建与密码登录相同的平台会话。"""
+
+        challenge = self._consume_challenge(challenge_id=challenge_id, purpose="login", code=code)
+        user_id = str(challenge["payload"].get("user_id", ""))
+        candidate = self._repository.find_user_by_email(str(challenge["email"]))
+        if candidate is None or str(candidate[0].id) != user_id or not candidate[0].is_active:
+            raise PermissionError("登录验证码对应的账号不可用")
+        return self._create_session(candidate[0])
+
     def send_bind_email_code(self, *, user: PlatformUser, email: str) -> dict[str, object]:
         """为旧用户名账号补充邮箱，方便后续使用统一邮箱登录。"""
 

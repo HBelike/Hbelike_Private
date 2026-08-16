@@ -64,6 +64,11 @@ class ShortVideoPromptTask(BaseTask):
                 status="ready",
             )
         )
+        content_repository.update_media_plan(
+            content.id,
+            video_script=normalized["progressive_script"],
+            voiceover_text=self._build_voiceover_text(normalized),
+        )
 
         self.logger.info(
             "短视频蓝图已生成：content_id=%s storyboard_id=%s scenes=%s fallback=%s",
@@ -85,6 +90,21 @@ class ShortVideoPromptTask(BaseTask):
             "skipped": False,
             "network_called": not fallback_used,
         }
+
+    @staticmethod
+    def _build_voiceover_text(storyboard: dict[str, Any]) -> str:
+        """按分镜顺序汇总旁白，保证 TTS 与视频蓝图使用同一套语义。"""
+
+        scenes = storyboard.get("scenes", [])
+        narrations = [
+            str(scene.get("narration", "")).strip()
+            for scene in scenes
+            if isinstance(scene, dict) and str(scene.get("narration", "")).strip()
+        ]
+        voiceover_text = "\n".join(narrations).strip()
+        if voiceover_text:
+            return voiceover_text
+        return str(storyboard.get("progressive_script", "")).strip()
 
     def _generate_normalized_storyboard(
         self,

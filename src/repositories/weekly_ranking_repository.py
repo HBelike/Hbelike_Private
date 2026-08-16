@@ -128,6 +128,35 @@ class WeeklyRankingRepository:
             return None
         return str(row["week_end"])
 
+    def latest_snapshot_status(self) -> dict[str, Any] | None:
+        """返回最近周榜快照的时间、所属周和项目数，供页面说明数据来源。"""
+
+        with self.database_manager.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    week_start,
+                    week_end,
+                    MAX(created_at) AS updated_at,
+                    COUNT(*) AS project_count
+                FROM weekly_rankings
+                WHERE week_end = (
+                    SELECT MAX(week_end)
+                    FROM weekly_rankings
+                )
+                GROUP BY week_start, week_end
+                """
+            ).fetchone()
+
+        if row is None:
+            return None
+        return {
+            "week_start": str(row["week_start"]),
+            "week_end": str(row["week_end"]),
+            "updated_at": str(row["updated_at"]),
+            "project_count": int(row["project_count"]),
+        }
+
     def count_all(self) -> int:
         """统计 weekly_rankings 表记录数。"""
         with self.database_manager.connection() as conn:

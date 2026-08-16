@@ -96,7 +96,9 @@ GITHUB_TOKEN=你的新 GitHub Token
 
 用途：
 
-- `SummaryTask` 生成公众号标题、摘要、正文、图片 prompt、视频脚本和旁白文本；
+- `SummaryTask` 生成公众号标题、摘要、深度正文和共享 `ContentBrief`；
+- `ShortVideoPromptTask` 基于 `ContentBrief` 生成渐进式视频讲稿、统一旁白和七段分镜；
+- `ImageTask` 基于同一 `ContentBrief` 生成 Ark 最终图片 Prompt；
 - 当前代码读取 `DEEPSEEK_API_KEY`；
 - 模型名配置为 `deepseek-v4-pro`。
 

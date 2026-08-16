@@ -6,7 +6,7 @@ import os
 from datetime import datetime
 from pathlib import Path
 from threading import Lock
-from typing import Annotated
+from typing import Annotated, Any
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response, status
@@ -14,12 +14,16 @@ from pydantic import BaseModel, Field
 from sqlalchemy.exc import SQLAlchemyError
 
 from src.career_assistant.persistence.database import CareerDatabase
+from src.app.application import Application
+from src.config.config_manager import ConfigManager
+from src.database.database_manager import DatabaseManager
 from src.observability.langsmith_runtime import is_langsmith_enabled
 from src.platform_access.contracts import PlatformRole, PlatformUser, SessionResolution
 from src.platform_access.email_delivery import ResendEmailDelivery, ResendEmailSettings
 from src.platform_access.repository import PlatformAccessRepository
 from src.platform_access.pipeline_runner import ManualPipelineRunner
 from src.platform_access.service import AuthenticatedSession, PlatformAccessService
+from src.repositories.weekly_ranking_repository import WeeklyRankingRepository
 
 
 SESSION_COOKIE_NAME = "platform_session"
@@ -81,6 +85,12 @@ class LoginRequest(BaseModel):
 
     identity: str = Field(min_length=3, max_length=254)
     password: str = Field(min_length=1, max_length=256)
+
+
+class EmailLoginRequest(BaseModel):
+    """邮箱验证码登录的第一步。"""
+
+    email: str = Field(min_length=3, max_length=254)
 
 
 class BindEmailRequest(BaseModel):
@@ -317,6 +327,31 @@ def login(payload: LoginRequest, request: Request, response: Response) -> dict[s
     return {"user": _serialize_user(session.user)}
 
 
+@router.post("/api/auth/email-login/send-code")
+def send_email_login_code(payload: EmailLoginRequest, request: Request) -> dict[str, object]:
+    """向已注册邮箱投递一次性登录验证码。"""
+
+    try:
+        return get_platform_access_service(request).send_login_code(email=payload.email)
+    except (PermissionError, ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.post("/api/auth/email-login/verify")
+def verify_email_login_code(payload: VerifyEmailCodeRequest, request: Request, response: Response) -> dict[str, object]:
+    """确认邮箱登录验证码并写入正常平台会话。"""
+
+    try:
+        session = get_platform_access_service(request).authenticate_with_code(
+            challenge_id=payload.challenge_id,
+            code=payload.code,
+        )
+    except (PermissionError, ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
+    _set_session_cookie(response, request, session)
+    return {"user": _serialize_user(session.user)}
+
+
 @router.post("/api/auth/email/bind/send-code")
 def send_bind_email_code(
     payload: BindEmailRequest,
@@ -413,6 +448,46 @@ def save_pipeline_config(
     return {"item": item}
 
 
+@router.get("/api/admin/github-snapshot")
+def get_github_snapshot(
+    request: Request,
+    user: Annotated[PlatformUser, Depends(require_admin)],
+) -> dict[str, object]:
+    """返回当前内容工作流会消费的最近 GitHub 周榜快照。"""
+
+    del user
+    return {"item": _load_github_snapshot_status(request.app.state.platform_access_project_root)}
+
+
+@router.post("/api/admin/github-snapshot/refresh")
+def refresh_github_snapshot(
+    request: Request,
+    user: Annotated[PlatformUser, Depends(require_admin)],
+) -> dict[str, object]:
+    """由管理员显式触发一次 GitHub 搜索，并用结果覆盖本周周榜快照。"""
+
+    service = get_platform_access_service(request)
+    config_item = service.get_pipeline_config(user)
+    runtime_config = config_item.get("config", {}) if isinstance(config_item, dict) else {}
+    if not isinstance(runtime_config, dict):
+        runtime_config = {}
+    try:
+        result = Application(
+            request.app.state.platform_access_project_root,
+            runtime_config=runtime_config,
+        ).refresh_github_snapshot()
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return {
+        "item": _load_github_snapshot_status(request.app.state.platform_access_project_root),
+        "task": {
+            "task_name": result.task_name,
+            "run_id": result.run_id,
+            "metadata": result.metadata,
+        },
+    }
+
+
 @router.post("/api/admin/pipeline-runs")
 def start_manual_pipeline(
     payload: ManualPipelineRequest,
@@ -421,6 +496,12 @@ def start_manual_pipeline(
 ) -> dict[str, object]:
     """登记并异步启动一次完整内容流水线，HTTP 响应不等待外部模型调用完成。"""
 
+    snapshot = _load_github_snapshot_status(request.app.state.platform_access_project_root)
+    if snapshot is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="尚无 GitHub 热门项目快照，请先到管理台点击“刷新 GitHub 热门项目”。",
+        )
     idempotency_key = payload.client_request_id or str(uuid4())
     try:
         item = get_manual_pipeline_runner(request).request_run(user, idempotency_key=idempotency_key)
@@ -453,6 +534,15 @@ def observability_status(
         "privacy_mode": "metadata_only",
         "role": user.role.value,
     }
+
+
+def _load_github_snapshot_status(project_root: Path) -> dict[str, Any] | None:
+    """从既有 SQLite 周榜表读取快照元数据，不触发任何 GitHub 网络请求。"""
+
+    config = ConfigManager(project_root=project_root).load()
+    database = DatabaseManager(config=config)
+    database.initialize()
+    return WeeklyRankingRepository(database_manager=database).latest_snapshot_status()
 
 
 def _serialize_user(user: PlatformUser) -> dict[str, object]:
