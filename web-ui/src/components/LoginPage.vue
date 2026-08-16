@@ -553,12 +553,13 @@ function readableError(error, fallback) {
               <button class="login-submit" type="submit" :disabled="submitting">{{ submitting ? '正在处理中…' : primaryLabel }}</button>
             </form>
 
+            <div v-if="!requiresBootstrap && mode === 'login' && publicRegistrationEnabled" class="login-register-entry">
+              <span>第一次使用职业工作台？</span>
+              <button type="button" @click="switchMode('register')">创建新账号</button>
+            </div>
+
             <div class="login-switches">
-              <template v-if="!requiresBootstrap && mode === 'login' && publicRegistrationEnabled">
-                <span>还没有账号？</span>
-                <button type="button" @click="switchMode('register')">创建账号</button>
-              </template>
-              <template v-else-if="!requiresBootstrap && mode === 'register' && !verificationStage">
+              <template v-if="!requiresBootstrap && mode === 'register' && !verificationStage">
                 <span>已有账号？</span>
                 <button type="button" @click="switchMode('login')">登录</button>
               </template>

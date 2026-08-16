@@ -514,6 +514,33 @@ body.auth-page-active {
 }
 .login-cli-bootstrap .login-hint { color: #738364; }
 .login-footer { margin-top: 30px; text-align: center; }
+.login-register-entry {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 16px;
+  margin-top: 18px;
+  border-top: 1px solid #e3eadc;
+  padding-top: 18px;
+  color: #687564;
+  font-size: 13px;
+}
+.login-register-entry button {
+  min-height: 38px;
+  border: 1px solid #bfd39d;
+  border-radius: 9px;
+  background: #f5faec;
+  padding: 0 15px;
+  color: #4d7427;
+  font-size: 13px;
+  font-weight: 800;
+  transition: border-color 0.18s ease, background-color 0.18s ease, transform 0.18s ease;
+}
+.login-register-entry button:hover {
+  border-color: #8fb650;
+  background: #edf6dd;
+  transform: translateY(-1px);
+}
 .login-switches {
   display: flex;
   flex-wrap: wrap;
@@ -535,6 +562,7 @@ body.auth-page-active {
 .login-submit:focus-visible,
 .login-code-send:focus-visible,
 .login-method-tabs button:focus-visible,
+.login-register-entry button:focus-visible,
 .login-switches button:focus-visible,
 .login-label-row button:focus-visible {
   outline: 3px solid rgba(111, 148, 55, 0.26);
@@ -633,6 +661,15 @@ body.auth-page-active {
 
   .login-footer {
     margin-top: 14px;
+  }
+
+  .login-register-entry {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
+  .login-register-entry button {
+    width: 100%;
   }
 
   .login-mobile-brand {
