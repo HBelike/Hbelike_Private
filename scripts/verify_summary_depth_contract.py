@@ -1,9 +1,9 @@
 """离线验证 SummaryTask 的长文合同、共享 ContentBrief 与视频证据传递。
 
 本脚本不读取 API Key、不调用 GitHub 或 DeepSeek。它只验证：
-1. Top 5 每个项目都必须有至少 500 个中文字符的技术拆解；
-2. 每个项目必须包含固定分析标签和真实 stars / 本周增长数字；
-3. SummaryTask 只请求文章字段，不再同时索要图、视频和旁白；
+1. 动态 Top N 的每个项目都必须包含固定分析标签和真实 stars / 本周增长数字；
+2. 项目章节不再要求至少 500 个中文字符，技术深度改由结构与事实合同保证；
+3. SummaryTask 只请求文章字段，并在 system message 挂载项目写作 Skill；
 4. 短视频任务会读取每个项目的证据卡，并生成同源旁白。
 """
 
@@ -29,8 +29,8 @@ from src.tasks.short_video_prompt_task import ShortVideoPromptTask
 from src.tasks.summary_task import SummaryTask
 
 
-def build_rankings() -> list[WeeklyRankingRecord]:
-    """构造五条与真实周榜字段一致的离线样本。"""
+def build_rankings(count: int = 5) -> list[WeeklyRankingRecord]:
+    """按动态数量构造与真实周榜字段一致的离线样本。"""
 
     return [
         WeeklyRankingRecord(
@@ -46,7 +46,7 @@ def build_rankings() -> list[WeeklyRankingRecord]:
             score=0.9,
             reason="离线合同验证样本",
         )
-        for index in range(1, 6)
+        for index in range(1, count + 1)
     ]
 
 
@@ -71,7 +71,7 @@ def build_evidence(rankings: list[WeeklyRankingRecord]) -> dict[str, GitHubRepos
 
 
 def build_project_section(item: WeeklyRankingRecord, index: int) -> str:
-    """构造一个满足深度合同的项目正文，供纯离线断言使用。"""
+    """构造结构与事实完整、但不足 500 个中文字符的项目正文。"""
 
     labels_and_text = [
         (
@@ -106,30 +106,26 @@ def build_project_section(item: WeeklyRankingRecord, index: int) -> str:
         ),
     ]
     body = "\n\n".join(f"**{label}** {text}" for label, text in labels_and_text)
-    while SummaryTask._count_chinese_characters(body) < 530:
-        body += (
-            "\n\n补充说明：这不是为了拉长篇幅，而是要把判断、证据、机制和边界放在同一段可复核的解释中，"
-            "让读者能够据此决定是否继续查看源码与文档。"
-        )
+    assert SummaryTask._count_chinese_characters(body) < 500
     return f"#### 项目 {index}：{item.full_name}\n\n{body}"
 
 
 def build_article(rankings: list[WeeklyRankingRecord]) -> str:
-    """拼出满足 Top 5 固定标题顺序的离线长文。"""
+    """按输入项目数量拼出满足固定标题顺序的离线文章。"""
 
     mainline = (
         "本周的共同信号不是某个模型突然变强，而是越来越多仓库把输入、流程、反馈和人工判断拆成可观察的工程对象。"
         "这类变化对开发者更有价值，因为工具是否能进入团队，取决于它能否被接入、复核、回滚和持续维护。"
     )
     conclusion = (
-        "把五个项目放在一起看，最值得带走的不是立刻替换现有工具，而是先确认团队缺失的是哪一段可观察的流程。"
+        "把这些项目放在一起看，最值得带走的不是立刻替换现有工具，而是先确认团队缺失的是哪一段可观察的流程。"
         "只要输入、责任边界和失败处理还不清楚，再强的模型也只会把不确定性搬到更难排查的地方。"
     )
     return "\n\n".join(
         [
             "### 本周主线",
             mainline,
-            "### Top 5 项目拆解",
+            f"### Top {len(rankings)} 项目拆解",
             *[build_project_section(item, index) for index, item in enumerate(rankings, start=1)],
             "### 工程启发",
             conclusion,
@@ -151,11 +147,21 @@ def main() -> None:
         rankings=rankings,
         ranking_evidence=evidence,
     )
-    assert len(project_sections) == 5
+    assert len(project_sections) == len(rankings)
     assert all(
-        task._count_chinese_characters(section) >= SummaryTask.min_project_section_chinese_characters
+        task._count_chinese_characters(section) < 500
         for section in project_sections.values()
     )
+
+    # 工作台可配置任意 Top N；用非默认数量验证标题、章节和校验器都不依赖 5。
+    compact_rankings = build_rankings(count=3)
+    compact_evidence = build_evidence(compact_rankings)
+    compact_sections = task._validate_article_depth(
+        article_markdown=build_article(compact_rankings),
+        rankings=compact_rankings,
+        ranking_evidence=compact_evidence,
+    )
+    assert len(compact_sections) == len(compact_rankings)
 
     # 周榜真实数值允许使用中文技术文章常见的千分位展示，不能因 143,902
     # 与数据库整数 143902 的格式差异让 SummaryTask 误失败；但近似单位
@@ -167,32 +173,38 @@ def main() -> None:
     assert not task._contains_exact_ranking_number("本周新增约 1.3k", 1281)
 
     first_item = rankings[0]
-    # 保持整篇文章总长度足够，只让第一个项目短到不合格；这样可以精确验证
-    # “每个项目至少 500 个中文字符”的约束，而不是误触发整篇文章长度下限。
-    shallow_article = article.replace(
+    # 章节可以短于 500 字，但不能丢失固定分析结构。
+    incomplete_article = article.replace(
         project_sections[first_item.full_name],
-        "**本周判断** 内容不足。",
-    ) + "\n\n" + ("总体质量校验补充说明。" * 80)
+        (
+            f"**本周判断** {first_item.full_name} 当前 stars 为 {first_item.current_stars}，"
+            f"本周新增 {first_item.star_growth}，这一段故意缺少其余标签以验证结构合同。"
+        ),
+    )
     try:
         task._validate_article_depth(
-            article_markdown=shallow_article,
+            article_markdown=incomplete_article,
             rankings=rankings,
             ranking_evidence=evidence,
         )
     except ValueError as exc:
         assert "项目 1" in str(exc)
-        assert "不足" in str(exc)
+        assert "缺少技术拆解标签" in str(exc)
     else:
-        raise AssertionError("短项目正文必须被质量合同拒绝")
+        raise AssertionError("缺少固定标签的项目正文必须被质量合同拒绝")
 
+    article_skill_instructions = "# GitHub 项目文章\n\n只根据输入证据写作，并解释技术机制。"
     messages = task._build_messages(
         rankings=rankings,
         week_end="2026-08-14",
         highest_star_repository=rankings[0],
         ranking_evidence=evidence,
+        article_skill_instructions=article_skill_instructions,
     )
+    assert article_skill_instructions in messages[0].content
     main_prompt = messages[-1].content
-    assert "不少于 500 个中文字符" in main_prompt
+    assert "不少于 500 个中文字符" not in main_prompt
+    assert "全文中文字符数不得超过" in main_prompt
     assert "source_evidence" in main_prompt
     assert "article_markdown 1900 字以内" not in main_prompt
     assert "JSON 只能包含 title、digest、article_markdown 三个字段" in main_prompt
@@ -204,9 +216,12 @@ def main() -> None:
         week_end="2026-08-14",
         highest_star_repository=rankings[0],
         ranking_evidence=evidence,
+        article_skill_instructions=article_skill_instructions,
     )
+    assert article_skill_instructions in retry_messages[0].content
     retry_prompt = retry_messages[-1].content
-    assert "不要缩短项目拆解" in retry_prompt
+    assert "只修正合同缺陷" in retry_prompt
+    assert "不设置最低字数" in retry_prompt
     assert "1600字以内" not in retry_prompt
     assert "字段必须只有以下三个" in retry_prompt
     assert "voiceover_text:" not in retry_prompt
