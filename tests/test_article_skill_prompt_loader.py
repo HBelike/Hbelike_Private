@@ -46,6 +46,13 @@ class ArticleSkillPromptLoaderTests(unittest.TestCase):
         with self.assertRaisesRegex(LookupError, "github-project-blog"):
             loader.load()
 
+    def test_load_matches_skill_name_case_insensitively(self) -> None:
+        library = _FakeSkillLibrary(markdown="# 写作规则\n\n只根据证据写作。")
+
+        instructions = ArticleSkillPromptLoader(library).load("GitHub-Project-Blog")  # type: ignore[arg-type]
+
+        self.assertIn("只根据证据写作", instructions)
+
     def test_load_rejects_empty_body(self) -> None:
         loader = ArticleSkillPromptLoader(
             _FakeSkillLibrary(

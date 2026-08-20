@@ -1,47 +1,59 @@
-# SummaryTask 写作能力升级记录
+# GitHub 项目文章 Skill 与 SummaryTask 接入记录
 
-本文档记录本项目使用 `$find-skills` 查询写作类 skill 后，沉淀到 `SummaryTask` 的写作规则。
+## 目标
 
-## 查询到的候选 skill
+在不重写周榜流水线、不增加模型调用次数的前提下，提高工作台动态 Top N 文章的技术含量与自然度。文章需要像有实战经验的技术讲师在拆项目：既说明项目做什么，也解释架构、模块、执行流程、关键实现、运行方式、取舍和适用边界。
 
-1. `samber/cc-skills@copywriting-hooks`
-   - 安装量约 2.4K。
-   - 适合提炼标题、开场钩子和反 AI 套话规则。
-   - 被采用的规则：第一句只负责让读者想看第二句；优先使用具体数字、反常识、读者痛点、开放问题；禁止泛泛开场。
+本次只处理公开 GitHub 仓库。私有仓库、需要 Token 才能读取的仓库、非 GitHub 地址和无法确认公开性的地址不在处理范围内。
 
-2. `inference-sh/skills@technical-blog-writing`
-   - 安装量约 529。
-   - 适合技术博客、架构解释、工程判断。
-   - 被采用的规则：先讲为什么值得关心，再讲机制、适用场景、权衡和限制；技术内容必须直接、具体、诚实。
+## 技术取舍
 
-3. `inference-sh/skills@twitter-thread-creation`
-   - 安装量约 507。
-   - 适合短视频口播节奏和分段递进。
-   - 被采用的规则：Hook → 背景 → 一段一个观点 → 总结 CTA；短句、留白、编号和进度感能提升读完率。
+- 保留现有 `SummaryTask` 和单次 DeepSeek ChatCompletions 调用，不改成五轮循环，也不引入 Agent Loop。项目数量继续读取工作台配置形成的周榜记录数，代码不假定 Top 5。
+- 新增一个自包含的 `github-project-blog` Skill。它吸收 `blog-post-writer` 的技术文章组织方式和 `humanizer` 的去 AI 化规则，但线上运行不再依赖这两个 Skill，也不使用已经取消的 `technical-review`。
+- 工作台只把 Skill 正文挂载到同一次模型请求的 `system` message。JSON 字段、固定章节、事实数字、项目顺序和长度上限仍由 `SummaryTask` 合同控制，Skill 不能覆盖这些约束。
+- 取消每个项目正文至少 500 个中文字符和整篇文章最低字数的规则。保留每个项目不超过 800 个中文字符、六个分析标签、标签解释完整度、精确 stars / 本周增长数字和全文动态上限。
+- 不扩大当前事实采集范围。工作台继续使用周榜元数据与 README 摘录；没有提供的源码路径、架构细节、运行命令必须写成未知，不能由模型补全。
 
-4. `charlie947/social-media-skills@newsletter-voice`
-   - 安装量约 587。
-   - 适合长期形成账号语气，但它依赖历史 newsletter 样稿和 voice profile。
-   - 本次没有直接接入运行时，只吸收“固定账号声音”和“结构一致性”的思想。
+## Skill 能力
 
-5. `coreyhaines31/marketingskills@copywriting`
-   - 安装量较高。
-   - 适合标题、摘要和 CTA 的基本原则。
-   - 被采用的规则：清晰优先于聪明、具体优先于抽象、功能要翻译成读者收益、不要使用空洞营销词。
+`github-project-blog` 覆盖以下十三类分析：项目定义、问题、关注价值、技术栈、整体架构、核心模块、执行流程、3 到 5 个可学习实现、关键源码、运行方式、优点、不足和适合人群。
 
-## 落地到 SummaryTask 的规则
+工作台模式把这些问题映射到现有六个项目标签：
 
-- 标题必须有信息差、数字或明确判断，不能只是“GitHub 热门项目 Top5”。
-- 第一段必须是强钩子，避免“本周 GitHub 热门项目来了”这种流水账开头。
-- 正文必须形成“本周主线”，先讲五个项目背后的共同趋势，再拆解项目。
-- 每个项目固定回答：定位、痛点、技术机制、适用人群、潜在局限、GitHub 地址。
-- 视频脚本必须按照 7 段时间轴组织，方便后续接 Seedance clip prompt 或文本生视频。
-- 口播文本按“开场趋势 → 项目 1 到 5 → 结尾 CTA”推进，保持短句和信息密度。
-- 图片 prompt 必须生成技术架构图或流程图，不做抽象科技海报。
-- 输出后做轻量质量自检，记录 AI 套话、结构缺失、时间轴缺失和长度风险。
+- `本周判断`：项目定义、关注价值和榜单数据；
+- `问题与代价`：旧做法的摩擦、成本和失败模式；
+- `机制拆解`：技术栈、架构、模块、流程、可学习实现和源码线索；
+- `落到工作流`：运行方式、接入位置、适合人群和下一步；
+- `使用边界`：不足、限制、证据缺口和误用场景；
+- `工程启发`：可迁移到其他工程的设计判断。
 
-## 暂不做的事情
+独立 Agent 只收到公开 GitHub URL 时，Skill 会要求先只读查看 README、目录、依赖与构建清单、真实入口、核心源码、测试和文档，再生成 Markdown 综述。工作台已经提供 `source_evidence` 时不重复联网或克隆仓库。
 
-- 暂不安装这些 skill 到项目运行时，避免线上任务依赖外部 skill 包。
-- 暂不增加数据库字段，避免影响已经跑通的图文、排版和微信草稿链路。
-- 暂不把文案质量自检做成硬失败；先通过日志观察，再决定是否升级为质量门禁。
+## 调用链
+
+```text
+工作台 Top N 配置
+  → SearchTask 生成 N 条 weekly_rankings
+  → SummaryTask 获取 N 条公开仓库证据
+  → SkillLibraryService 读取 github-project-blog
+  → ArticleSkillPromptLoader 去除 frontmatter 并校验正文
+  → Skill 正文 + 动态 Top N 数据进入同一次 DeepSeek 请求
+  → 原有 JSON 解析、质量合同、ContentBrief 与后续媒体链路
+```
+
+项目本地 Skill 位于 `.agents/skills/github-project-blog`，生产镜像使用 `deploy/skill-seeds/github-project-blog`。导出清单由现有 portable skill 脚本维护。
+
+## 失败与边界
+
+- Skill 缺失、正文为空或超过 32,000 个字符时，`SummaryTask` 直接失败，不静默退回旧提示词，避免线上文章质量在不知情时降级。
+- 模型首次输出未通过 JSON 或质量合同，仍沿用原有的一次质量修复重试；这不是按项目循环生成。
+- 当前工作台证据主要是最多 3,200 字符的 README 摘录，因此可以提高分析框架和表达质量，但不能保证每个项目都有真实源码级结论。后续若需要更深的源码分析，应单独扩展证据采集层，而不是让写作 Skill 猜测。
+- `blog-post-writer` 与 `humanizer` 只作为本 Skill 的设计来源。部署时只需要 `github-project-blog`，避免三个 Skill 的发现顺序、版本和运行时可用性影响生成结果。
+
+## 验证结果
+
+- Skill 结构通过 `skill-creator` 的 `quick_validate.py`。
+- 生产 Skill 导出后通过 `verify_skill_portability.py`。
+- `ArticleSkillPromptLoader` 覆盖正常加载、名称大小写、缺失、空正文和超长拒绝。
+- `verify_summary_depth_contract.py` 同时验证 Top 5 与 Top 3，确认项目数动态、Skill 已挂载、少于 500 字的完整项目章节可通过、缺少分析标签仍会失败。
+- 相关 Python 文件通过编译检查，现有 SummaryTask JSON 字段和后续 ContentBrief / 短视频证据传递保持不变。
