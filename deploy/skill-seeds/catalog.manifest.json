@@ -1,7 +1,7 @@
 {
   "format": 1,
   "description": "仅包含可部署 SKILL.md 的名称、相对路径与 SHA-256；不包含本机绝对路径、缓存或凭据。",
-  "total": 56,
+  "total": 57,
   "skills": [
     {
       "name": "88api-nano-banana",
@@ -142,6 +142,11 @@
       "name": "frontend-design",
       "path": "frontend-design/SKILL.md",
       "sha256": "1608ea77fbb6fc30d13a97d12cfa8ebf31358d40f0dd97beed24829d6b3f45dd"
+    },
+    {
+      "name": "github-project-blog",
+      "path": "github-project-blog/SKILL.md",
+      "sha256": "098b3d7d7881a4062dfbc58ab3b5f0b228aecbd0ddab9331de5abb17524d0356"
     },
     {
       "name": "grill-me",
