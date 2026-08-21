@@ -6,12 +6,18 @@
 from src.career_assistant.persistence.conversation_repository import (
     CareerConversationRepository,
 )
+from src.career_assistant.persistence.context_repository import CareerContextRepository
 from src.career_assistant.persistence.database import CareerDatabase
 from src.career_assistant.persistence.model_profile_repository import (
     CareerModelProfileRepository,
     ModelCostTier,
     ModelProfileDraft,
     ModelProfileRecord,
+)
+from src.career_assistant.persistence.job_assessment_repository import (
+    CareerJobAssessmentRepository,
+    JobAssessmentRecord,
+    JobAssessmentStatus,
 )
 from src.career_assistant.persistence.records import (
     AgentTurnRecord,
@@ -24,6 +30,7 @@ from src.career_assistant.persistence.records import (
 
 __all__ = [
     "CareerConversationRepository",
+    "CareerContextRepository",
     "CareerDatabase",
     "CareerModelProfileRepository",
     "ModelCostTier",

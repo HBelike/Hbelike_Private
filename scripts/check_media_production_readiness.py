@@ -28,6 +28,7 @@ class ReadinessReport:
     """生产前检查的结构化结果，方便终端与 CI 读取。"""
 
     video_submit_enabled: bool
+    audio_enabled: bool
     ready_for_real_seedance_submission: bool = False
     safe_local_mode: bool = False
     checks: dict[str, bool] = field(default_factory=dict)
@@ -39,6 +40,7 @@ class ReadinessReport:
 
         return {
             "video_submit_enabled": self.video_submit_enabled,
+            "audio_enabled": self.audio_enabled,
             "ready_for_real_seedance_submission": self.ready_for_real_seedance_submission,
             "safe_local_mode": self.safe_local_mode,
             "checks": self.checks,
@@ -54,26 +56,32 @@ def build_report(config: AppConfig) -> ReadinessReport:
     video_provider = SeedanceVideoProvider(config=config)
     storage_provider = create_storage_provider(config=config)
     storage_ready = storage_provider.can_upload()
+    public_storage_required = config.video_reference_images_enabled
 
-    report = ReadinessReport(video_submit_enabled=config.video_submit_enabled)
+    report = ReadinessReport(
+        video_submit_enabled=config.video_submit_enabled,
+        audio_enabled=config.audio_enabled,
+    )
     report.checks = {
         "seedance_api_key_present": video_provider.has_api_key(),
         "doubao_tts_credentials_present": tts_provider.has_credentials(),
         "public_storage_ready": storage_ready,
+        "public_storage_required": public_storage_required,
+        "reference_images_enabled": config.video_reference_images_enabled,
         "video_assembly_enabled": config.video_assembly_enabled,
         "voiceover_required_for_assembly": config.video_assembly_require_voiceover,
     }
 
     if not config.video_submit_enabled:
         report.safe_local_mode = True
-        report.warnings.append(
-            "当前 video.submit_enabled=false：不会创建 Seedance 付费任务；已处于安全本地验证模式。"
-        )
-        if not tts_provider.has_credentials():
+        report.warnings.append("当前 VIDEO_SUBMIT_ENABLED=false：不会创建 Seedance 付费任务。")
+        if not config.audio_enabled:
+            report.warnings.append("当前 AUDIO_ENABLED=false：不会调用豆包或本地语音生成链路。")
+        elif not tts_provider.has_credentials():
             report.warnings.append(
                 "豆包语音 V3 API Key 未配置：开发期将依配置回退到本地语音；上线前需配置 DOUBAO_TTS_API_KEY。"
             )
-        if not storage_ready:
+        if public_storage_required and not storage_ready:
             report.warnings.append(
                 f"{config.storage_provider} 存储尚不能提供公网图片 URL：本地验证不受影响，真实 Seedance 提交前必须补齐。"
             )
@@ -81,10 +89,12 @@ def build_report(config: AppConfig) -> ReadinessReport:
 
     if not video_provider.has_api_key():
         report.blockers.append(f"缺少 {config.video_api_key_env}，无法创建 Seedance 视频任务。")
-    if not storage_ready:
+    if public_storage_required and not storage_ready:
         reason = storage_provider.unavailable_reason() or "尚未配置可访问的公网媒体存储。"
         report.blockers.append(f"参考图不能被 Seedance 访问：{reason}")
-    if config.video_assembly_require_voiceover and not tts_provider.has_credentials():
+    if config.video_assembly_require_voiceover and not config.audio_enabled:
+        report.blockers.append("成片装配要求统一旁白，但 AUDIO_ENABLED=false。")
+    elif config.video_assembly_require_voiceover and not tts_provider.has_credentials():
         report.blockers.append(
             "成片装配要求统一旁白，但豆包语音 V3 API Key 未配置：请配置 DOUBAO_TTS_API_KEY。"
         )

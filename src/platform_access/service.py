@@ -9,6 +9,7 @@ from uuid import UUID
 
 from src.platform_access.contracts import PlatformRole, PlatformUser, SessionResolution
 from src.platform_access.email_delivery import EmailDeliveryError, ResendEmailDelivery
+from src.platform_access.navigation_config import normalize_route_module_settings, route_modules_for_ui
 from src.platform_access.repository import PlatformAccessRepository
 from src.platform_access.runtime_config import pipeline_config_for_ui
 from src.platform_access.security import (
@@ -195,6 +196,20 @@ class PlatformAccessService:
     def save_pipeline_config(self, user: PlatformUser, config_value: dict[str, object]) -> dict[str, object]:
         self._require_role(user, PlatformRole.ADMIN)
         return self._repository.save_pipeline_config(user.organization_id, user.id, pipeline_config_for_ui(config_value))
+
+    def get_route_modules(self, user: PlatformUser) -> list[dict[str, object]]:
+        """读取管理员配置，并按当前登录角色计算最终可访问状态。"""
+
+        settings = self._repository.get_route_module_settings(user.organization_id)
+        return route_modules_for_ui(settings, user.role)
+
+    def save_route_modules(self, user: PlatformUser, settings: dict[str, object]) -> list[dict[str, object]]:
+        """仅管理员可以更新模块目录；管理台入口始终保持开启。"""
+
+        self._require_role(user, PlatformRole.ADMIN)
+        normalized = normalize_route_module_settings(settings)
+        saved = self._repository.save_route_module_settings(user.organization_id, user.id, normalized)
+        return route_modules_for_ui(saved, user.role)
 
     def create_manual_pipeline_request(self, user: PlatformUser, *, idempotency_key: str) -> tuple[dict[str, object], dict[str, object]]:
         self._require_role(user, PlatformRole.ADMIN)

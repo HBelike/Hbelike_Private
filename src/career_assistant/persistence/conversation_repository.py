@@ -110,6 +110,56 @@ class CareerConversationRepository:
 
         return [self._to_conversation_record(row) for row in rows]
 
+    def list_conversation_page(
+        self,
+        actor_id: UUID,
+        *,
+        page: int = 1,
+        page_size: int = 10,
+        include_archived: bool = False,
+    ) -> tuple[list[ConversationRecord], int]:
+        """分页读取会话，并在同一事务中返回当前筛选条件下的总数。"""
+
+        if page < 1:
+            raise ValueError("page 必须大于等于 1")
+        self._validate_limit(page_size, field_name="page_size")
+        statuses = ("active", "archived") if include_archived else ("active",)
+        parameters: dict[str, object] = {
+            "actor_id": actor_id,
+            "statuses": list(statuses),
+            "page_size": page_size,
+            "offset": (page - 1) * page_size,
+        }
+        with self._database.transaction() as connection:
+            total = int(
+                connection.execute(
+                    text(
+                        """
+                        SELECT COUNT(*)
+                        FROM career_assistant.conversations
+                        WHERE actor_id = :actor_id
+                          AND status = ANY(:statuses)
+                        """,
+                    ),
+                    parameters,
+                ).scalar_one()
+            )
+            rows = connection.execute(
+                text(
+                    """
+                    SELECT id, organization_id, actor_id, title, status,
+                           created_at, updated_at, archived_at
+                    FROM career_assistant.conversations
+                    WHERE actor_id = :actor_id
+                      AND status = ANY(:statuses)
+                    ORDER BY updated_at DESC, id DESC
+                    LIMIT :page_size OFFSET :offset
+                    """,
+                ),
+                parameters,
+            ).mappings().all()
+        return [self._to_conversation_record(row) for row in rows], total
+
     def get_conversation(
         self,
         actor_id: UUID,
@@ -130,6 +180,37 @@ class CareerConversationRepository:
                     """,
                 ),
                 {"conversation_id": conversation_id, "actor_id": actor_id},
+            ).mappings().one_or_none()
+
+        return self._to_conversation_record(row) if row is not None else None
+
+    def rename_conversation(
+        self,
+        actor_id: UUID,
+        conversation_id: UUID,
+        title: str,
+    ) -> ConversationRecord | None:
+        """重命名用户自己的未删除会话，并返回更新后的会话。"""
+
+        normalized_title = self._normalize_content(title, "会话标题", maximum_length=160)
+        with self._database.transaction() as connection:
+            row = connection.execute(
+                text(
+                    """
+                    UPDATE career_assistant.conversations
+                    SET title = :title, updated_at = NOW()
+                    WHERE id = :conversation_id
+                      AND actor_id = :actor_id
+                      AND status <> 'deleted'
+                    RETURNING id, organization_id, actor_id, title, status,
+                              created_at, updated_at, archived_at
+                    """,
+                ),
+                {
+                    "actor_id": actor_id,
+                    "conversation_id": conversation_id,
+                    "title": normalized_title,
+                },
             ).mappings().one_or_none()
 
         return self._to_conversation_record(row) if row is not None else None
@@ -612,6 +693,22 @@ class CareerConversationRepository:
         """
 
         with self._database.transaction() as connection:
+            # 检索反馈的外键策略是 SET NULL。永久删除时主动清理，避免留下无法追溯
+            # 到具体会话的孤立反馈；其余消息、摘要和运行记录由数据库级联删除。
+            connection.execute(
+                text(
+                    """
+                    DELETE FROM career_assistant.interview_retrieval_feedback
+                    WHERE conversation_id IN (
+                        SELECT id
+                        FROM career_assistant.conversations
+                        WHERE id = :conversation_id
+                          AND actor_id = :actor_id
+                    )
+                    """,
+                ),
+                {"actor_id": actor_id, "conversation_id": conversation_id},
+            )
             result = connection.execute(
                 text(
                     """
@@ -637,11 +734,16 @@ class CareerConversationRepository:
         return normalized_value
 
     @staticmethod
-    def _validate_limit(limit: int, *, maximum: int = 100) -> None:
+    def _validate_limit(
+        limit: int,
+        *,
+        maximum: int = 100,
+        field_name: str = "limit",
+    ) -> None:
         """阻止历史列表的无界查询。"""
 
         if not 1 <= limit <= maximum:
-            raise ValueError(f"limit 必须在 1 到 {maximum} 之间")
+            raise ValueError(f"{field_name} 必须在 1 到 {maximum} 之间")
 
     @staticmethod
     def _normalize_input_kind_codes(input_kind_codes: frozenset[str]) -> list[str]:

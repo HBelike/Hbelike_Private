@@ -11,6 +11,6 @@ Set-Location $projectRoot
 # 兼容旧命令：实际唯一入口是项目根目录的 preview_server.py。
 # 这个脚本不再直接拼接 Uvicorn 参数，避免和 Python 入口出现两套不同启动逻辑。
 $env:PREVIEW_SERVER_PORT = "$Port"
-$env:PREVIEW_SERVER_RELOAD = "true"
+$env:PREVIEW_SERVER_RELOAD = if ([string]::IsNullOrWhiteSpace($env:PREVIEW_SERVER_RELOAD)) { "true" } else { $env:PREVIEW_SERVER_RELOAD.ToLowerInvariant() }
 & .\.venv\Scripts\python.exe .\preview_server.py
 exit $LASTEXITCODE

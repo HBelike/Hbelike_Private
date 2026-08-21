@@ -27,6 +27,15 @@ class ModelGatewaySettings:
 
 
 @dataclass(frozen=True)
+class JobAssessmentSettings:
+    """岗位 Judge 的固定模型、Prompt 版本与重试边界。"""
+
+    judge_profile_key: str
+    prompt_version: str
+    max_attempts: int
+
+
+@dataclass(frozen=True)
 class CareerRuntimeSettings:
     """Web 进程处理求职 Turn 的运行时边界。
 
@@ -208,6 +217,31 @@ def load_model_gateway_settings(
             "enable_local_ollama_profile",
         ),
         provider_credential_env=normalized_credentials,
+    )
+
+
+def load_job_assessment_settings(
+    config_path: Path = DEFAULT_CONFIG_PATH,
+) -> JobAssessmentSettings:
+    """读取岗位分析配置，拒绝退回聊天模型或无限重试。"""
+
+    root_config = _load_career_root_config(config_path)
+    raw = root_config.get("job_assessment")
+    if not isinstance(raw, dict):
+        raise ValueError("career_assistant.yaml 缺少 job_assessment 配置段")
+    profile_key = str(raw.get("judge_profile_key") or "").strip().lower()
+    prompt_version = str(raw.get("prompt_version") or "").strip()
+    max_attempts = raw.get("max_attempts")
+    if not profile_key:
+        raise ValueError("job_assessment.judge_profile_key 不能为空")
+    if not prompt_version:
+        raise ValueError("job_assessment.prompt_version 不能为空")
+    if isinstance(max_attempts, bool) or not isinstance(max_attempts, int) or not 1 <= max_attempts <= 3:
+        raise ValueError("job_assessment.max_attempts 必须是 1 到 3 之间的整数")
+    return JobAssessmentSettings(
+        judge_profile_key=profile_key,
+        prompt_version=prompt_version,
+        max_attempts=max_attempts,
     )
 
 

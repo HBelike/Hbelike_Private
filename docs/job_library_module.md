@@ -1,0 +1,131 @@
+# 职位库模块
+
+## 目标
+
+职位库是左侧导航中的独立一级模块，固定路由为 `/interviews/jobs`，位于“面经库”之后。用户进入“职位库”后，选择工作城市并输入岗位名称，即可查看 BOSS 直聘当前会话返回的真实岗位卡片和完整职位详情。
+
+页面不要求用户复制职位 URL，不显示扩展执行过程，也不保存 BOSS 登录凭据。首次安装浏览器助手并登录后，日常操作保持为“输入岗位名称 → 搜索 → 点击岗位”。
+
+职位库使用独立模块键 `job_library`。管理员可在管理台单独控制其启用状态；关闭职位库不会影响面经库，关闭面经库也不会影响职位库。原有 `/interviews/jobs` 地址保持不变，历史书签可继续使用。
+
+## 调用链
+
+```text
+职位库 JobSearchWorkspace.vue
+  -> job-library-bridge.js / window.postMessage
+  -> Chrome Content Script
+  -> MV3 Service Worker（串行、只读、来源校验）
+  -> 将专用 BOSS 搜索页同步到用户选中的城市
+  -> BOSS 已登录页面 MAIN world fetch
+  -> /wapi/zpgeek/common/data/city/site.json（城市目录）
+  -> /wapi/zpgeek/search/joblist.json
+  -> /wapi/zpgeek/job/detail.json
+  -> boss-data.js 归一化
+  -> 职位卡片 / 详情阅读区
+```
+
+## 交互语义
+
+- 城市：职位库与求职助手职位检索弹窗共用 `JobCityPicker.vue`。界面使用 MIT 许可的 Vue 3 开源组件 `v-region` 提供省市浏览和城市名搜索；实际请求代码来自当前 BOSS 会话的城市目录，扩展不可用时使用经过验证的常用城市代码兜底。
+- 搜索：用户选择城市并输入岗位名称，单页请求 15 条。城市选择保存在当前浏览器；切换城市会清空旧结果，分页始终沿用发起本次搜索时的城市。每次主动搜索前会校验 BOSS 搜索页 URL 中的城市代码，只有不一致时才做一次正常页面切换。
+- 城市一致性：归一化层只接受响应中明确标注为所选城市的岗位，不用界面所选城市覆盖或猜测原始岗位城市。缺少城市、城市不一致的记录直接丢弃；整批响应均不一致时返回 `city_mismatch`，不展示错误岗位。“全国”搜索不启用单城市过滤。
+- 分页：只有用户点击“加载更多岗位”才请求下一页；按稳定 ID 去重，平台不再返回新岗位时结束。
+- 详情：搜索完成后读取第一条岗位详情；此后每次点击任何卡片（包括重复点击当前卡片）都会重新请求详情。
+- 竞态：页面分别维护搜索与详情请求序号，快速切换岗位时丢弃迟到的旧详情。
+- 数据：正式页面没有预览或兜底岗位，扩展不可用、未登录、验证码、访问限制和空结果都有独立状态。
+- 复用：`JobSearchWorkspace.vue` 既作为独立一级“职位库”页面，也可通过 `selectionMode` 嵌入求职助手的职位检索弹窗；嵌入模式只额外向父组件发布已加载的完整岗位详情，不改变搜索、分页、刷新详情与错误处理。
+
+## 求职助手导入链路
+
+```text
+求职助手“职位检索”
+  -> CareerJobSearchDialog.vue
+  -> JobSearchWorkspace.vue（selectionMode）
+  -> 选择完整岗位详情
+  -> job-library-target-role.js 生成标准职位正文
+  -> POST /api/career/target-role-profiles
+  -> POST /api/career/conversations/{id}/context
+  -> CareerContextRail / CareerJobCanvas / 既有四项指标
+```
+
+弹窗底部固定显示当前选择与“确认岗位”。未取得完整职位描述时按钮保持禁用；确认后不再进入第二个编辑页。手动粘贴、输入或上传 JD 仍由原有求职资料向导负责，与职位库链路互不替代。
+
+## 稳定数据模型
+
+列表字段包括：`securityId`、`jobId`、岗位名、薪资、经验、学历、城市与商圈、公司、行业、规模、融资阶段、招聘者、技能、福利和原岗位链接。
+
+详情字段包括：职位描述、办公地址、经纬度、技能、福利、招聘者状态、公司信息和本次获取时间。网页只消费归一化字段，不读取 BOSS 原始响应结构。
+
+## 技术取舍
+
+- 使用 Chrome MV3 扩展而不是服务端抓取：BOSS 内部接口依赖真实浏览器会话，服务端无法可靠复用用户登录态。
+- 使用 Content Script 桥而不是扩展固定 ID：正式域名和本地开发页面都可直接通信，不要求把扩展 ID 写入部署配置。
+- 网页向 Content Script 发送详情请求前，只提取字段白名单并生成普通对象：Vue 响应式 Proxy 不能被 `window.postMessage` 的结构化克隆算法直接复制，列表对象不得原样跨越网页/扩展边界。
+- 使用 `chrome.scripting.executeScript({ world: "MAIN" })`：同源请求由 BOSS 页面运行环境发出，浏览器自动处理当前会话；扩展不读取 Cookie。
+- 标签页优先复用已加载完成的 BOSS 搜索页，再考虑当前激活、未休眠和最近访问状态。若只有岗位详情等非搜索页，则创建非激活搜索页，不覆盖用户正在浏览的页面。
+- 使用稳定归一化层：接口字段变化时只调整扩展映射，不改职位库组件。
+- 城市目录与平台代码分层：`v-region` 只负责开源城市选择交互，`list_cities` 返回的 BOSS 九位城市代码才进入真实搜索请求；两者按规范化城市名映射，无法映射时明确提示，不猜测代码。
+- 城市选择器按需加载：进入职位库时不下载完整行政区数据，只有用户打开城市面板时才加载，避免增加首次打开耗时。
+- 不引入本地 Python、Patchright 或新增后端服务，降低安装与运行负担。
+
+## 访问限制处理
+
+- 没有扩展：页面给出一次性“加载已解压扩展”说明。
+- 未登录：提示用户在已打开的 BOSS 页面完成登录。
+- 验证码或安全验证：立即停止本次调用，提示人工处理，不自动重试或绕过。
+- `code=37`：仅在用户主动搜索或读取岗位详情时，普通刷新所选 BOSS 标签页一次，并只重试原只读请求一次；两分钟内不重复自动刷新。页面初始化的城市目录读取不会触发刷新，刷新失败或重试仍异常时立即停止。
+- HTTP 或接口 `429`：按真实访问频率限制处理，绝不自动刷新或重试，提示稍后再试。
+- 不做后台轮询、不读取或替换 Cookie/token、不绕过验证，不因为空结果主动追加请求。
+- 城市上下文：只在用户点击搜索且搜索页城市与所选城市不一致时导航一次；同步后进入刷新冷却。响应城市仍不一致时停止展示，不自动追加搜索或连续切换。
+- 详情失败：保留列表卡片，允许用户点击当前卡片重新获取。
+
+## 依赖与依据
+
+- Chrome 官方 `scripting`、Content Script、Messaging 与 Tabs API。
+- `TerryZ/v-region`（MIT，Vue 3）：复用其 `RegionCityPicker` 的省市浏览和内置搜索交互，不自行维护全国行政区 UI。
+- `browser-use/browser-harness` 的 BOSS 页面实测说明，用于核对 2026-05 仍在使用的列表、详情端点和字段。
+- `can4hou6joeng4/boss-agent-cli` 的只读优先、用户主动触发和平台风险处理思路；未引入其 Python/Patchright 运行时。
+
+上述开源项目均仅作为技术依据。本项目没有复制自动沟通、批量触达或账号数据处理逻辑。
+
+## 文件职责
+
+- `src/platform_access/navigation_config.py`：职位库一级模块目录、默认启用状态和角色访问能力。
+- `web-ui/src/App.vue`：职位库左侧菜单、路由归属、页面标题和独立高亮。
+- `web-ui/src/components/JobSearchWorkspace.vue`：职位库 UI、请求状态、分页、详情竞态处理。
+- `web-ui/src/components/JobCityPicker.vue`：共用城市选择器、`v-region` 适配、热门城市入口与 BOSS 城市代码映射。
+- `web-ui/src/job-city-catalog.js`：常用城市代码兜底、BOSS 城市目录合并与校验。
+- `web-ui/src/components/CareerJobSearchDialog.vue`：求职助手内的职位库弹窗和固定确认区。
+- `web-ui/src/job-library-target-role.js`：将职位库完整详情转换为现有目标岗位 API 的标准字段与可拆解正文。
+- `web-ui/src/job-library-target-role.test.js`：验证完整映射、可选字段缺省和缺少职位正文时的拒绝语义。
+- `web-ui/src/job-library-bridge.js`：网页侧有超时与错误语义的扩展调用；详情请求将响应式岗位转换为可结构化克隆的纯数据。
+- `web-ui/src/job-library-bridge.test.js`：验证 Proxy 岗位及其数组字段转换后可通过 `structuredClone`。
+- `browser-extension/job-library/content-script.js`：网页与扩展消息桥。
+- `browser-extension/job-library/service-worker.js`：BOSS 标签页复用、限频、同源只读请求。
+- `browser-extension/job-library/boss-data.js`：端点构造、字段归一化和错误分类。
+- `browser-extension/job-library/tests/boss-data.test.mjs`：离线契约验证。
+
+## 验证
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest tests.test_navigation_config -v
+
+cd browser-extension/job-library
+npm test
+node --check service-worker.js
+node --check content-script.js
+
+cd ../../web-ui
+npm test
+npm run build
+```
+
+2026-08-21 回归验证：修复点击岗位时直接把 Vue Proxy 传给 `window.postMessage` 导致的 `DataCloneError`。详情请求仍在每次选中卡片时触发，扩展协议与 BOSS 详情端点不变。
+
+2026-08-21 会话恢复验证：`code=37` 与 `429` 已拆分；只有前者允许单次普通刷新和单次原请求重试，且受两分钟冷却限制。安全验证、登录失效、真实限流和刷新后失败均不会继续重试。
+
+2026-08-21 城市检索回归：城市目录切换为当前 `/wapi/zpgeek/common/data/city/site.json`，修正深圳城市代码为 `101280200`。搜索前同步 BOSS 搜索页城市，响应后按真实 `cityName` 严格校验；北京请求不会再展示上海或未知城市岗位。验证仅使用离线契约与前端构建，没有对真实账号发起自动化回归请求。
+
+真实端到端验证需要一次性在 Chrome 加载扩展并登录 BOSS；不通过测试代码伪造登录态或真实岗位结果。
+
+PC 端导航验证还需确认：“面经库”和“职位库”分别只在自身路由高亮；面经库中不再显示职位入口；职位库中不再显示返回面经库按钮。

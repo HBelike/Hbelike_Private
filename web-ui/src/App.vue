@@ -1,11 +1,16 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import CareerAssistantPage from './components/CareerAssistantPage.vue'
+import ResumeAssistantPage from './components/ResumeAssistantPage.vue'
 import InterviewLibraryPage from './components/InterviewLibraryPage.vue'
+import JobSearchWorkspace from './components/JobSearchWorkspace.vue'
 import LoginPage from './components/LoginPage.vue'
 import ObservabilityPage from './components/ObservabilityPage.vue'
+import EvaluationCenterPage from './components/EvaluationCenterPage.vue'
 import AdminConsolePage from './components/AdminConsolePage.vue'
 import ManualPipelinePanel from './components/ManualPipelinePanel.vue'
+import ThemeSwitcher from './components/ThemeSwitcher.vue'
+import { decorateOpenableImages } from './image-preview.js'
 
 const preview = ref(null)
 const mediaLibrary = ref({ items: [], pending_video_clips: [], summary: {} })
@@ -42,7 +47,53 @@ const authReady = ref(false)
 const authUser = ref(null)
 const mobileNavOpen = ref(false)
 const isMobileViewport = ref(false)
+const uiTheme = ref(document.documentElement.dataset.uiTheme === 'green' ? 'green' : 'blue')
+const navigationModules = ref([])
+const navigationReady = ref(false)
+const accountMenuRef = ref(null)
+const accountMenuOpen = ref(false)
+const accountMenuSection = ref('')
 let starPopoverCloseTimer = null
+
+const vOpenableImages = {
+  mounted: decorateOpenableImages,
+  updated: decorateOpenableImages
+}
+
+const accountDisplayName = computed(() => authUser.value?.display_name || authUser.value?.username || '用户')
+const accountRoleLabel = computed(() => authUser.value?.role === 'admin' ? '管理员' : (authUser.value?.role || '用户'))
+const accountInitial = computed(() => accountDisplayName.value.trim().slice(0, 1).toUpperCase() || 'U')
+const navigationModuleMap = computed(() => new Map(navigationModules.value.map((item) => [item.key, item])))
+
+function setUiTheme(theme) {
+  const nextTheme = theme === 'green' ? 'green' : 'blue'
+  uiTheme.value = nextTheme
+  document.documentElement.dataset.uiTheme = nextTheme
+  window.localStorage.setItem('find-job-ui-theme', nextTheme)
+}
+
+function closeAccountMenu() {
+  accountMenuOpen.value = false
+  accountMenuSection.value = ''
+}
+
+function toggleAccountMenu() {
+  accountMenuOpen.value = !accountMenuOpen.value
+  if (!accountMenuOpen.value) accountMenuSection.value = ''
+}
+
+function toggleAccountMenuSection(section) {
+  accountMenuSection.value = accountMenuSection.value === section ? '' : section
+}
+
+function handleAccountThemeChange(theme) {
+  setUiTheme(theme)
+}
+
+function handleAccountMenuPointerDown(event) {
+  if (!accountMenuOpen.value || accountMenuRef.value?.contains(event.target)) return
+  closeAccountMenu()
+}
 
 const pipelineTaskNames = [
   'StartupSelfCheckTask',
@@ -74,26 +125,35 @@ const routeItems = [
 ]
 
 const appNavItems = [
-  { label: '工作台', icon: '▣', path: '/review', enabled: true },
-  { label: '求职助手', icon: '◉', path: '/career', enabled: true },
-  { label: '面经库', icon: '⌘', path: '/interviews', enabled: true },
-  { label: '技能库', icon: '✦', path: '/skills', enabled: true },
-  { label: 'LangSmith', icon: '◌', path: '/observability', enabled: true, requiredRole: 'admin' },
-  { label: '管理台', icon: '⚙', path: '/admin', enabled: true, requiredRole: 'admin' },
+  { moduleKey: 'workbench', label: '工作台', icon: '▣', path: '/review', enabled: true },
+  { moduleKey: 'career_assistant', label: '求职助手', icon: '◉', path: '/career', enabled: true },
+  { moduleKey: 'resume_assistant', label: '简历助手', icon: '✦', path: '/resume-assistant', enabled: true },
+  { moduleKey: 'interview_library', label: '面经库', icon: '⌘', path: '/interviews', enabled: true },
+  { moduleKey: 'job_library', label: '职位库', icon: '⌕', path: '/interviews/jobs', enabled: true },
+  { moduleKey: 'skill_library', label: '技能库', icon: '✦', path: '/skills', enabled: true },
+  { moduleKey: 'evaluation_center', label: '评测中心', icon: '≋', path: '/evaluations', enabled: true, requiredRole: 'admin' },
+  { moduleKey: 'langsmith', label: 'LangSmith', icon: '◌', path: '/observability', enabled: true, requiredRole: 'admin' },
+  { moduleKey: 'admin_console', label: '管理台', icon: '⚙', path: '/admin/modules', enabled: true, requiredRole: 'admin' },
 ]
 
 const currentRoute = ref(normalizeRoute(window.location.pathname))
 const visibleAppNavItems = computed(() => appNavItems.filter(canAccessNavItem))
+const firstAccessibleRoute = computed(() => visibleAppNavItems.value[0]?.path ?? '')
+const canAccessCurrentRoute = computed(() => canAccessRoute(currentRoute.value))
 
 const content = computed(() => preview.value?.content ?? null)
 const articleLayout = computed(() => preview.value?.article_layout ?? null)
 const approval = computed(() => preview.value?.approval ?? null)
 const mediaAssets = computed(() => preview.value?.media_assets ?? [])
 const activeContentId = computed(() => normalizeContentId(content.value?.id))
+const mediaLibraryAssetTypes = new Set(['image', 'audio', 'video', 'video_clip'])
 const mediaLibraryAssets = computed(() => {
   const contentId = activeContentId.value
   if (!contentId) return []
-  return (mediaLibrary.value?.items ?? []).filter((asset) => normalizeContentId(asset?.content_id) === contentId)
+  return (mediaLibrary.value?.items ?? []).filter((asset) => (
+    normalizeContentId(asset?.content_id) === contentId
+    && mediaLibraryAssetTypes.has(asset?.asset_type)
+  ))
 })
 const pendingVideoClips = computed(() => {
   const contentId = activeContentId.value
@@ -125,9 +185,7 @@ const githubImageAssets = computed(() =>
 )
 const audioAssets = computed(() => mediaAssets.value.filter((asset) => asset.asset_type === 'audio'))
 const videoAssets = computed(() =>
-  mediaAssets.value.filter((asset) =>
-    ['video', 'video_clip', 'video_task', 'video_clip_task'].includes(asset.asset_type)
-  )
+  mediaAssets.value.filter((asset) => ['video', 'video_clip'].includes(asset.asset_type))
 )
 const overviewImageAssets = computed(() => imageAssets.value.slice(0, requiredImageCount.value))
 const articleExcerpt = computed(() => buildArticleExcerpt(content.value?.article_markdown ?? content.value?.digest ?? ''))
@@ -144,6 +202,12 @@ const activeRoute = computed(() => {
   if (currentRoute.value === '/career') {
     return { path: '/career', label: '求职助手', description: '简历匹配与职业咨询' }
   }
+  if (currentRoute.value === '/resume-assistant') {
+    return { path: '/resume-assistant', label: '简历助手', description: '按目标岗位生成可审核的简历优化版本' }
+  }
+  if (currentRoute.value === '/interviews/jobs') {
+    return { path: '/interviews/jobs', label: '职位库', description: '输入岗位名称获取当前在招职位' }
+  }
   if (currentRoute.value === '/interviews') {
     return { path: '/interviews', label: '面经库', description: '结构化面经与检索增强问答' }
   }
@@ -153,13 +217,15 @@ const activeRoute = computed(() => {
   if (currentRoute.value === '/observability') {
     return { path: '/observability', label: '可观测性', description: 'LangSmith 模型链路监控' }
   }
-  if (currentRoute.value === '/admin') {
-    return { path: '/admin', label: '管理台', description: '运行参数与内容工作流配置' }
+  if (currentRoute.value === '/evaluations') {
+    return { path: '/evaluations', label: '评测中心', description: '真实数据、实验对比与发布门槛' }
+  }
+  if (currentRoute.value.startsWith('/admin/')) {
+    return { path: currentRoute.value, label: '管理台', description: '平台模块与内容工作流配置' }
   }
   return routeItems.find((item) => item.path === currentRoute.value) ?? routeItems[0]
 })
 
-const isReviewRoute = computed(() => currentRoute.value.startsWith('/review'))
 const selectedSkillId = computed(() => selectedSkill.value?.id ?? '')
 const filteredInstalledSkills = computed(() => {
   const query = installedSkillQuery.value.trim().toLowerCase()
@@ -190,7 +256,7 @@ const taskCards = computed(() => {
   })
 })
 
-const resourceCards = computed(() => {
+const lifecycleStages = computed(() => {
   const summaryReady = Boolean(content.value)
   const imageReady = imageAssets.value.length >= requiredImageCount.value
   const audioReady = audioAssets.value.length >= 1
@@ -199,30 +265,35 @@ const resourceCards = computed(() => {
 
   return [
     {
+      key: 'content',
       label: '内容',
       status: summaryReady ? '已就绪' : '未就绪',
-      detail: summaryReady ? `content_id=${content.value.id}` : '等待 SummaryTask',
+      detail: summaryReady ? `content_id=${content.value.id}` : '等待内容生成',
       ready: summaryReady
     },
     {
+      key: 'image',
       label: '图片',
       status: imageReady ? '已就绪' : '未就绪',
-      detail: `${imageAssets.value.length}/${requiredImageCount.value}`,
+      detail: `${imageAssets.value.length}/${requiredImageCount.value} 张`,
       ready: imageReady
     },
     {
+      key: 'audio',
       label: '音频',
       status: audioReady ? '已就绪' : '未就绪',
-      detail: `${audioAssets.value.length}/1`,
+      detail: `${audioAssets.value.length}/1 条`,
       ready: audioReady
     },
     {
+      key: 'video',
       label: '视频',
       status: videoReady ? '已就绪' : '未就绪',
-      detail: `${videoAssets.value.length}/1`,
+      detail: `${videoAssets.value.length}/1 个`,
       ready: videoReady
     },
     {
+      key: 'approval',
       label: '审核',
       status: approvalReady ? '已通过' : '待确认',
       detail: approvalReady ? '可推送草稿箱' : '等待人工确认',
@@ -231,48 +302,45 @@ const resourceCards = computed(() => {
   ]
 })
 
+const completedLifecycleStageCount = computed(() => lifecycleStages.value.filter((stage) => stage.ready).length)
+
 const blockingReasons = computed(() => healthSummary.value?.top_blocking_reasons ?? [])
 const blockingItems = computed(() => healthSummary.value?.blocking_items ?? [])
 
 const moduleCards = computed(() => [
   {
     path: '/review/article',
-    eyebrow: 'ARTICLE',
+    kind: 'article',
     title: '文章预览',
     description: content.value?.title ?? '等待内容生成',
-    metric: articleLayout.value?.status ?? content.value?.status ?? 'pending',
     accent: 'blue'
   },
   {
     path: '/review/pipeline',
-    eyebrow: 'PIPELINE',
+    kind: 'pipeline',
     title: '任务流程',
     description: `${taskCards.value.filter((task) => task.status === 'succeeded').length}/${taskCards.value.length} 个任务成功`,
-    metric: healthText(healthSummary.value?.health_status ?? 'unknown'),
     accent: 'green'
   },
   {
     path: '/review/assets',
-    eyebrow: 'ASSETS',
+    kind: 'assets',
     title: '媒体素材',
     description: `图片 ${imageAssets.value.length}，音频 ${audioAssets.value.length}，视频 ${videoAssets.value.length}`,
-    metric: `${mediaAssets.value.length} 个素材`,
     accent: 'orange'
   },
   {
     path: '/review/history',
-    eyebrow: 'ARCHIVE',
+    kind: 'archive',
     title: '执行历史',
     description: '按 content_id 保留推文与本次生成的专属媒体素材',
-    metric: '只读归档',
     accent: 'green'
   },
   {
     path: '/review/prompts',
-    eyebrow: 'PROMPTS',
+    kind: 'prompts',
     title: '生成提示词',
     description: `图像提示词 ${imagePrompts.value.length} 条，视频片段 ${videoClipPlans.value.length} 条`,
-    metric: '只读预览',
     accent: 'blue'
   }
 ])
@@ -290,10 +358,15 @@ function normalizeRoute(pathname) {
   if (!pathname || pathname === '/') return '/review'
   if (pathname === '/login' || pathname === '/register' || pathname === '/forgot-password') return pathname
   if (pathname === '/career') return '/career'
+  if (pathname === '/resume-assistant' || pathname.startsWith('/resume-assistant/')) return '/resume-assistant'
+  if (pathname === '/interviews/jobs') return '/interviews/jobs'
   if (pathname === '/interviews') return '/interviews'
   if (pathname === '/skills' || pathname.startsWith('/skills/')) return '/skills'
   if (pathname === '/observability') return '/observability'
-  if (pathname === '/admin') return '/admin'
+  if (pathname === '/evaluations' || pathname.startsWith('/evaluations/')) return '/evaluations'
+  if (pathname === '/admin') return '/admin/modules'
+  if (['/admin/modules', '/admin/github', '/admin/prompts'].includes(pathname)) return pathname
+  if (pathname.startsWith('/admin/')) return '/admin/modules'
   if (pathname.startsWith('/review')) {
     return routeItems.some((item) => item.path === pathname) ? pathname : '/review'
   }
@@ -305,11 +378,10 @@ function isAuthRoute(route) {
 }
 
 async function navigateTo(path) {
-  const navItem = appNavItems.find((item) => item.path === path)
-  if (navItem && !canAccessNavItem(navItem)) return
   closeMobileNavigation()
   const nextUrl = new URL(path, window.location.origin)
   const nextRoute = normalizeRoute(nextUrl.pathname)
+  if (!canAccessRoute(nextRoute)) return
   const nextLocation = `${nextUrl.pathname}${nextUrl.search}${nextUrl.hash}`
   const currentLocation = `${window.location.pathname}${window.location.search}${window.location.hash}`
   if (currentRoute.value === nextRoute && currentLocation === nextLocation) return
@@ -329,6 +401,10 @@ async function navigateTo(path) {
 function handlePopState() {
   closeMobileNavigation()
   currentRoute.value = normalizeRoute(window.location.pathname)
+  if (!canAccessRoute(currentRoute.value)) {
+    if (ensureCurrentRouteAccess()) void refreshCurrentPage()
+    return
+  }
   if (currentRoute.value === '/skills' && !skills.value.length) {
     void loadSkills()
   }
@@ -362,19 +438,78 @@ function handleGlobalKeydown(event) {
   if (event.key === 'Escape') {
     closeMobileNavigation()
     closeStarPopover()
+    closeAccountMenu()
   }
 }
 
 function isAppNavActive(item) {
   if (!item.path) return false
   if (item.path === '/review') return currentRoute.value.startsWith('/review')
+  if (item.moduleKey === 'admin_console') return currentRoute.value.startsWith('/admin/')
   return currentRoute.value === item.path
 }
 
 function canAccessNavItem(item) {
-  if (!item.enabled) return true
-  if (!item.requiredRole) return true
-  return authUser.value?.role === item.requiredRole
+  if (!item.enabled) return false
+  if (item.requiredRole && authUser.value?.role !== item.requiredRole) return false
+  const configuredModule = navigationModuleMap.value.get(item.moduleKey)
+  return configuredModule ? Boolean(configuredModule.accessible) : false
+}
+
+function navItemForRoute(route) {
+  if (route.startsWith('/review')) return appNavItems.find((item) => item.moduleKey === 'workbench')
+  if (route === '/interviews/jobs') return appNavItems.find((item) => item.moduleKey === 'job_library')
+  if (route === '/interviews') return appNavItems.find((item) => item.moduleKey === 'interview_library')
+  if (route.startsWith('/admin/')) return appNavItems.find((item) => item.moduleKey === 'admin_console')
+  return appNavItems.find((item) => item.path === route)
+}
+
+function canAccessRoute(route) {
+  if (isAuthRoute(route)) return true
+  const navItem = navItemForRoute(route)
+  return Boolean(navItem && canAccessNavItem(navItem))
+}
+
+function ensureCurrentRouteAccess() {
+  if (canAccessRoute(currentRoute.value)) return true
+  const fallback = firstAccessibleRoute.value
+  if (!fallback) return false
+  window.history.replaceState({}, '', fallback)
+  currentRoute.value = fallback
+  return true
+}
+
+function applyNavigationConfig(items) {
+  if (!Array.isArray(items) || !items.length) {
+    applyNavigationFallback()
+    return
+  }
+  navigationModules.value = items
+  ensureCurrentRouteAccess()
+}
+
+function applyNavigationFallback() {
+  const isAdmin = authUser.value?.role === 'admin'
+  navigationModules.value = appNavItems.map((item) => ({
+    key: item.moduleKey,
+    enabled: item.moduleKey === 'admin_console',
+    accessible: isAdmin && item.moduleKey === 'admin_console'
+  }))
+  ensureCurrentRouteAccess()
+}
+
+async function loadNavigationConfig() {
+  navigationReady.value = false
+  try {
+    const response = await fetch('/api/navigation/modules', { credentials: 'include', cache: 'no-store' })
+    if (!response.ok) throw new Error('无法读取路由模块配置')
+    applyNavigationConfig((await response.json()).items)
+  } catch {
+    // 配置读取失败时默认拒绝业务模块，仅为管理员保留恢复入口。
+    applyNavigationFallback()
+  } finally {
+    navigationReady.value = true
+  }
 }
 
 async function loadCurrentUser() {
@@ -393,27 +528,33 @@ async function loadCurrentUser() {
   }
 }
 
-function handleAuthenticated(user) {
+async function handleAuthenticated(user) {
   authUser.value = user
   authReady.value = true
   const nextPath = isAuthRoute(currentRoute.value) ? '/review' : currentRoute.value
   window.history.replaceState({}, '', nextPath)
   currentRoute.value = nextPath
-  refreshCurrentPage()
+  await loadNavigationConfig()
+  ensureCurrentRouteAccess()
+  await refreshCurrentPage()
 }
 
 async function logoutPlatform() {
+  closeAccountMenu()
   try {
     await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' })
   } finally {
     authUser.value = null
+    navigationModules.value = []
+    navigationReady.value = false
     window.history.replaceState({}, '', '/login')
     currentRoute.value = '/login'
   }
 }
 
 async function refreshCurrentPage() {
-  if (currentRoute.value === '/career' || currentRoute.value === '/interviews') return
+  if (!canAccessCurrentRoute.value) return
+  if (currentRoute.value === '/career' || currentRoute.value.startsWith('/interviews') || currentRoute.value.startsWith('/admin/')) return
   if (currentRoute.value === '/skills') {
     await loadSkills(selectedSkillId.value)
     return
@@ -1038,6 +1179,7 @@ onMounted(async () => {
   window.addEventListener('popstate', handlePopState)
   window.addEventListener('resize', handleViewportResize)
   window.addEventListener('keydown', handleGlobalKeydown)
+  document.addEventListener('pointerdown', handleAccountMenuPointerDown)
   syncMobileViewport()
   if (window.location.pathname === '/' && authUser.value) {
     window.history.replaceState({}, '', '/review')
@@ -1054,7 +1196,13 @@ onMounted(async () => {
     window.history.replaceState({}, '', '/review')
     currentRoute.value = '/review'
   }
-  if (currentRoute.value !== '/career' && currentRoute.value !== '/interviews' && currentRoute.value !== '/observability' && currentRoute.value !== '/admin') {
+  if (window.location.pathname === '/admin') {
+    window.history.replaceState({}, '', '/admin/modules')
+    currentRoute.value = '/admin/modules'
+  }
+  await loadNavigationConfig()
+  ensureCurrentRouteAccess()
+  if (currentRoute.value !== '/career' && currentRoute.value !== '/interviews' && currentRoute.value !== '/observability' && !currentRoute.value.startsWith('/admin/')) {
     await refreshCurrentPage()
   }
 })
@@ -1063,12 +1211,24 @@ onBeforeUnmount(() => {
   window.removeEventListener('popstate', handlePopState)
   window.removeEventListener('resize', handleViewportResize)
   window.removeEventListener('keydown', handleGlobalKeydown)
+  document.removeEventListener('pointerdown', handleAccountMenuPointerDown)
   closeStarPopover()
 })
 </script>
 
 <template>
-  <LoginPage v-if="!authReady || !authUser" @authenticated="handleAuthenticated" />
+  <template v-if="!authReady || !authUser">
+    <LoginPage @authenticated="handleAuthenticated" />
+    <div class="login-theme-switcher">
+      <span>界面主题</span>
+      <ThemeSwitcher :model-value="uiTheme" @update:model-value="setUiTheme" />
+    </div>
+  </template>
+
+  <section v-else-if="!navigationReady" class="platform-route-loading" aria-live="polite">
+    <span aria-hidden="true"></span>
+    <p>正在加载可用模块…</p>
+  </section>
 
   <div v-else class="shell" :class="{ 'mobile-nav-open': mobileNavOpen }">
     <button
@@ -1122,7 +1282,11 @@ onBeforeUnmount(() => {
       :class="{
         'skills-route': currentRoute === '/skills',
         'career-route': currentRoute === '/career',
-        'interview-library-route': currentRoute === '/interviews'
+        'resume-assistant-route': currentRoute === '/resume-assistant',
+        'interview-library-route': currentRoute.startsWith('/interviews'),
+        'evaluation-route': currentRoute === '/evaluations',
+        'prompt-preview-route': currentRoute === '/review/prompts',
+        'review-home-route': currentRoute === '/review'
       }"
     >
       <header class="topbar">
@@ -1139,25 +1303,58 @@ onBeforeUnmount(() => {
           <span aria-hidden="true"></span>
         </button>
         <h1>{{ activeRoute.label }}</h1>
-        <div class="topbar-account">
-          <span>{{ authUser.display_name || authUser.username }}</span>
-          <small>{{ authUser.role }}</small>
-          <button type="button" class="topbar-logout" @click="logoutPlatform">退出</button>
+        <div ref="accountMenuRef" class="topbar-account">
+          <button
+            type="button"
+            class="account-breadcrumb"
+            :class="{ active: accountMenuOpen }"
+            aria-haspopup="menu"
+            :aria-expanded="accountMenuOpen"
+            aria-controls="account-menu"
+            @click="toggleAccountMenu"
+          >
+            <span class="account-breadcrumb-avatar" aria-hidden="true">{{ accountInitial }}</span>
+            <span class="account-breadcrumb-name">{{ accountDisplayName }}</span>
+            <i aria-hidden="true">/</i>
+            <span class="account-breadcrumb-role">{{ accountRoleLabel }}</span>
+            <span class="account-breadcrumb-chevron" aria-hidden="true"></span>
+          </button>
+
+          <div v-if="accountMenuOpen" id="account-menu" class="account-menu" role="menu" aria-label="账户菜单">
+            <button
+              type="button"
+              class="account-menu-option"
+              role="menuitem"
+              :aria-expanded="accountMenuSection === 'profile'"
+              @click="toggleAccountMenuSection('profile')"
+            >
+              <span class="account-menu-option-icon" aria-hidden="true">人</span>
+              <span><strong>个人信息</strong><small>查看账户与权限</small></span>
+              <i aria-hidden="true"></i>
+            </button>
+            <div v-if="accountMenuSection === 'profile'" class="account-menu-panel account-profile-panel">
+              <div><span>账户</span><strong>{{ accountDisplayName }}</strong></div>
+              <div><span>角色</span><strong>{{ accountRoleLabel }}</strong></div>
+              <button type="button" class="account-logout" @click="logoutPlatform">退出登录</button>
+            </div>
+
+            <button
+              type="button"
+              class="account-menu-option"
+              role="menuitem"
+              :aria-expanded="accountMenuSection === 'theme'"
+              @click="toggleAccountMenuSection('theme')"
+            >
+              <span class="account-menu-option-icon theme-icon" aria-hidden="true"></span>
+              <span><strong>主题切换</strong><small>{{ uiTheme === 'blue' ? '当前为蓝白主题' : '当前为浅绿主题' }}</small></span>
+              <i aria-hidden="true"></i>
+            </button>
+            <div v-if="accountMenuSection === 'theme'" class="account-menu-panel account-theme-panel">
+              <ThemeSwitcher :model-value="uiTheme" @update:model-value="handleAccountThemeChange" />
+            </div>
+          </div>
         </div>
       </header>
-
-      <section v-if="isReviewRoute && currentRoute !== '/review/article'" class="resource-strip" aria-label="资源状态栏">
-        <article
-          v-for="item in resourceCards"
-          :key="item.label"
-          class="resource-card"
-          :class="{ ready: item.ready }"
-        >
-          <span>{{ item.label }}</span>
-          <strong>{{ item.status }}</strong>
-          <small>{{ item.detail }}</small>
-        </article>
-      </section>
 
       <section v-if="errorMessage" class="alert danger">
         {{ errorMessage }}
@@ -1166,13 +1363,34 @@ onBeforeUnmount(() => {
         {{ actionMessage }}
       </section>
 
-      <CareerAssistantPage v-if="currentRoute === '/career'" />
+      <section v-if="!canAccessCurrentRoute" class="route-access-state">
+        <span aria-hidden="true">—</span>
+        <h2>当前没有可访问的模块</h2>
+        <p>管理员尚未为此账户开放页面，请联系管理员调整路由模块配置。</p>
+        <button v-if="firstAccessibleRoute" type="button" class="secondary-button" @click="navigateTo(firstAccessibleRoute)">前往可用模块</button>
+      </section>
+
+      <CareerAssistantPage v-else-if="currentRoute === '/career'" />
+
+      <ResumeAssistantPage
+        v-else-if="currentRoute === '/resume-assistant'"
+        :current-user="authUser"
+      />
 
       <InterviewLibraryPage v-else-if="currentRoute === '/interviews'" />
 
+      <JobSearchWorkspace v-else-if="currentRoute === '/interviews/jobs'" />
+
+      <EvaluationCenterPage v-else-if="currentRoute === '/evaluations'" />
+
       <ObservabilityPage v-else-if="currentRoute === '/observability'" />
 
-      <AdminConsolePage v-else-if="currentRoute === '/admin'" />
+      <AdminConsolePage
+        v-else-if="currentRoute.startsWith('/admin/')"
+        :current-route="currentRoute"
+        @navigate="navigateTo"
+        @navigation-config-updated="applyNavigationConfig"
+      />
 
       <template v-else-if="currentRoute === '/skills'">
         <section class="skills-workspace">
@@ -1363,19 +1581,16 @@ onBeforeUnmount(() => {
       </template>
 
       <template v-else-if="currentRoute === '/review'">
+        <section class="review-home-scroll">
         <section class="health-card">
           <div>
-            <p class="eyebrow">CatTask</p>
             <h2>全局健康总览</h2>
-            <p>{{ healthSummary?.message ?? 'CatTask 会把最近任务、历史异常和缺失资源汇总到这里。' }}</p>
+            <p>{{ healthSummary?.message ?? '最近任务、历史异常和缺失资源会汇总到这里。' }}</p>
           </div>
-          <span class="status-pill" :class="healthClass(healthSummary?.health_status)">
-            {{ healthText(healthSummary?.health_status ?? 'unknown') }}
-          </span>
           <div class="health-stats">
-            <span>当前阻塞 {{ healthSummary?.blocking_item_count ?? 0 }} 项</span>
-            <span>当前失败 {{ healthSummary?.failed_run_count ?? 0 }} 项</span>
-            <span>历史失败 {{ healthSummary?.historical_failed_run_count ?? 0 }} 项</span>
+            <span><strong>{{ healthSummary?.blocking_item_count ?? 0 }}</strong><small>当前阻塞</small></span>
+            <span><strong>{{ healthSummary?.failed_run_count ?? 0 }}</strong><small>当前失败</small></span>
+            <span><strong>{{ healthSummary?.historical_failed_run_count ?? 0 }}</strong><small>历史失败</small></span>
           </div>
           <div v-if="blockingReasons.length" class="reason-row">
             <span v-for="reason in blockingReasons" :key="reason.reason" class="reason-chip">
@@ -1397,13 +1612,9 @@ onBeforeUnmount(() => {
             @click="navigateTo(card.path)"
             @keydown.enter.prevent="navigateTo(card.path)"
           >
-            <div class="module-card-header">
-              <p class="eyebrow">{{ card.eyebrow }}</p>
-              <span>{{ card.metric }}</span>
-            </div>
             <h2>{{ card.title }}</h2>
             <p>{{ shortText(card.description, 150) }}</p>
-            <div class="mini-preview" :class="`preview-${card.eyebrow.toLowerCase()}`">
+            <div class="mini-preview" :class="`preview-${card.kind}`">
               <template v-if="card.path === '/review/article'">
                 <div class="article-mini-copy">
                   <span class="article-mini-kicker">本周技术周报</span>
@@ -1466,9 +1677,8 @@ onBeforeUnmount(() => {
 
         <section class="storyboard-home" role="button" tabindex="0" @click="navigateTo('/review/storyboard')" @keydown.enter.prevent="navigateTo('/review/storyboard')">
           <div>
-            <p class="eyebrow">Short Video Blueprint</p>
             <h2>短视频蓝图</h2>
-            <p>保留在首页底部：7 段时间线、口播递进、Seedance 片段提示词。</p>
+            <p>查看 7 段分镜、递进口播和视频提示词</p>
           </div>
           <div class="timeline-preview">
             <span>0-5s</span>
@@ -1479,6 +1689,7 @@ onBeforeUnmount(() => {
             <span>项目5</span>
             <span>CTA</span>
           </div>
+        </section>
         </section>
       </template>
 
@@ -1502,7 +1713,12 @@ onBeforeUnmount(() => {
             <span class="week-tag">{{ content?.week_end ?? '等待生成' }}</span>
           </div>
           <p class="digest">{{ content?.digest ?? 'SummaryTask 完成后会在这里展示摘要。' }}</p>
-          <div v-if="articleLayout?.article_html" class="article-body rendered" v-html="articleLayout.article_html"></div>
+          <div
+            v-if="articleLayout?.article_html"
+            v-openable-images
+            class="article-body rendered"
+            v-html="articleLayout.article_html"
+          ></div>
           <div v-else class="article-body">
             <pre>{{ previewText(content?.article_markdown, '暂无正文') }}</pre>
           </div>
@@ -1569,15 +1785,48 @@ onBeforeUnmount(() => {
           <button type="button" @click="navigateTo('/review')">← 返回总览</button>
           <span>任务运行状态只读预览</span>
         </section>
-        <section class="detail-card">
+        <section class="detail-card pipeline-detail-card">
           <div class="panel-header">
             <div>
-              <p class="eyebrow">Pipeline</p>
-              <h2>任务状态流程</h2>
+              <h2>主任务生命周期</h2>
+              <p>从内容生成到人工审核，集中查看本次生产进度。</p>
             </div>
             <span class="status-pill" :class="healthClass(healthSummary?.health_status)">
               {{ healthText(healthSummary?.health_status ?? 'unknown') }}
             </span>
+          </div>
+
+          <section class="lifecycle-panel" aria-labelledby="lifecycle-heading">
+            <div class="lifecycle-heading">
+              <div>
+                <h3 id="lifecycle-heading">生产进度</h3>
+                <p>五个阶段全部完成后，内容才进入可交付状态。</p>
+              </div>
+              <span>{{ completedLifecycleStageCount }}/{{ lifecycleStages.length }} 已完成</span>
+            </div>
+            <ol class="lifecycle-flow">
+              <li
+                v-for="(stage, index) in lifecycleStages"
+                :key="stage.key"
+                class="lifecycle-stage"
+                :class="{ ready: stage.ready }"
+              >
+                <div class="lifecycle-marker" aria-hidden="true">{{ index + 1 }}</div>
+                <div class="lifecycle-copy">
+                  <span>{{ stage.label }}</span>
+                  <strong>{{ stage.status }}</strong>
+                  <small>{{ stage.detail }}</small>
+                </div>
+              </li>
+            </ol>
+          </section>
+
+          <div class="task-detail-heading">
+            <div>
+              <h3>执行任务明细</h3>
+              <p>用于定位具体 Task 的运行记录与失败原因。</p>
+            </div>
+            <span>{{ taskCards.filter((task) => task.status === 'succeeded').length }}/{{ taskCards.length }} 个任务成功</span>
           </div>
           <div class="task-list expanded">
             <article v-for="task in taskCards" :key="task.taskName" class="task-card">
@@ -1614,7 +1863,7 @@ onBeforeUnmount(() => {
               </p>
             </div>
             <span class="asset-count">
-              实际文件 {{ mediaLibrarySummary.total_asset_count ?? 0 }} ·
+              媒体文件 {{ mediaLibrarySummary.total_asset_count ?? 0 }} ·
               图片 {{ mediaLibrarySummary.image_count ?? 0 }} ·
               音频 {{ mediaLibrarySummary.audio_count ?? 0 }} ·
               视频 {{ mediaLibrarySummary.video_count ?? 0 }}
@@ -1626,7 +1875,17 @@ onBeforeUnmount(() => {
           <div v-else class="media-grid">
             <article v-for="asset in mediaLibraryAssets" :key="asset.id" class="media-card">
               <div class="media-preview">
-                <img v-if="asset.asset_type === 'image' && asset.preview_url" :src="asset.preview_url" :alt="`asset-${asset.id}`" />
+                <a
+                  v-if="asset.asset_type === 'image' && asset.preview_url"
+                  class="media-image-link"
+                  :href="asset.preview_url"
+                  target="_blank"
+                  rel="noreferrer"
+                  :aria-label="`打开图片 ${asset.id} 原图`"
+                  title="点击查看原图"
+                >
+                  <img :src="asset.preview_url" :alt="`图片 ${asset.id}`" />
+                </a>
                 <audio v-else-if="asset.asset_type === 'audio' && asset.preview_url" controls :src="asset.preview_url"></audio>
                 <video v-else-if="isPlayableVideoAsset(asset)" controls :src="asset.preview_url"></video>
                 <span v-else>{{ mediaTypeLabel(asset.asset_type) }}</span>
@@ -1761,31 +2020,32 @@ onBeforeUnmount(() => {
       <template v-else-if="currentRoute === '/review/prompts'">
         <section class="detail-toolbar">
           <button type="button" @click="navigateTo('/review')">← 返回总览</button>
-          <span>提示词只读预览</span>
         </section>
         <section class="prompt-grid">
-          <article class="detail-card">
-            <p class="eyebrow">Image Prompts</p>
-            <h2>生图提示词</h2>
-            <div v-if="!imagePrompts.length" class="empty-media">暂无 image_prompts。</div>
-            <div v-else class="prompt-list">
-              <article v-for="(prompt, index) in imagePrompts" :key="prompt.repository_full_name || index">
-                <strong>图 {{ index + 1 }} · {{ prompt.repository_full_name }}</strong>
-                <p>{{ prompt.summary_text }}</p>
-                <pre>{{ prompt.prompt }}</pre>
-              </article>
+          <article class="detail-card prompt-column">
+            <header class="prompt-column-header"><h2>生图提示词</h2></header>
+            <div class="prompt-column-scroll">
+              <div v-if="!imagePrompts.length" class="empty-media">暂无生图提示词。</div>
+              <div v-else class="prompt-list">
+                <article v-for="(prompt, index) in imagePrompts" :key="prompt.repository_full_name || index">
+                  <strong>图 {{ index + 1 }} · {{ prompt.repository_full_name }}</strong>
+                  <p>{{ prompt.summary_text }}</p>
+                  <pre>{{ prompt.prompt }}</pre>
+                </article>
+              </div>
             </div>
           </article>
-          <article class="detail-card">
-            <p class="eyebrow">Video Prompts</p>
-            <h2>视频提示词</h2>
-            <pre>{{ videoStoryboard?.seedance_prompt || '暂无 Seedance 主提示词' }}</pre>
-            <div v-if="videoClipPlans.length" class="prompt-list compact">
-              <article v-for="clip in videoClipPlans" :key="clip.id">
-                <strong>{{ clip.clip_title }}</strong>
-                <p>{{ clip.output_start_second }}s-{{ clip.output_end_second }}s · {{ clip.repository_full_name || '全局片段' }}</p>
-                <pre>{{ clip.seedance_prompt }}</pre>
-              </article>
+          <article class="detail-card prompt-column">
+            <header class="prompt-column-header"><h2>视频提示词</h2></header>
+            <div class="prompt-column-scroll">
+              <pre>{{ videoStoryboard?.seedance_prompt || '暂无 Seedance 主提示词' }}</pre>
+              <div v-if="videoClipPlans.length" class="prompt-list compact">
+                <article v-for="clip in videoClipPlans" :key="clip.id">
+                  <strong>{{ clip.clip_title }}</strong>
+                  <p>{{ clip.output_start_second }}s-{{ clip.output_end_second }}s · {{ clip.repository_full_name || '全局片段' }}</p>
+                  <pre>{{ clip.seedance_prompt }}</pre>
+                </article>
+              </div>
             </div>
           </article>
         </section>

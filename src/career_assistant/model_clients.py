@@ -27,7 +27,35 @@ class ChatMessage:
     """单条 OpenAI-compatible ChatCompletions 消息。"""
 
     role: str
-    content: str | list[dict[str, object]]
+    content: str | list[dict[str, object]] | None
+    tool_call_id: str | None = None
+    tool_calls: tuple["FunctionToolCall", ...] = ()
+
+
+@dataclass(frozen=True)
+class FunctionToolDefinition:
+    """一项可暴露给 OpenAI-compatible 模型的受控函数定义。"""
+
+    name: str
+    description: str
+    parameters: dict[str, object]
+
+
+@dataclass(frozen=True)
+class FunctionToolCall:
+    """模型返回的一次函数调用请求。"""
+
+    id: str
+    name: str
+    arguments: str
+
+
+@dataclass(frozen=True)
+class ToolModelResponse:
+    """包含可选正文和函数调用的模型消息。"""
+
+    content: str
+    tool_calls: tuple[FunctionToolCall, ...]
 
 
 @dataclass(frozen=True)
@@ -131,6 +159,95 @@ class OpenAICompatibleChatClient:
                 **self._trace_message_metrics(messages),
             },
             tags=("career", "chat", "privacy:metadata-only"),
+        )
+
+    def complete_json(
+        self,
+        profile: ModelProfileRecord,
+        credential_env_name: str | None,
+        messages: list[ChatMessage],
+        *,
+        api_key: str | None = None,
+    ) -> str:
+        """请求 JSON Object 输出；调用方仍须执行领域 Schema 校验。"""
+
+        credential = (api_key or "").strip()
+        if not credential and credential_env_name:
+            credential = os.getenv(credential_env_name, "").strip()
+        if not credential:
+            raise ModelInvocationError("模型 API Key 尚未配置")
+        target = ModelConnectionTarget(
+            provider_key=profile.provider_key,
+            model_id=profile.model_id,
+            api_base_url=profile.api_base_url,
+        )
+        return trace_operation(
+            run_name="career.job_assessment.completion",
+            run_type="llm",
+            execute=lambda: self._request_completion(
+                target,
+                credential,
+                messages,
+                max_tokens=self._completion_max_tokens,
+                response_format={"type": "json_object"},
+            ),
+            summarize=lambda result: {
+                "output_characters": len(result),
+                "has_output": bool(result),
+            },
+            metadata={
+                **self._trace_metadata(target, streaming=False),
+                **self._trace_message_metrics(messages),
+                "operation": "job_assessment",
+            },
+            tags=("career", "job-assessment", "privacy:metadata-only"),
+        )
+
+    def complete_with_tools(
+        self,
+        profile: ModelProfileRecord,
+        credential_env_name: str | None,
+        messages: list[ChatMessage],
+        tools: tuple[FunctionToolDefinition, ...],
+        *,
+        tool_choice: str | dict[str, object] = "auto",
+        api_key: str | None = None,
+    ) -> ToolModelResponse:
+        """按 Chat Completions Tool Calling 协议执行一次模型决策。"""
+
+        credential = (api_key or "").strip()
+        if not credential and credential_env_name:
+            credential = os.getenv(credential_env_name, "").strip()
+        if not credential:
+            raise ModelInvocationError("模型 API Key 尚未配置")
+        if not tools:
+            raise ValueError("Tool Calling 至少需要一个工具定义")
+        target = ModelConnectionTarget(
+            provider_key=profile.provider_key,
+            model_id=profile.model_id,
+            api_base_url=profile.api_base_url,
+        )
+        return trace_operation(
+            run_name="career.chat.tool_call",
+            run_type="llm",
+            execute=lambda: self._request_tool_completion(
+                target,
+                credential,
+                messages,
+                tools,
+                tool_choice=tool_choice,
+                max_tokens=self._completion_max_tokens,
+            ),
+            summarize=lambda result: {
+                "tool_call_count": len(result.tool_calls),
+                "has_output": bool(result.content),
+            },
+            metadata={
+                **self._trace_metadata(target, streaming=False),
+                **self._trace_message_metrics(messages),
+                "tool_count": len(tools),
+            },
+            tags=("career", "chat", "tool-calling", "privacy:metadata-only"),
         )
 
     def test_connection(
@@ -245,6 +362,8 @@ class OpenAICompatibleChatClient:
     def _message_character_count(message: ChatMessage) -> int:
         """统计输入规模；多模态 Data URL 只计长度，不返回任何内容。"""
 
+        if message.content is None:
+            return sum(len(call.arguments) for call in message.tool_calls)
         if isinstance(message.content, str):
             return len(message.content)
         count = 0
@@ -266,6 +385,7 @@ class OpenAICompatibleChatClient:
         messages: list[ChatMessage],
         *,
         max_tokens: int,
+        response_format: dict[str, object] | None = None,
     ) -> str:
         """统一发送 OpenAI-compatible ChatCompletions 请求并清洗异常。"""
 
@@ -281,6 +401,7 @@ class OpenAICompatibleChatClient:
                     target,
                     messages,
                     max_tokens=max_tokens,
+                    response_format=response_format,
                 ),
             )
         except httpx.TimeoutException as exc:
@@ -323,6 +444,75 @@ class OpenAICompatibleChatClient:
                     "模型已开始推理，但测试输出额度不足以生成最终回复。请重试；若仍出现，请更换非推理模型。",
                 )
         raise ModelInvocationError("模型没有生成可读取的文本回复，请检查模型 ID 是否支持 Chat Completions")
+
+    def _request_tool_completion(
+        self,
+        target: ModelConnectionTarget,
+        credential: str,
+        messages: list[ChatMessage],
+        tools: tuple[FunctionToolDefinition, ...],
+        *,
+        tool_choice: str | dict[str, object],
+        max_tokens: int,
+    ) -> ToolModelResponse:
+        """发送一次带 tools 的请求，并解析 assistant.tool_calls。"""
+
+        base_url = self._base_url_for(target)
+        try:
+            response = self._client.post(
+                f"{base_url}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {credential}",
+                    "Content-Type": "application/json",
+                },
+                json=self._build_request_payload(
+                    target,
+                    messages,
+                    max_tokens=max_tokens,
+                    tools=tools,
+                    tool_choice=tool_choice,
+                ),
+            )
+        except httpx.TimeoutException as exc:
+            raise ModelInvocationError(
+                f"连接模型服务超时（{self._request_timeout_seconds:g} 秒）。请稍后重试。",
+                retryable=True,
+            ) from exc
+        except httpx.RequestError as exc:
+            raise ModelInvocationError(
+                "无法访问模型服务。请检查网络和服务商状态。",
+                retryable=True,
+            ) from exc
+        if response.status_code >= 400:
+            raise ModelInvocationError(
+                self._http_error_message(response.status_code),
+                retryable=self._is_retryable_http_status(response.status_code),
+            )
+        try:
+            message = response.json()["choices"][0]["message"]
+        except (IndexError, KeyError, TypeError, ValueError) as exc:
+            raise ModelInvocationError("模型 Tool Calling 返回格式异常") from exc
+        if not isinstance(message, dict):
+            raise ModelInvocationError("模型 Tool Calling 返回格式异常")
+        raw_calls = message.get("tool_calls") or []
+        if not isinstance(raw_calls, list):
+            raise ModelInvocationError("模型 tool_calls 字段格式异常")
+        parsed_calls: list[FunctionToolCall] = []
+        for raw_call in raw_calls:
+            try:
+                function = raw_call["function"]
+                call_id = str(raw_call["id"]).strip()
+                name = str(function["name"]).strip()
+                arguments = str(function.get("arguments") or "{}")
+            except (KeyError, TypeError) as exc:
+                raise ModelInvocationError("模型返回了无效的工具调用") from exc
+            if not call_id or not name:
+                raise ModelInvocationError("模型返回了缺少标识的工具调用")
+            parsed_calls.append(FunctionToolCall(call_id, name, arguments))
+        return ToolModelResponse(
+            content=self._content_text(message.get("content")).strip(),
+            tool_calls=tuple(parsed_calls),
+        )
 
     def _stream_request_completion(
         self,
@@ -412,6 +602,9 @@ class OpenAICompatibleChatClient:
         *,
         max_tokens: int,
         stream: bool = False,
+        tools: tuple[FunctionToolDefinition, ...] = (),
+        tool_choice: str | dict[str, object] | None = None,
+        response_format: dict[str, object] | None = None,
     ) -> dict[str, object]:
         """构造不包含凭证的 Chat Completions 请求体。
 
@@ -423,7 +616,7 @@ class OpenAICompatibleChatClient:
         payload: dict[str, object] = {
             "model": target.model_id,
             "messages": [
-                {"role": message.role, "content": message.content}
+                OpenAICompatibleChatClient._message_payload(message)
                 for message in messages
             ],
             "temperature": 0.25,
@@ -431,11 +624,50 @@ class OpenAICompatibleChatClient:
         }
         if stream:
             payload["stream"] = True
+        if tools:
+            payload["tools"] = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "parameters": tool.parameters,
+                    },
+                }
+                for tool in tools
+            ]
+            payload["tool_choice"] = tool_choice or "auto"
+        if response_format is not None:
+            payload["response_format"] = response_format
         if (
             target.provider_key == "deepseek"
             and target.model_id.lower().startswith("deepseek-v4")
         ):
             payload["thinking"] = {"type": "disabled"}
+        return payload
+
+    @staticmethod
+    def _message_payload(message: ChatMessage) -> dict[str, object]:
+        """序列化普通消息、assistant.tool_calls 和 role=tool 消息。"""
+
+        payload: dict[str, object] = {
+            "role": message.role,
+            "content": message.content,
+        }
+        if message.tool_call_id:
+            payload["tool_call_id"] = message.tool_call_id
+        if message.tool_calls:
+            payload["tool_calls"] = [
+                {
+                    "id": call.id,
+                    "type": "function",
+                    "function": {
+                        "name": call.name,
+                        "arguments": call.arguments,
+                    },
+                }
+                for call in message.tool_calls
+            ]
         return payload
 
     def _base_url_for(self, target: ModelConnectionTarget) -> str:

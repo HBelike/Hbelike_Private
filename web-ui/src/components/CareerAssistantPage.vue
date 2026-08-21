@@ -1,8 +1,24 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import CareerContextRail from './CareerContextRail.vue'
+import CareerContextSetupDialog from './CareerContextSetupDialog.vue'
+import CareerJobSearchDialog from './CareerJobSearchDialog.vue'
+import CareerMessageContent from './CareerMessageContent.vue'
+import { toTargetRolePayload } from '../job-library-target-role.js'
+import { isAssessmentPending } from '../career-assessment-view.js'
+import {
+  DEFAULT_HISTORY_PAGE_SIZE,
+  HISTORY_PAGE_SIZE_OPTIONS,
+  historyPageRange,
+  normalizeHistoryPage,
+  normalizeHistoryPageTarget,
+  pageRequestUrl
+} from '../career-history-pagination.js'
 
 const conversations = ref([])
+const candidateProfiles = ref([])
 const selectedConversation = ref(null)
+const conversationContext = ref(null)
 const messages = ref([])
 const modelProfiles = ref([])
 const freeModelCatalog = ref([])
@@ -26,6 +42,9 @@ const messageText = ref('')
 const interviewMentionQuery = ref('')
 const interviewMentionResults = ref([])
 const selectedInterviewReferences = ref([])
+const skillMentionQuery = ref('')
+const skillMentionResults = ref([])
+const selectedSkillInvocations = ref([])
 const jobUrl = ref('')
 const resumeFile = ref(null)
 const resumeInput = ref(null)
@@ -39,13 +58,87 @@ const streamStatus = ref('')
 const streamProgress = ref([])
 const activeTemporaryMessageId = ref('')
 const modelForm = ref(emptyModelForm())
+const conversationMenuId = ref('')
+const renamingConversationId = ref('')
+const renameTitleDraft = ref('')
+const deletingConversationId = ref('')
+const conversationActionLoadingId = ref('')
+const showContextSetup = ref(false)
+const contextSetupInitial = ref(null)
+const showJobSearch = ref(false)
+const savingJobSearch = ref(false)
+const jobSearchError = ref('')
+const pendingJobLibraryTarget = ref(null)
+const jobSearchButton = ref(null)
+const historyCollapsed = ref(false)
+const historyPage = ref(1)
+const historyPageSize = ref(DEFAULT_HISTORY_PAGE_SIZE)
+const historyTotal = ref(0)
+const historyLoading = ref(false)
+const historyJumpPage = ref(1)
+const contextRailWidth = ref(620)
+const resizingContextRail = ref(false)
+const viewportWidth = ref(typeof window === 'undefined' ? 1600 : window.innerWidth)
+
+const HISTORY_COLLAPSED_STORAGE_KEY = 'career-assistant-history-collapsed'
+const HISTORY_PAGE_SIZE_STORAGE_KEY = 'career-assistant-history-page-size'
+const CONTEXT_RAIL_WIDTH_STORAGE_KEY = 'career-assistant-context-rail-width'
+const CONTEXT_RAIL_MIN_WIDTH = 360
+const CONTEXT_RAIL_MAX_WIDTH = 760
+const CONTEXT_RAIL_DEFAULT_WIDTH = 620
+const historyTotalPages = computed(() => Math.max(1, Math.ceil(historyTotal.value / historyPageSize.value)))
+const historyRange = computed(() => historyPageRange({
+  page: historyPage.value,
+  pageSize: historyPageSize.value,
+  total: historyTotal.value
+}))
+
+const visibleContextRailWidth = computed(() => {
+  if (viewportWidth.value <= 640) return viewportWidth.value
+  const historyWidth = historyCollapsed.value ? 48 : (viewportWidth.value <= 1500 ? 220 : 252)
+  const minimumChatWidth = viewportWidth.value <= 1500 ? 480 : 560
+  const availableWidth = viewportWidth.value - historyWidth - minimumChatWidth - 50
+  return Math.min(contextRailWidth.value, Math.max(CONTEXT_RAIL_MIN_WIDTH, availableWidth))
+})
+
+const hasCandidateContext = computed(() => Boolean(conversationContext.value?.candidate_profile))
+const hasTargetContext = computed(() => Boolean(conversationContext.value?.target_role))
+const contextButtonLabel = computed(() => {
+  const completed = Number(hasCandidateContext.value) + Number(hasTargetContext.value)
+  return completed ? `求职资料：已添加 ${completed}/2` : '补充求职资料（可选）'
+})
+const composerPlaceholder = computed(() => {
+  if (!selectedConversation.value) return '请先开启一个对话'
+  if (hasCandidateContext.value && hasTargetContext.value) {
+    return '基于当前简历与目标岗位提问，例如：这个岗位最可能追问我哪段项目？'
+  }
+  if (hasCandidateContext.value) return '可以直接提问；当前回答会参考已添加的简历'
+  if (hasTargetContext.value) return '可以直接提问；当前回答会参考已添加的目标岗位'
+  return '直接询问求职问题；简历和 JD 可以稍后再添加'
+})
+const welcomeMessage = computed(() => {
+  if (hasCandidateContext.value && hasTargetContext.value) {
+    return '基准简历和目标岗位已经就绪。你可以询问岗位差距、简历表达、面试问题，或结合面经准备回答。'
+  }
+  if (hasCandidateContext.value) {
+    return '已加载你的基准简历。你可以直接咨询经历表达、简历优化或面试准备，也可以稍后补充目标岗位。'
+  }
+  if (hasTargetContext.value) {
+    return '已加载目标岗位。你可以直接咨询岗位要求和准备重点，也可以稍后补充简历以获得个性化匹配分析。'
+  }
+  return '现在可以直接和我聊求职问题。简历和 JD 都是可选资料，你可以随时在下方补充，后续回答会自动使用最新资料。'
+})
 
 let errorToastTimer = null
 let conversationSelectionRequestId = 0
+let historyPageRequestId = 0
 let temporaryMessageSequence = 0
 let turnRecoveryPollTimer = null
+let assessmentPollTimer = null
 let interviewMentionDebounceTimer = null
 let interviewMentionRequestId = 0
+let skillMentionDebounceTimer = null
+let skillMentionRequestId = 0
 
 function dismissError() {
   errorMessage.value = ''
@@ -68,13 +161,145 @@ watch(errorMessage, (message) => {
 onBeforeUnmount(() => {
   if (errorToastTimer) clearTimeout(errorToastTimer)
   if (interviewMentionDebounceTimer) clearTimeout(interviewMentionDebounceTimer)
+  if (skillMentionDebounceTimer) clearTimeout(skillMentionDebounceTimer)
+  document.removeEventListener('pointerdown', handleConversationActionPointerDown)
+  window.removeEventListener('resize', updateCareerViewportWidth)
+  stopContextRailResize()
   stopTurnRecoveryPolling()
+  stopAssessmentPolling()
 })
+
+function closeConversationActions() {
+  conversationMenuId.value = ''
+  renamingConversationId.value = ''
+  renameTitleDraft.value = ''
+  deletingConversationId.value = ''
+}
+
+function toggleHistoryPanel() {
+  historyCollapsed.value = !historyCollapsed.value
+  closeConversationActions()
+  window.localStorage.setItem(HISTORY_COLLAPSED_STORAGE_KEY, historyCollapsed.value ? '1' : '0')
+}
+
+function applyHistoryPage(payload, fallbackPage = historyPage.value) {
+  const normalized = normalizeHistoryPage(payload, fallbackPage, historyPageSize.value)
+  conversations.value = normalized.items
+  historyPage.value = normalized.page
+  historyJumpPage.value = normalized.page
+  historyPageSize.value = normalized.pageSize
+  historyTotal.value = normalized.total
+  return normalized
+}
+
+async function loadConversationPage(page = historyPage.value) {
+  const requestedPage = Math.max(1, Number(page) || 1)
+  const requestId = ++historyPageRequestId
+  historyLoading.value = true
+  closeConversationActions()
+  try {
+    const payload = await requestJson(pageRequestUrl(requestedPage, historyPageSize.value))
+    if (requestId !== historyPageRequestId) return
+    const normalized = applyHistoryPage(payload, requestedPage)
+    if (normalized.page !== requestedPage && normalized.total > 0) {
+      await loadConversationPage(normalized.page)
+    }
+  } catch (error) {
+    if (requestId === historyPageRequestId) {
+      errorMessage.value = error instanceof Error ? error.message : '会话列表加载失败'
+    }
+  } finally {
+    if (requestId === historyPageRequestId) historyLoading.value = false
+  }
+}
+
+function changeHistoryPageSize() {
+  const selectedSize = Number(historyPageSize.value)
+  historyPageSize.value = HISTORY_PAGE_SIZE_OPTIONS.includes(selectedSize)
+    ? selectedSize
+    : DEFAULT_HISTORY_PAGE_SIZE
+  window.localStorage.setItem(HISTORY_PAGE_SIZE_STORAGE_KEY, String(historyPageSize.value))
+  historyJumpPage.value = 1
+  void loadConversationPage(1)
+}
+
+function goToHistoryPage(page) {
+  const target = normalizeHistoryPageTarget(page, historyTotalPages.value)
+  historyJumpPage.value = target
+  if (target === historyPage.value || historyLoading.value) return
+  void loadConversationPage(target)
+}
+
+function clampContextRailWidth(width) {
+  return Math.min(CONTEXT_RAIL_MAX_WIDTH, Math.max(CONTEXT_RAIL_MIN_WIDTH, Math.round(width)))
+}
+
+function persistContextRailWidth() {
+  window.localStorage.setItem(CONTEXT_RAIL_WIDTH_STORAGE_KEY, String(contextRailWidth.value))
+}
+
+let contextRailResizeStartX = 0
+let contextRailResizeStartWidth = CONTEXT_RAIL_DEFAULT_WIDTH
+
+function handleContextRailPointerMove(event) {
+  if (!resizingContextRail.value) return
+  contextRailWidth.value = clampContextRailWidth(contextRailResizeStartWidth + contextRailResizeStartX - event.clientX)
+}
+
+function stopContextRailResize() {
+  if (!resizingContextRail.value) return
+  resizingContextRail.value = false
+  document.body.style.cursor = ''
+  document.body.style.userSelect = ''
+  window.removeEventListener('pointermove', handleContextRailPointerMove)
+  window.removeEventListener('pointerup', stopContextRailResize)
+  window.removeEventListener('pointercancel', stopContextRailResize)
+  persistContextRailWidth()
+}
+
+function startContextRailResize(event) {
+  if (event.button !== 0) return
+  contextRailResizeStartX = event.clientX
+  contextRailResizeStartWidth = contextRailWidth.value
+  resizingContextRail.value = true
+  document.body.style.cursor = 'col-resize'
+  document.body.style.userSelect = 'none'
+  event.currentTarget.setPointerCapture?.(event.pointerId)
+  window.addEventListener('pointermove', handleContextRailPointerMove)
+  window.addEventListener('pointerup', stopContextRailResize)
+  window.addEventListener('pointercancel', stopContextRailResize)
+}
+
+function resizeContextRailBy(delta) {
+  contextRailWidth.value = clampContextRailWidth(contextRailWidth.value + delta)
+  persistContextRailWidth()
+}
+
+function resetContextRailWidth() {
+  contextRailWidth.value = CONTEXT_RAIL_DEFAULT_WIDTH
+  persistContextRailWidth()
+}
+
+function updateCareerViewportWidth() {
+  viewportWidth.value = window.innerWidth
+}
+
+function handleConversationActionPointerDown(event) {
+  if (!conversationMenuId.value) return
+  if (event.target instanceof Element && event.target.closest('.conversation-item')) return
+  closeConversationActions()
+}
 
 function clearInterviewMentions() {
   interviewMentionQuery.value = ''
   interviewMentionResults.value = []
   selectedInterviewReferences.value = []
+}
+
+function clearSkillInvocations() {
+  skillMentionQuery.value = ''
+  skillMentionResults.value = []
+  selectedSkillInvocations.value = []
 }
 
 function activeInterviewMention(text) {
@@ -125,8 +350,80 @@ function removeInterviewMention(experienceId) {
   selectedInterviewReferences.value = selectedInterviewReferences.value.filter((item) => item.id !== experienceId)
 }
 
+function activeSkillInvocation(text) {
+  const match = text.match(/(?:^|\s)([@/])([A-Za-z0-9_-]{0,80})$/)
+  return match ? { trigger: match[1], query: match[2].trim() } : null
+}
+
+async function loadSkillMentionResults(query) {
+  const requestId = ++skillMentionRequestId
+  try {
+    const payload = await requestJson(`/api/career/skills/mentions?query=${encodeURIComponent(query)}`)
+    if (requestId !== skillMentionRequestId || skillMentionQuery.value !== query) return
+    skillMentionResults.value = payload.items ?? []
+  } catch {
+    if (requestId === skillMentionRequestId) skillMentionResults.value = []
+  }
+}
+
+function scheduleSkillMentionSearch(text) {
+  const invocation = activeSkillInvocation(text)
+  skillMentionQuery.value = invocation?.query ?? ''
+  skillMentionResults.value = []
+  if (skillMentionDebounceTimer) clearTimeout(skillMentionDebounceTimer)
+  skillMentionDebounceTimer = null
+  if (!invocation) return
+  skillMentionDebounceTimer = setTimeout(() => {
+    void loadSkillMentionResults(invocation.query)
+  }, 120)
+}
+
+function selectSkillMention(skill) {
+  if (selectedSkillInvocations.value.some((item) => item.id === skill.id)) {
+    skillMentionResults.value = []
+    return
+  }
+  if (selectedSkillInvocations.value.length >= 3) {
+    errorMessage.value = '单轮最多调用 3 个 Skill。'
+    return
+  }
+  const trigger = activeSkillInvocation(messageText.value)?.trigger ?? '@'
+  selectedSkillInvocations.value = [...selectedSkillInvocations.value, skill]
+  messageText.value = messageText.value.replace(/(?:^|\s)[@/][A-Za-z0-9_-]{0,80}$/, ' ').trimEnd()
+  messageText.value = `${messageText.value}${messageText.value ? ' ' : ''}${trigger}${skill.name} `
+  skillMentionQuery.value = ''
+  skillMentionResults.value = []
+  interviewMentionResults.value = []
+}
+
+function removeSkillInvocation(skillId) {
+  const skill = selectedSkillInvocations.value.find((item) => item.id === skillId)
+  selectedSkillInvocations.value = selectedSkillInvocations.value.filter((item) => item.id !== skillId)
+  if (skill) {
+    const escapedName = skill.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    messageText.value = messageText.value
+      .replace(new RegExp(`(^|\\s)[@/]${escapedName}(?=\\s|$)`, 'gi'), ' ')
+      .replace(/\s{2,}/g, ' ')
+      .trim()
+  }
+}
+
+function skillInvocationPresent(text, skill) {
+  const escapedName = skill.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return new RegExp(`(^|\\s)[@/]${escapedName}(?=\\s|$)`, 'i').test(text)
+}
+
+function activeSelectedSkillInvocations(text) {
+  return selectedSkillInvocations.value.filter((skill) => skillInvocationPresent(text, skill))
+}
+
 watch(messageText, (text) => {
+  const activeSkills = activeSelectedSkillInvocations(text)
+  if (activeSkills.length !== selectedSkillInvocations.value.length) {
+    selectedSkillInvocations.value = activeSkills
+  }
   scheduleInterviewMentionSearch(text)
+  scheduleSkillMentionSearch(text)
 })
 
 const providerOptions = [
@@ -182,7 +479,7 @@ function emptyModelForm() {
   return {
     profileKey: '', displayName: '', providerKey: 'deepseek', modelId: '', apiKey: '',
     apiBaseUrl: 'https://api.deepseek.com', websiteUrl: 'https://platform.deepseek.com',
-    costTier: 'free_quota', priority: 100, text: true, vision: false
+    costTier: 'free_quota', priority: 100, text: true, vision: false, tools: false
   }
 }
 
@@ -251,7 +548,8 @@ function configureFreeModel(offer, model) {
     apiBaseUrl: offer.api_base_url || provider.apiBaseUrl,
     websiteUrl: offer.website_url || provider.websiteUrl,
     costTier: 'free_quota',
-    vision: Boolean(model.supports_vision)
+    vision: Boolean(model.supports_vision),
+    tools: Boolean(model.supports_tools)
   }
   modelSetupReturnMode.value = 'free'
   modelDialogMode.value = 'setup'
@@ -348,7 +646,8 @@ function editModelConnection(item, returnMode = 'list') {
     costTier: profile.cost_tier,
     priority: profile.priority,
     text: profile.capabilities.includes('text'),
-    vision: profile.capabilities.includes('vision')
+    vision: profile.capabilities.includes('vision'),
+    tools: profile.capabilities.includes('tools')
   }
   testedConnectionFingerprint.value = ''
   connectionTestMessage.value = '为了保护密钥，修改连接后请重新填写 API Key 并测试。'
@@ -400,6 +699,7 @@ function resetConversationDraft() {
   showJobUrl.value = false
   clearResumeFile()
   clearInterviewMentions()
+  clearSkillInvocations()
   streamedAssistantText.value = ''
   streamStatus.value = ''
   streamProgress.value = []
@@ -443,6 +743,7 @@ async function refreshActiveConversationTurn() {
     const payload = await requestJson(`/api/career/conversations/${conversationId}`)
     if (selectedConversation.value?.id !== conversationId) return
     messages.value = payload.messages ?? []
+    conversationContext.value = payload.context ?? null
     restoreConversationModelSelection(payload.last_model_selection)
     lastTurn.value = payload.latest_turn ?? null
   } catch (error) {
@@ -452,6 +753,39 @@ async function refreshActiveConversationTurn() {
     if (selectedConversation.value?.id === conversationId) scheduleTurnRecoveryPolling()
   }
 }
+
+function stopAssessmentPolling() {
+  if (!assessmentPollTimer) return
+  clearTimeout(assessmentPollTimer)
+  assessmentPollTimer = null
+}
+
+function scheduleAssessmentPolling() {
+  stopAssessmentPolling()
+  if (!selectedConversation.value || !isAssessmentPending(conversationContext.value?.assessment)) return
+  assessmentPollTimer = setTimeout(() => {
+    void refreshAssessmentContext()
+  }, 2000)
+}
+
+async function refreshAssessmentContext() {
+  const conversationId = selectedConversation.value?.id
+  if (!conversationId || !isAssessmentPending(conversationContext.value?.assessment)) return
+  try {
+    const payload = await requestJson(`/api/career/conversations/${conversationId}`)
+    if (selectedConversation.value?.id !== conversationId) return
+    conversationContext.value = payload.context ?? null
+  } catch {
+    // 分析任务仍在后台运行，短暂读取失败时继续轮询，不打断当前对话。
+  } finally {
+    if (selectedConversation.value?.id === conversationId) scheduleAssessmentPolling()
+  }
+}
+
+watch(
+  () => [selectedConversation.value?.id, conversationContext.value?.assessment?.status],
+  scheduleAssessmentPolling,
+)
 
 function useFreeQuotaFirstSelection() {
   if (!hasReadyFreeModel.value) {
@@ -551,20 +885,21 @@ async function requestSse(url, options, handlers) {
 async function refreshData() {
   loading.value = true
   errorMessage.value = ''
+  const historyRequest = requestJson(pageRequestUrl(historyPage.value, historyPageSize.value))
+  const profileRequest = requestJson('/api/career/model-profiles')
+  const candidateRequest = requestJson('/api/career/candidate-profiles')
+  const catalogRequest = loadFreeModelCatalog()
+
   try {
-    const [history, profiles] = await Promise.all([
-      requestJson('/api/career/conversations'),
-      requestJson('/api/career/model-profiles')
-    ])
-    conversations.value = history.items ?? []
-    modelProfiles.value = profiles.items ?? []
-    restoreConversationModelSelection(null)
-    await loadFreeModelCatalog()
+    // 历史列表是首屏主内容：单独等待并立即释放 loading，不能被模型目录或简历档案拖住。
+    const history = await historyRequest
+    applyHistoryPage(history)
     if (selectedConversation.value) {
       const current = conversations.value.find((item) => item.id === selectedConversation.value.id)
       if (current) await selectConversation(current.id, false)
       else {
         selectedConversation.value = null
+        conversationContext.value = null
         messages.value = []
       }
     }
@@ -573,20 +908,47 @@ async function refreshData() {
   } finally {
     loading.value = false
   }
+
+  const [profileResult, candidateResult] = await Promise.allSettled([
+    profileRequest,
+    candidateRequest
+  ])
+  if (profileResult.status === 'fulfilled') {
+    modelProfiles.value = profileResult.value.items ?? []
+    restoreConversationModelSelection(null)
+  } else if (!errorMessage.value) {
+    errorMessage.value = profileResult.reason instanceof Error
+      ? profileResult.reason.message
+      : '模型配置加载失败'
+  }
+  if (candidateResult.status === 'fulfilled') {
+    candidateProfiles.value = candidateResult.value.items ?? []
+  } else if (!errorMessage.value) {
+    errorMessage.value = candidateResult.reason instanceof Error
+      ? candidateResult.reason.message
+      : '基准简历列表加载失败'
+  }
+  await catalogRequest
 }
 
 async function selectConversation(conversationId, clearFeedback = true) {
+  if (savingJobSearch.value) return
+  resetJobSearch()
+  closeConversationActions()
   const requestId = ++conversationSelectionRequestId
   loading.value = true
   errorMessage.value = ''
   if (clearFeedback) feedback.value = ''
   stopTurnRecoveryPolling()
+  stopAssessmentPolling()
   resetConversationDraft()
+  conversationContext.value = null
   useFreeQuotaFirstSelection()
   try {
     const payload = await requestJson(`/api/career/conversations/${conversationId}`)
     if (requestId !== conversationSelectionRequestId) return
     selectedConversation.value = payload.conversation
+    conversationContext.value = payload.context ?? null
     messages.value = payload.messages ?? []
     restoreConversationModelSelection(payload.last_model_selection)
     lastTurn.value = payload.latest_turn ?? null
@@ -608,17 +970,32 @@ function conversationTitle() {
   return conversationTitleFromText(messageText.value)
 }
 
-async function createConversation({ preserveDraft = false, title = conversationTitle() } = {}) {
+async function createConversation({
+  preserveDraft = false,
+  title = conversationTitle(),
+  candidateProfileId = '',
+  targetRoleProfileId = ''
+} = {}) {
   creating.value = true
   errorMessage.value = ''
   try {
     const conversation = await requestJson('/api/career/conversations', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title })
+      body: JSON.stringify({
+        title,
+        candidate_profile_id: candidateProfileId || null,
+        target_role_profile_id: targetRoleProfileId || null
+      })
     })
+    historyPage.value = 1
+    historyTotal.value += 1
     conversations.value = [conversation, ...conversations.value]
+      .filter((item, index, items) => items.findIndex((candidate) => candidate.id === item.id) === index)
+      .slice(0, historyPageSize.value)
+    void loadConversationPage(1)
     selectedConversation.value = conversation
+    conversationContext.value = conversation.context ?? null
     messages.value = []
     lastTurn.value = null
     if (!preserveDraft) {
@@ -634,6 +1011,152 @@ async function createConversation({ preserveDraft = false, title = conversationT
   }
 }
 
+async function startNewConversation() {
+  if (savingJobSearch.value) return
+  resetJobSearch()
+  const conversation = await createConversation({ title: '新的求职咨询' })
+  if (conversation) feedback.value = '新对话已开启，可以直接提问；简历和 JD 均可稍后补充。'
+}
+
+function openContextSetup() {
+  if (!selectedConversation.value) {
+    errorMessage.value = '请先开启一个对话。'
+    return
+  }
+  contextSetupInitial.value = conversationContext.value
+  showContextSetup.value = true
+}
+
+function openTargetAdjustment() {
+  openContextSetup()
+}
+
+function closeContextSetup() {
+  if (creating.value) return
+  showContextSetup.value = false
+  contextSetupInitial.value = null
+}
+
+function resetJobSearch({ restoreFocus = false } = {}) {
+  showJobSearch.value = false
+  jobSearchError.value = ''
+  pendingJobLibraryTarget.value = null
+  if (restoreFocus) nextTick(() => jobSearchButton.value?.focus())
+}
+
+function openJobSearch() {
+  if (!selectedConversation.value) {
+    errorMessage.value = '请先开启一个对话。'
+    return
+  }
+  closeContextSetup()
+  jobSearchError.value = ''
+  pendingJobLibraryTarget.value = null
+  showJobSearch.value = true
+}
+
+function closeJobSearch() {
+  if (savingJobSearch.value) return
+  resetJobSearch({ restoreFocus: true })
+}
+
+function jobLibrarySelectionKey(job) {
+  return String(job?.id ?? job?.jobId ?? job?.sourceUrl ?? `${job?.company ?? ''}:${job?.title ?? ''}`)
+}
+
+async function confirmJobFromLibrary(job) {
+  if (!selectedConversation.value || savingJobSearch.value) return
+  const conversationId = selectedConversation.value.id
+  const candidateProfileId = conversationContext.value?.candidate_profile?.id ?? null
+  const selectionKey = jobLibrarySelectionKey(job)
+  savingJobSearch.value = true
+  jobSearchError.value = ''
+  try {
+    let targetRole = pendingJobLibraryTarget.value?.selectionKey === selectionKey
+      ? pendingJobLibraryTarget.value.targetRole
+      : null
+    if (!targetRole) {
+      targetRole = await requestJson('/api/career/target-role-profiles', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(toTargetRolePayload(job))
+      })
+      pendingJobLibraryTarget.value = { selectionKey, targetRole }
+    }
+
+    const nextContext = await requestJson(`/api/career/conversations/${conversationId}/context`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        candidate_profile_id: candidateProfileId,
+        target_role_profile_id: targetRole.id
+      })
+    })
+    if (selectedConversation.value?.id === conversationId) {
+      conversationContext.value = nextContext
+      feedback.value = '职位库岗位已导入，岗位分析已开始；后续回答将使用新岗位。'
+    }
+    resetJobSearch({ restoreFocus: true })
+  } catch (error) {
+    jobSearchError.value = error instanceof Error ? error.message : '职位导入失败，请稍后重试。'
+  } finally {
+    savingJobSearch.value = false
+  }
+}
+
+function addCandidateProfile(profile) {
+  candidateProfiles.value = [profile, ...candidateProfiles.value.filter((item) => item.id !== profile.id)]
+}
+
+async function applyCareerContext(payload) {
+  const candidateProfileId = payload?.candidateProfile?.id ?? null
+  const targetRoleProfileId = payload?.targetRole?.id ?? null
+  if (!selectedConversation.value) return
+  if (!candidateProfileId && !targetRoleProfileId) {
+    showContextSetup.value = false
+    contextSetupInitial.value = null
+    feedback.value = '未添加求职资料，你仍然可以继续正常对话。'
+    return
+  }
+  creating.value = true
+  errorMessage.value = ''
+  try {
+    conversationContext.value = await requestJson(`/api/career/conversations/${selectedConversation.value.id}/context`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        candidate_profile_id: candidateProfileId,
+        target_role_profile_id: targetRoleProfileId
+      })
+    })
+    const updatedLabels = [
+      candidateProfileId ? '简历' : '',
+      targetRoleProfileId ? '目标岗位' : ''
+    ].filter(Boolean)
+    feedback.value = `${updatedLabels.join('和')}已更新，岗位分析已开始；后续回答将自动使用最新资料。`
+    showContextSetup.value = false
+    contextSetupInitial.value = null
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '求职上下文建立失败'
+  } finally {
+    creating.value = false
+  }
+}
+
+async function retryJobAssessment() {
+  const conversationId = selectedConversation.value?.id
+  if (!conversationId || isAssessmentPending(conversationContext.value?.assessment)) return
+  errorMessage.value = ''
+  try {
+    conversationContext.value = await requestJson(`/api/career/conversations/${conversationId}/assessment/retry`, {
+      method: 'POST'
+    })
+    feedback.value = '岗位分析已重新排队。'
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '岗位分析重新排队失败'
+  }
+}
+
 function createMaterialsRequest(input) {
   const formData = new FormData()
   formData.append('text', input.text)
@@ -644,6 +1167,9 @@ function createMaterialsRequest(input) {
   }
   for (const experienceId of input.interviewExperienceIds) {
     formData.append('interview_experience_ids', experienceId)
+  }
+  for (const skillId of input.selectedSkillIds) {
+    formData.append('selected_skill_ids', skillId)
   }
   formData.append('resume_file', input.resumeFile)
   return { method: 'POST', body: formData }
@@ -709,6 +1235,7 @@ function clearComposerAfterSubmit() {
   showJobUrl.value = false
   clearResumeFile()
   clearInterviewMentions()
+  clearSkillInvocations()
 }
 
 function restoreComposerAfterPreflightFailure(input) {
@@ -719,21 +1246,27 @@ function restoreComposerAfterPreflightFailure(input) {
   showJobUrl.value = Boolean(input.jobUrl)
   resumeFile.value = input.resumeFile
   selectedInterviewReferences.value = input.interviewReferences
+  selectedSkillInvocations.value = input.skillInvocations
 }
 
 async function sendMessage() {
+  if (!selectedConversation.value) {
+    errorMessage.value = '请先开启一个对话。'
+    return
+  }
   if (!hasReadyModel.value) {
     errorMessage.value = '尚未配置可调用模型，请先申请免费模型或添加模型连接。'
     openFreeModelDirectory()
     return
   }
-  if (!messageText.value.trim() && !jobUrl.value.trim() && !resumeFile.value) {
-    errorMessage.value = '请输入咨询内容或粘贴职位链接。'
+  if (!messageText.value.trim()) {
+    errorMessage.value = '请输入要咨询的问题。'
     return
   }
   sending.value = true
   errorMessage.value = ''
   feedback.value = ''
+  const activeSkillInvocations = activeSelectedSkillInvocations(messageText.value)
   const input = {
     text: messageText.value.trim(),
     jobUrl: jobUrl.value.trim(),
@@ -741,21 +1274,16 @@ async function sendMessage() {
     selectionMode: selectionMode.value,
     selectedProfileId: selectedProfileId.value,
     interviewExperienceIds: selectedInterviewReferences.value.map((item) => item.id),
-    interviewReferences: [...selectedInterviewReferences.value]
+    interviewReferences: [...selectedInterviewReferences.value],
+    selectedSkillIds: activeSkillInvocations.map((item) => item.id),
+    skillInvocations: [...activeSkillInvocations]
   }
   const temporaryMessage = createTemporaryMessage(input)
   activeTemporaryMessageId.value = temporaryMessage.id
   clearComposerAfterSubmit()
   let temporaryMessageMounted = false
   try {
-    const conversation = selectedConversation.value ?? await createConversation({
-      preserveDraft: true,
-      title: conversationTitleFromText(input.text)
-    })
-    if (!conversation) {
-      restoreComposerAfterPreflightFailure(input)
-      return
-    }
+    const conversation = selectedConversation.value
     messages.value.push(temporaryMessage)
     temporaryMessageMounted = true
     const hasMaterial = Boolean(input.resumeFile)
@@ -772,7 +1300,8 @@ async function sendMessage() {
             job_url: input.jobUrl || null,
             selection_mode: input.selectionMode,
             model_profile_id: input.selectionMode === 'specific_profile' ? input.selectedProfileId || null : null,
-            interview_experience_ids: input.interviewExperienceIds
+            interview_experience_ids: input.interviewExperienceIds,
+            selected_skill_ids: input.selectedSkillIds
           })
         }
     let payload = null
@@ -833,6 +1362,31 @@ async function sendMessage() {
         ? '已完成本轮模型回复。'
         : '本轮内容已保存，但模型调用未完成；具体原因已显示在对话内。'
     }
+    const skillExecutions = Array.isArray(payload.skill_executions) ? payload.skill_executions : []
+    if (skillExecutions.length) {
+      const succeededExecutions = skillExecutions.filter((item) => item.status === 'succeeded')
+      const failedExecutions = skillExecutions.filter((item) => item.status !== 'succeeded')
+      const executionSummary = succeededExecutions
+        .map((item) => `${item.tool_name}（${Number(item.result_count ?? 0)} 个结果）`)
+        .join('、')
+      if (executionSummary) {
+        feedback.value = `${feedback.value} 已真实执行 Skill 工具：${executionSummary}。`
+      }
+      if (failedExecutions.length) {
+        const failureSummary = failedExecutions
+          .map((item) => `${item.tool_name}：${item.message || '执行失败'}`)
+          .join('；')
+        feedback.value = `${feedback.value} 部分 Skill 工具未完成：${failureSummary}。`
+      }
+    } else {
+      const promptSkills = (payload.activated_skills ?? [])
+        .filter((item) => item.execution_mode === 'prompt')
+        .map((item) => item.name)
+        .filter(Boolean)
+      if (promptSkills.length) {
+        feedback.value = `${feedback.value} 已挂载 SKILL.md：${promptSkills.join('、')}。`
+      }
+    }
     const jobSource = payload.job_source ?? {}
     if (jobSource.status === 'unavailable' || jobSource.status === 'not_configured') {
       const jobSourceMessage = jobSource.message || '职位链接暂时无法读取，请直接粘贴职位描述。'
@@ -850,6 +1404,8 @@ async function sendMessage() {
       ]
       selectedConversation.value = updatedConversation
     }
+    historyPage.value = 1
+    void loadConversationPage(1)
   } catch (error) {
     if (temporaryMessageMounted) {
       markTemporaryMessageFailed(activeTemporaryMessageId.value)
@@ -868,17 +1424,112 @@ async function sendMessage() {
 }
 
 async function archiveConversation() {
-  if (!selectedConversation.value) return
+  if (!selectedConversation.value || savingJobSearch.value) return
+  resetJobSearch()
   try {
     await requestJson(`/api/career/conversations/${selectedConversation.value.id}/archive`, { method: 'POST' })
     conversations.value = conversations.value.filter((item) => item.id !== selectedConversation.value.id)
+    historyTotal.value = Math.max(0, historyTotal.value - 1)
+    historyPage.value = Math.min(historyPage.value, historyTotalPages.value)
     selectedConversation.value = null
+    conversationContext.value = null
     messages.value = []
     resetConversationDraft()
     useFreeQuotaFirstSelection()
     feedback.value = '会话已归档，历史会被保留但不能继续写入。'
+    void loadConversationPage(historyPage.value)
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '会话归档失败'
+  }
+}
+
+function toggleConversationMenu(conversationId) {
+  if (sending.value || conversationActionLoadingId.value) return
+  if (conversationMenuId.value === conversationId) {
+    closeConversationActions()
+    return
+  }
+  conversationMenuId.value = conversationId
+  renamingConversationId.value = ''
+  renameTitleDraft.value = ''
+  deletingConversationId.value = ''
+}
+
+function startConversationRename(conversation) {
+  deletingConversationId.value = ''
+  renamingConversationId.value = conversation.id
+  renameTitleDraft.value = conversation.title
+}
+
+async function saveConversationRename(conversation) {
+  const title = renameTitleDraft.value.trim()
+  if (!title) {
+    errorMessage.value = '会话名称不能为空'
+    return
+  }
+  if (title === conversation.title) {
+    closeConversationActions()
+    return
+  }
+
+  conversationActionLoadingId.value = conversation.id
+  errorMessage.value = ''
+  try {
+    const updatedConversation = await requestJson(`/api/career/conversations/${conversation.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title })
+    })
+    conversations.value = conversations.value.map((item) => (
+      item.id === conversation.id ? updatedConversation : item
+    ))
+    if (selectedConversation.value?.id === conversation.id) {
+      selectedConversation.value = { ...selectedConversation.value, ...updatedConversation }
+    }
+    feedback.value = '会话名称已更新。'
+    closeConversationActions()
+    historyPage.value = 1
+    void loadConversationPage(1)
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '会话重命名失败'
+  } finally {
+    conversationActionLoadingId.value = ''
+  }
+}
+
+function startConversationDelete(conversationId) {
+  renamingConversationId.value = ''
+  renameTitleDraft.value = ''
+  deletingConversationId.value = conversationId
+}
+
+async function deleteConversation(conversation) {
+  if (conversationActionLoadingId.value || savingJobSearch.value) return
+  resetJobSearch()
+  conversationActionLoadingId.value = conversation.id
+  errorMessage.value = ''
+  try {
+    await requestJson(`/api/career/conversations/${conversation.id}`, { method: 'DELETE' })
+    conversations.value = conversations.value.filter((item) => item.id !== conversation.id)
+    historyTotal.value = Math.max(0, historyTotal.value - 1)
+    historyPage.value = Math.min(historyPage.value, historyTotalPages.value)
+    if (selectedConversation.value?.id === conversation.id) {
+      conversationSelectionRequestId += 1
+      stopTurnRecoveryPolling()
+      selectedConversation.value = null
+      conversationContext.value = null
+      messages.value = []
+      lastTurn.value = null
+      resetConversationDraft()
+      useFreeQuotaFirstSelection()
+    }
+    feedback.value = '会话及其服务端历史已永久删除。'
+    closeConversationActions()
+    void loadConversationPage(historyPage.value)
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '会话删除失败'
+  } finally {
+    conversationActionLoadingId.value = ''
   }
 }
 
@@ -944,6 +1595,7 @@ function modelConnectionPayload() {
   const capabilities = []
   if (form.text) capabilities.push('text')
   if (form.vision) capabilities.push('vision')
+  if (form.tools) capabilities.push('tools')
   const apiBaseUrl = providerApiBaseUrl(form.providerKey, form.apiBaseUrl)
   const websiteUrl = providerWebsiteUrl(form.providerKey, form.websiteUrl)
   return {
@@ -1029,7 +1681,7 @@ function connectionValidationMessage() {
   const form = modelForm.value
   if (!form.modelId.trim()) return '请填写模型名称（Model ID）。'
   if (!form.apiKey.trim()) return '请粘贴该服务商的 API Key。'
-  if (!form.text && !form.vision) return '请至少选择一种模型能力。'
+  if (!form.text && !form.vision && !form.tools) return '请至少选择一种模型能力。'
   if (!usesPresetEndpoint.value && !form.apiBaseUrl.trim()) {
     return '自定义兼容服务商需要填写请求地址（API Base URL）。'
   }
@@ -1065,57 +1717,209 @@ async function testModelConnection() {
   }
 }
 
-onMounted(refreshData)
+onMounted(() => {
+  historyCollapsed.value = window.localStorage.getItem(HISTORY_COLLAPSED_STORAGE_KEY) === '1'
+  const storedHistoryPageSize = Number(window.localStorage.getItem(HISTORY_PAGE_SIZE_STORAGE_KEY))
+  if (HISTORY_PAGE_SIZE_OPTIONS.includes(storedHistoryPageSize)) {
+    historyPageSize.value = storedHistoryPageSize
+  }
+  const storedContextRailWidth = Number(window.localStorage.getItem(CONTEXT_RAIL_WIDTH_STORAGE_KEY))
+  if (Number.isFinite(storedContextRailWidth) && storedContextRailWidth > 0) {
+    contextRailWidth.value = clampContextRailWidth(storedContextRailWidth)
+  }
+  viewportWidth.value = window.innerWidth
+  window.addEventListener('resize', updateCareerViewportWidth)
+  document.addEventListener('pointerdown', handleConversationActionPointerDown)
+  void refreshData()
+})
 </script>
 
 <template>
-  <section class="career-workspace" aria-label="求职助手">
-    <aside class="career-history-panel">
-      <button class="primary-button" type="button" :disabled="creating || sending" @click="createConversation">
-        ＋ {{ creating ? '正在创建...' : '开启新对话' }}
-      </button>
-      <div class="history-title"><span>会话历史</span><small>{{ conversations.length }}</small></div>
-      <p v-if="loading && !conversations.length" class="list-empty">正在加载会话...</p>
-      <p v-else-if="!conversations.length" class="list-empty">还没有求职会话</p>
-      <div v-else class="conversation-list">
-        <button
+  <section
+    class="career-workspace"
+    :class="{ 'has-context-rail': conversationContext, 'history-collapsed': historyCollapsed, 'resizing-context-rail': resizingContextRail }"
+    :style="{ '--context-rail-width': `${visibleContextRailWidth}px` }"
+    aria-label="求职助手"
+  >
+    <aside class="career-history-panel" :class="{ collapsed: historyCollapsed }">
+      <template v-if="historyCollapsed">
+        <button class="history-rail-button" type="button" aria-label="展开会话历史" title="展开会话历史" @click="toggleHistoryPanel">›</button>
+        <button class="history-rail-button primary" type="button" :disabled="creating || sending || savingJobSearch" aria-label="开启新对话" title="开启新对话" @click="startNewConversation">＋</button>
+        <span class="history-rail-count" :title="`${historyTotal} 个会话`">{{ historyTotal }}</span>
+      </template>
+      <template v-else>
+        <div class="history-actions">
+          <button class="primary-button" type="button" :disabled="creating || sending || savingJobSearch" @click="startNewConversation">
+            ＋ {{ creating ? '正在建立...' : '开启新对话' }}
+          </button>
+          <button class="history-collapse-button" type="button" aria-label="折叠会话历史" title="折叠会话历史" @click="toggleHistoryPanel">‹</button>
+        </div>
+        <div class="history-title"><span>会话历史</span><small>{{ historyTotal }}</small></div>
+        <p v-if="(loading || historyLoading) && !conversations.length" class="list-empty">正在加载会话...</p>
+        <p v-else-if="!conversations.length" class="list-empty">还没有求职会话</p>
+        <div v-else class="conversation-list" :class="{ 'is-loading': historyLoading }">
+        <article
           v-for="conversation in conversations"
           :key="conversation.id"
-          type="button"
           class="conversation-item"
-          :disabled="sending"
-          :class="{ active: selectedConversation?.id === conversation.id }"
-          @click="selectConversation(conversation.id)"
+          :class="{ active: selectedConversation?.id === conversation.id, managing: conversationMenuId === conversation.id }"
         >
-          <strong>{{ conversation.title }}</strong>
-          <small>{{ formatDate(conversation.updated_at) }}</small>
-        </button>
-      </div>
-      <div class="privacy-card"><strong>隐私边界</strong><p>简历原文件不入库；历史保存对话文本，是否脱敏由个人部署配置决定。</p></div>
+          <button
+            type="button"
+            class="conversation-item-main"
+            :disabled="sending || savingJobSearch || conversationActionLoadingId === conversation.id"
+            @click="selectConversation(conversation.id)"
+          >
+            <strong>{{ conversation.title }}</strong>
+            <small>{{ formatDate(conversation.updated_at) }}</small>
+          </button>
+          <button
+            type="button"
+            class="conversation-menu-button"
+            :disabled="sending || Boolean(conversationActionLoadingId)"
+            :aria-expanded="conversationMenuId === conversation.id"
+            :aria-label="`管理会话：${conversation.title}`"
+            @click.stop="toggleConversationMenu(conversation.id)"
+          >
+            ···
+          </button>
+
+          <div v-if="conversationMenuId === conversation.id" class="conversation-action-menu" @click.stop>
+            <template v-if="renamingConversationId === conversation.id">
+              <label>
+                <span>会话名称</span>
+                <input
+                  v-model="renameTitleDraft"
+                  type="text"
+                  maxlength="160"
+                  autocomplete="off"
+                  @keyup.enter="saveConversationRename(conversation)"
+                  @keyup.esc="closeConversationActions"
+                />
+              </label>
+              <div class="conversation-action-buttons">
+                <button type="button" @click="closeConversationActions">取消</button>
+                <button type="button" class="primary" :disabled="conversationActionLoadingId === conversation.id" @click="saveConversationRename(conversation)">
+                  {{ conversationActionLoadingId === conversation.id ? '保存中…' : '保存名称' }}
+                </button>
+              </div>
+            </template>
+
+            <template v-else-if="deletingConversationId === conversation.id">
+              <p><strong>永久删除该会话？</strong><span>消息、摘要和运行记录将同步删除，无法恢复。</span></p>
+              <div class="conversation-action-buttons">
+                <button type="button" @click="closeConversationActions">取消</button>
+                <button type="button" class="danger" :disabled="conversationActionLoadingId === conversation.id" @click="deleteConversation(conversation)">
+                  {{ conversationActionLoadingId === conversation.id ? '删除中…' : '确认删除' }}
+                </button>
+              </div>
+            </template>
+
+            <div v-else class="conversation-action-options">
+              <button type="button" @click="startConversationRename(conversation)">重命名</button>
+              <button type="button" class="danger" @click="startConversationDelete(conversation.id)">删除会话</button>
+            </div>
+          </div>
+        </article>
+        </div>
+        <nav v-if="historyTotal" class="history-pagination" aria-label="会话历史分页">
+          <div class="history-page-meta">
+            <span>{{ historyRange.start }}–{{ historyRange.end }} / {{ historyTotal }}</span>
+            <label>
+              <span>每页</span>
+              <select v-model.number="historyPageSize" :disabled="historyLoading" aria-label="每页会话数量" @change="changeHistoryPageSize">
+                <option v-for="size in HISTORY_PAGE_SIZE_OPTIONS" :key="size" :value="size">{{ size }}</option>
+              </select>
+            </label>
+          </div>
+          <div class="history-page-actions">
+            <div class="history-page-stepper">
+              <button type="button" :disabled="historyLoading || historyPage <= 1" aria-label="上一页" @click="goToHistoryPage(historyPage - 1)">‹</button>
+              <strong aria-live="polite" :aria-label="`第 ${historyPage} 页，共 ${historyTotalPages} 页`">{{ historyPage }} / {{ historyTotalPages }}</strong>
+              <button type="button" :disabled="historyLoading || historyPage >= historyTotalPages" aria-label="下一页" @click="goToHistoryPage(historyPage + 1)">›</button>
+            </div>
+            <form class="history-page-jump" aria-label="跳转到指定页面" @submit.prevent="goToHistoryPage(historyJumpPage)">
+              <span>到</span>
+              <input
+                v-model="historyJumpPage"
+                type="number"
+                inputmode="numeric"
+                min="1"
+                :max="historyTotalPages"
+                :disabled="historyLoading"
+                aria-label="目标页码"
+              />
+              <span>页</span>
+              <button type="submit" :disabled="historyLoading">前往</button>
+            </form>
+          </div>
+        </nav>
+        <div class="privacy-card"><strong>隐私边界</strong><p>简历原文件不入库；历史保存对话文本，是否脱敏由个人部署配置决定。</p></div>
+      </template>
     </aside>
 
     <section class="career-chat-panel">
       <header class="chat-header">
-        <div><p class="eyebrow">CAREER AGENT</p><h2>{{ selectedConversation?.title || '求职助手' }}</h2></div>
+        <div>
+          <h2>{{ selectedConversation?.title || '求职助手' }}</h2>
+          <p v-if="conversationContext" class="active-context-line">
+            <span v-if="conversationContext.candidate_profile">简历 v{{ conversationContext.candidate_profile.version }}</span>
+            <i v-if="conversationContext.candidate_profile && conversationContext.target_role">→</i>
+            <span v-if="conversationContext.target_role">{{ conversationContext.target_role.company_name }} · {{ conversationContext.target_role.role_name }} v{{ conversationContext.target_role.version }}</span>
+          </p>
+        </div>
+        <div v-if="selectedConversation" class="chat-material-actions" aria-label="求职资料快捷操作">
+          <button
+            type="button"
+            class="chat-material-button"
+            :aria-label="hasCandidateContext ? '简历资料，已添加' : '简历资料，尚未添加'"
+            :title="hasCandidateContext ? '查看或更换简历资料' : '添加简历资料'"
+            :disabled="savingJobSearch"
+            @click="openContextSetup"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3.5h7l3 3V20H7z"/><path d="M14 3.5V7h3M9.5 11h5M9.5 14.5h5"/></svg>
+            <span>简历资料</span>
+            <i v-if="hasCandidateContext" class="material-state-dot" aria-hidden="true"></i>
+          </button>
+          <button
+            ref="jobSearchButton"
+            type="button"
+            class="chat-material-button primary"
+            :aria-label="hasTargetContext ? '职位检索，更换当前岗位' : '职位检索，从职位库选择'"
+            :title="hasTargetContext ? '从职位库更换当前岗位' : '从职位库选择目标岗位'"
+            :disabled="savingJobSearch"
+            @click="openJobSearch"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="5.5"/><path d="m15 15 4.5 4.5"/></svg>
+            <span>职位检索</span>
+          </button>
+        </div>
       </header>
 
       <section v-if="feedback" class="notice success">{{ feedback }}</section>
 
       <section v-if="!selectedConversation" class="empty-state">
-        <div class="empty-mark">✦</div><p class="eyebrow">CAREER MATCHING</p><h2>请上传简历和职位信息</h2>
-        <p>可粘贴职位链接，或先描述目标岗位与求职困惑。系统会先建立安全的对话上下文。</p>
-        <div class="tag-row"><span>简历优缺点</span><span>岗位匹配度</span><span>面试准备</span></div>
+        <div class="empty-mark">职</div><h2>开启一段求职对话</h2>
+        <p>无需先上传简历或 JD。开启后可以直接提问，也可以在对话中随时补充资料。</p>
+        <button class="empty-context-button" type="button" @click="startNewConversation">直接开启对话</button>
       </section>
 
       <section v-else class="message-list" aria-live="polite">
-        <article v-if="!messages.length" class="agent-message"><strong>求职助手</strong><p>你好，我可以先回答求职、职业发展和面试准备问题；需要简历诊断或岗位匹配时，再上传材料即可。</p></article>
-        <article v-for="message in messages" :key="message.id" class="message" :class="[message.role === 'user' ? 'from-user' : 'from-agent', message.local_state ? `message-${message.local_state}` : '']"><span>{{ message.role === 'user' ? '你' : '求职助手' }}</span><p>{{ message.content }}</p><small>{{ formatDate(message.created_at) }}<template v-if="message.local_state === 'sending'"> · 正在发送</template><template v-else-if="message.local_state === 'failed'"> · 发送失败</template></small></article>
+        <article v-if="!messages.length" class="agent-message">
+          <header class="message-role"><i aria-hidden="true">职</i><strong>求职助手</strong></header>
+          <CareerMessageContent :content="welcomeMessage" />
+        </article>
+        <article v-for="message in messages" :key="message.id" class="message" :class="[message.role === 'user' ? 'from-user' : 'from-agent', message.local_state ? `message-${message.local_state}` : '']" :aria-label="message.role === 'user' ? '你的消息' : '求职助手消息'">
+          <header v-if="message.role !== 'user'" class="message-role"><i aria-hidden="true">职</i><strong>求职助手</strong></header>
+          <CareerMessageContent :content="message.content" />
+          <small class="message-time">{{ formatDate(message.created_at) }}<template v-if="message.local_state === 'sending'"> · 正在发送</template><template v-else-if="message.local_state === 'failed'"> · 发送失败</template></small>
+        </article>
         <article v-if="sending" class="agent-message agent-pending">
-          <div class="stream-pending-heading"><strong>求职助手</strong><span>正在思考</span></div>
+          <div class="stream-pending-heading"><div class="message-role"><i aria-hidden="true">职</i><strong>求职助手</strong></div><span>正在思考</span></div>
           <ol v-if="streamProgress.length" class="stream-progress-list" aria-label="处理进展">
             <li v-for="progress in streamProgress" :key="progress.key" class="stream-progress-item" :class="progress.state"><i></i><span>{{ progress.label }}</span></li>
           </ol>
-          <p v-if="streamedAssistantText" class="streamed-answer">{{ streamedAssistantText }}</p>
+          <CareerMessageContent v-if="streamedAssistantText" class="streamed-answer" :content="streamedAssistantText" />
           <p v-else class="stream-status">{{ streamStatus || '正在思考…' }}</p>
         </article>
         <div v-if="lastTurn" class="turn-status" :class="{ active: isActiveTurn(lastTurn) }">{{ turnStatusText(lastTurn) }}</div>
@@ -1124,10 +1928,7 @@ onMounted(refreshData)
       <footer class="composer">
         <div class="composer-toolbar" aria-label="会话与材料工具">
           <div class="input-tools">
-            <button class="chip-button" :class="{ active: showJobUrl }" type="button" @click="showJobUrl = !showJobUrl">职位链接</button>
-            <input ref="resumeInput" class="resume-input" type="file" accept="application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,image/jpeg,image/png,image/webp,image/bmp,image/x-ms-bmp,image/tiff" @change="handleResumeFile" />
-            <button class="chip-button" :class="{ active: resumeFile }" type="button" @click="openResumePicker">{{ resumeFile ? `材料：${resumeFile.name}` : '上传材料' }}</button>
-            <button v-if="resumeFile" class="chip-button file-clear-button" type="button" @click="clearResumeFile">移除</button>
+            <button v-if="selectedConversation" class="chip-button active-context-chip" :class="{ active: conversationContext }" type="button" @click="openContextSetup">{{ contextButtonLabel }}</button>
             <select class="model-select" :value="modelSelectionValue" :disabled="!hasReadyModel" aria-label="本轮模型选择" @change="chooseModel">
               <option v-if="!hasReadyModel" value="">尚未配置可用模型</option>
               <option v-if="hasReadyFreeModel" value="free_quota_first">【免费】自动选择可用模型</option>
@@ -1145,13 +1946,25 @@ onMounted(refreshData)
             <button v-if="selectedConversation" class="quiet-button danger" type="button" @click="archiveConversation">归档会话</button>
           </div>
         </div>
-        <div v-if="showJobUrl" class="job-url-row"><label for="job-url">职位链接</label><input id="job-url" v-model="jobUrl" placeholder="粘贴 BOSS、脉脉等公开职位链接" /></div>
-        <textarea v-model="messageText" aria-label="求职咨询内容" placeholder="描述目标岗位、经验背景，或粘贴职位要求..." rows="3" @keydown.enter.exact.prevent="sendMessage" />
+        <textarea v-model="messageText" aria-label="求职咨询内容" :disabled="!selectedConversation" :placeholder="composerPlaceholder" rows="3" @keydown.enter.exact.prevent="sendMessage" />
         <div v-if="selectedInterviewReferences.length" class="interview-reference-row" aria-label="已引用面经">
           <span v-for="experience in selectedInterviewReferences" :key="experience.id" class="interview-reference-chip">
             <span>@{{ experience.company_name }} · {{ experience.role_name }}</span>
             <button type="button" :aria-label="`移除 ${experience.job_name}`" @click="removeInterviewMention(experience.id)">×</button>
           </span>
+        </div>
+        <div v-if="selectedSkillInvocations.length" class="interview-reference-row" aria-label="待挂载 Skill">
+          <span v-for="skill in selectedSkillInvocations" :key="skill.id" class="interview-reference-chip skill-invocation-chip">
+            <span>✦ 将挂载 {{ skill.name }}</span>
+            <button type="button" :aria-label="`移除 Skill ${skill.name}`" @click="removeSkillInvocation(skill.id)">×</button>
+          </span>
+        </div>
+        <div v-if="skillMentionResults.length" class="interview-mention-menu skill-invocation-menu" role="listbox" aria-label="Skill 候选">
+          <p class="suggestion-menu-label">技能库 · 选择后将 SKILL.md 挂载到本轮模型上下文</p>
+          <button v-for="skill in skillMentionResults" :key="skill.id" type="button" role="option" @mousedown.prevent="selectSkillMention(skill)">
+            <strong>✦ {{ skill.name }}</strong>
+            <small>{{ skill.description_zh || skill.description }} · {{ skill.source_label }}</small>
+          </button>
         </div>
         <div v-if="interviewMentionResults.length" class="interview-mention-menu" role="listbox" aria-label="面经库检索结果">
           <button v-for="experience in interviewMentionResults" :key="experience.id" type="button" role="option" @mousedown.prevent="selectInterviewMention(experience)">
@@ -1159,10 +1972,56 @@ onMounted(refreshData)
             <small>{{ experience.job_name }}<template v-if="experience.interview_date"> · {{ experience.interview_date }}</template></small>
           </button>
         </div>
-        <div class="composer-footer"><small>当前模型：{{ modelLabel }}。输入 @ 可检索面经库；回车发送，Shift + Enter 换行。</small><button class="send-button" type="button" :disabled="sending" @click="sendMessage">{{ sending ? '正在思考…' : '发送' }}</button></div>
+        <div class="composer-footer"><small>当前模型：{{ modelLabel }}。输入 @ 可引用面经或 Skill，输入 / 可调用 Skill；已添加的简历或 JD 会自动用于后续回答。</small><button class="send-button" type="button" :disabled="sending || !selectedConversation" @click="sendMessage">{{ sending ? '正在思考…' : '发送' }}</button></div>
       </footer>
     </section>
+
+    <div v-if="conversationContext" class="context-rail-slot">
+      <button
+        class="context-rail-resizer"
+        type="button"
+        role="separator"
+        aria-label="调整职位信息栏宽度"
+        aria-orientation="vertical"
+        :aria-valuemin="CONTEXT_RAIL_MIN_WIDTH"
+        :aria-valuemax="CONTEXT_RAIL_MAX_WIDTH"
+        :aria-valuenow="contextRailWidth"
+        title="拖拽调整宽度，双击恢复推荐宽度"
+        @pointerdown="startContextRailResize"
+        @dblclick="resetContextRailWidth"
+        @keydown.left.prevent="resizeContextRailBy(24)"
+        @keydown.right.prevent="resizeContextRailBy(-24)"
+        @keydown.home.prevent="resetContextRailWidth"
+      ><i></i></button>
+      <CareerContextRail
+        :context="conversationContext"
+        :selected-conversation="selectedConversation"
+        :wide="visibleContextRailWidth >= 580"
+        @adjust="openTargetAdjustment"
+        @setup="openContextSetup"
+        @retry-assessment="retryJobAssessment"
+      />
+    </div>
   </section>
+
+  <CareerContextSetupDialog
+    :open="showContextSetup"
+    :busy="creating"
+    :candidate-profiles="candidateProfiles"
+    :initial-context="contextSetupInitial"
+    @cancel="closeContextSetup"
+    @ready="applyCareerContext"
+    @profile-created="addCandidateProfile"
+  />
+
+  <CareerJobSearchDialog
+    :open="showJobSearch"
+    :busy="savingJobSearch"
+    :error="jobSearchError"
+    :current-target-role="conversationContext?.target_role ?? null"
+    @cancel="closeJobSearch"
+    @confirm="confirmJobFromLibrary"
+  />
 
   <Teleport to="body">
     <section v-if="errorMessage" class="career-error-toast" role="alert" aria-live="assertive">
@@ -1208,7 +2067,6 @@ onMounted(refreshData)
           </div>
           <div class="free-directory-intro">
             <div>
-              <span>FREE MODEL ACCESS</span>
               <h3>先申请 Key，再把模型接入工作台</h3>
               <p>这里仅列出有免费层、免费额度或免费路由的官方服务。额度会随平台政策变化，实际以申请页面为准。</p>
             </div>
@@ -1262,7 +2120,7 @@ onMounted(refreshData)
               <label class="full-width">API Key<span>显式填写；测试和保存后均不会回显。生产环境请通过 HTTPS 访问本平台。</span><input v-model="modelForm.apiKey" type="password" autocomplete="new-password" spellcheck="false" placeholder="粘贴该服务商的 API Key" @input="invalidateConnectionTest" /></label>
               <label v-if="!usesPresetEndpoint" class="full-width">请求地址（API Base URL）<span>填写到 API Base URL 层级，不要附加 /chat/completions。</span><input v-model="modelForm.apiBaseUrl" placeholder="https://your-api-endpoint/v1" @input="invalidateConnectionTest" /></label>
             </div>
-            <fieldset class="capability-fieldset"><legend>模型能力</legend><label class="capability-option"><input v-model="modelForm.text" type="checkbox" @change="invalidateConnectionTest" /> <span><strong>文字与 PDF 文本</strong><small>用于职位匹配、简历建议和面试准备</small></span></label><label class="capability-option"><input v-model="modelForm.vision" type="checkbox" @change="invalidateConnectionTest" /> <span><strong>图片简历</strong><small>仅在当前模型确实支持视觉输入时勾选</small></span></label></fieldset>
+            <fieldset class="capability-fieldset"><legend>模型能力</legend><label class="capability-option"><input v-model="modelForm.text" type="checkbox" @change="invalidateConnectionTest" /> <span><strong>文字与 PDF 文本</strong><small>用于职位匹配、简历建议和面试准备</small></span></label><label class="capability-option"><input v-model="modelForm.vision" type="checkbox" @change="invalidateConnectionTest" /> <span><strong>图片简历</strong><small>仅在当前模型确实支持视觉输入时勾选</small></span></label><label class="capability-option"><input v-model="modelForm.tools" type="checkbox" @change="invalidateConnectionTest" /> <span><strong>Tool Calling</strong><small>模型确认支持 function tools 时勾选；未支持时只能执行 Skill 的文字工作流</small></span></label></fieldset>
             <p v-if="connectionTestMessage" class="connection-test-success">{{ connectionTestMessage }}</p>
             <p v-if="connectionTestError" class="connection-test-error" role="alert"><strong>连接测试未通过</strong>{{ connectionTestError }}</p>
             <p v-if="connectionSaveError" class="connection-test-error" role="alert"><strong>保存模型连接失败</strong>{{ connectionSaveError }}</p>
@@ -1281,24 +2139,43 @@ onMounted(refreshData)
 
 <style scoped>
 .career-workspace { display:grid; height:100%; min-height:0; flex:1; grid-template-columns:252px minmax(0,1fr); gap:14px; overflow:hidden; }
+.career-workspace.has-context-rail { grid-template-columns:252px minmax(560px,1fr) var(--context-rail-width,620px); }
+.career-workspace.history-collapsed { grid-template-columns:52px minmax(0,1fr); }
+.career-workspace.has-context-rail.history-collapsed { grid-template-columns:52px minmax(560px,1fr) var(--context-rail-width,620px); }
 .career-history-panel,.career-chat-panel { border:1px solid #e0e6d8; border-radius:20px; background:#fff; box-shadow:none; }
-.career-history-panel { display:flex; height:100%; min-height:0; flex-direction:column; gap:12px; overflow:hidden; padding:14px; }
+.context-rail-slot{position:relative;height:100%;min-width:0;min-height:0;overflow:hidden}.context-rail-slot>:deep(.context-rail){height:100%;max-height:100%}.context-rail-resizer{position:absolute;z-index:30;top:0;bottom:0;left:-13px;width:12px;border:0;background:transparent;padding:0;cursor:col-resize;touch-action:none}.context-rail-resizer:before{position:absolute;top:0;bottom:0;left:5px;width:2px;border-radius:999px;background:transparent;content:"";transition:background .15s ease,box-shadow .15s ease}.context-rail-resizer i{position:absolute;top:50%;left:1px;display:block;width:10px;height:42px;transform:translateY(-50%);border:1px solid var(--ui-line-strong);border-radius:999px;background:var(--ui-surface);box-shadow:0 3px 12px rgba(31,60,96,.1)}.context-rail-resizer i:after{position:absolute;top:50%;left:3px;width:2px;height:18px;transform:translateY(-50%);border-radius:999px;background:var(--ui-accent);content:""}.context-rail-resizer:hover:before,.context-rail-resizer:focus-visible:before,.resizing-context-rail .context-rail-resizer:before{background:var(--ui-accent);box-shadow:0 0 0 3px var(--ui-focus)}.context-rail-resizer:focus-visible{outline:0}
+.career-history-panel { display:flex; height:100%; min-height:0; flex-direction:column; gap:10px; overflow:hidden; padding:14px; }
+.career-history-panel.collapsed{align-items:center;gap:9px;padding:10px 7px;border-radius:16px}.history-actions{display:grid;grid-template-columns:minmax(0,1fr) 34px;gap:7px}.history-collapse-button,.history-rail-button{display:grid;place-items:center;border:1px solid var(--ui-line);border-radius:10px;background:var(--ui-surface-soft);color:var(--ui-text-secondary);font-size:22px;font-weight:850;cursor:pointer}.history-collapse-button:hover,.history-rail-button:hover{border-color:var(--ui-accent);background:var(--ui-surface-active);color:var(--ui-accent-ink)}.history-rail-button{width:36px;height:36px}.history-rail-button.primary{border-color:var(--ui-accent);background:var(--ui-accent);color:#fff;font-size:18px}.history-rail-button:disabled{cursor:wait;opacity:.6}.history-rail-count{display:grid;min-width:25px;height:25px;place-items:center;border-radius:999px;background:var(--ui-surface-soft);color:var(--ui-text-muted);font-size:10px;font-weight:850}
 .primary-button,.send-button { border:0; border-radius:13px; background:#89a93e; color:#fff; font-weight:800; }
 .primary-button { padding:12px 14px; }.primary-button:disabled,.send-button:disabled { cursor:wait; opacity:.6; }
-.history-title,.conversation-item,.chat-header,.composer-toolbar,.composer-footer,.session-tools,.model-profile-list article { display:flex; align-items:center; justify-content:space-between; gap:10px; }
-.history-title { color:#7e8a6d; font-size:12px; font-weight:800; }.history-title small { display:grid; min-width:25px; height:25px; place-items:center; border-radius:999px; background:#eff5e3; color:#668325; }
-.conversation-list { display:grid; flex:1; align-content:start; gap:7px; overflow-y:auto; }.list-empty { color:#95a08b; font-size:13px; text-align:center; }
-.conversation-item { width:100%; border:1px solid transparent; border-radius:12px; background:#fafbf8; color:#344132; padding:11px; text-align:left; }.conversation-item strong { overflow:hidden; max-width:174px; text-overflow:ellipsis; white-space:nowrap; }.conversation-item small { color:#99a18f; font-size:11px; }.conversation-item.active { border-color:#d7e5ba; background:#f1f6e7; color:#50741a; }
-.privacy-card { border:1px solid #e6ecd9; border-radius:16px; background:#fbfcf8; padding:13px; }.privacy-card strong,.eyebrow { color:#8ba257; font-size:11px; font-weight:900; letter-spacing:.1em; }.privacy-card p { margin:7px 0 0; color:#747f6c; font-size:12px; line-height:1.6; }
-.career-chat-panel { display:flex; height:100%; min-height:0; flex-direction:column; overflow:hidden; }.chat-header { min-height:68px; border-bottom:1px solid #edf0e7; padding:14px 20px; }.chat-header h2,.model-settings h3,.empty-state h2 { margin:3px 0 0; color:#283427; }.eyebrow { margin:0; }
+.history-title,.chat-header,.composer-toolbar,.composer-footer,.session-tools,.model-profile-list article { display:flex; align-items:center; justify-content:space-between; gap:10px; }
+.history-title { color:var(--ui-text-muted); font-size:12px; font-weight:850; }.history-title small { display:grid; min-width:25px; height:25px; place-items:center; border-radius:999px; background:var(--ui-surface-active); color:var(--ui-accent-ink); }
+.conversation-list { display:flex; min-height:0; flex:1; flex-direction:column; gap:7px; overflow-y:auto; overscroll-behavior:contain; scrollbar-width:thin; transition:opacity .15s ease; }.conversation-list.is-loading{opacity:.55;pointer-events:none}.list-empty { display:grid; min-height:0; flex:1; place-content:center; color:var(--ui-text-muted); font-size:13px; text-align:center; }
+.conversation-item { position:relative; display:grid; width:100%; min-height:48px; flex:1 0 48px; box-sizing:border-box; grid-template-columns:minmax(0,1fr) auto; overflow:visible; border:1px solid var(--ui-line); border-radius:11px; background:var(--ui-surface-soft); color:var(--ui-text-secondary); text-align:left; transition:border-color .14s ease,background .14s ease,box-shadow .14s ease; }.conversation-item:hover{border-color:var(--ui-line-strong);background:var(--ui-surface)}.conversation-item.active { border-color:var(--ui-accent); background:var(--ui-surface-active); box-shadow:inset 3px 0 0 var(--ui-accent); color:var(--ui-accent-ink); }.conversation-item.managing{flex:none;overflow:hidden}
+.conversation-item-main { display:grid; min-width:0; grid-template-columns:minmax(0,1fr) auto; align-items:center; gap:7px; border:0; background:transparent; color:inherit; padding:9px 3px 9px 11px; text-align:left; cursor:pointer; }.conversation-item-main:disabled { cursor:wait; opacity:.62; }.conversation-item-main strong { overflow:hidden; min-width:0; font-size:12px; line-height:1.35; text-overflow:ellipsis; white-space:nowrap; }.conversation-item-main small { flex:0 0 auto; color:var(--ui-text-muted); font-size:9px; white-space:nowrap; }
+.conversation-menu-button { align-self:center; border:0; border-radius:7px; background:transparent; color:#7c8875; padding:5px 7px; font-size:15px; font-weight:900; line-height:1; cursor:pointer; }.conversation-menu-button:hover,.conversation-menu-button[aria-expanded="true"] { background:var(--ui-surface-active); color:var(--ui-accent-ink); }.conversation-menu-button:disabled { cursor:not-allowed; opacity:.45; }
+.conversation-action-menu { display:grid; grid-column:1 / -1; gap:9px; border-top:1px solid var(--ui-line); background:var(--ui-surface); padding:10px; }.conversation-action-menu label { display:grid; gap:5px; color:var(--ui-text-secondary); font-size:11px; font-weight:800; }.conversation-action-menu input { width:100%; box-sizing:border-box; border:1px solid var(--ui-line); border-radius:8px; background:var(--ui-surface); color:var(--ui-text); padding:8px 9px; font:inherit; }.conversation-action-menu input:focus { border-color:var(--ui-accent); box-shadow:0 0 0 3px var(--ui-focus); outline:0; }.conversation-action-menu p { display:grid; gap:3px; margin:0; }.conversation-action-menu p strong { color:var(--ui-text); font-size:12px; }.conversation-action-menu p span { color:var(--ui-text-muted); font-size:11px; line-height:1.5; }
+.conversation-action-options,.conversation-action-buttons { display:flex; gap:7px; }.conversation-action-buttons { justify-content:flex-end; }.conversation-action-menu button { border:1px solid var(--ui-line); border-radius:7px; background:var(--ui-surface); color:var(--ui-text-secondary); padding:7px 9px; font-size:11px; font-weight:800; cursor:pointer; }.conversation-action-options button { flex:1; }.conversation-action-menu button:hover { background:var(--ui-surface-soft); }.conversation-action-menu button.primary { border-color:var(--ui-accent); background:var(--ui-accent); color:#fff; }.conversation-action-menu button.danger { border-color:#efcaca; background:#fff6f6; color:#b54747; }.conversation-action-menu button:disabled { cursor:wait; opacity:.6; }
+.history-pagination{display:grid;flex:0 0 auto;gap:7px;border:1px solid var(--ui-line);border-radius:11px;background:var(--ui-surface-soft);padding:8px}.history-page-meta,.history-page-actions{display:flex;align-items:center;justify-content:space-between;gap:6px}.history-page-meta>span{color:var(--ui-text-muted);font-size:9px;font-weight:850}.history-page-meta label{display:flex;align-items:center;gap:5px;color:var(--ui-text-muted);font-size:9px;font-weight:800}.history-page-meta select{height:25px;border:1px solid var(--ui-line);border-radius:7px;background:var(--ui-surface);color:var(--ui-text-secondary);padding:0 5px;font:inherit;outline:0}.history-page-meta select:focus,.history-page-jump input:focus{border-color:var(--ui-accent);box-shadow:0 0 0 3px var(--ui-focus)}.history-page-stepper{display:grid;flex:0 0 auto;grid-template-columns:26px 36px 26px;gap:3px}.history-page-stepper button,.history-page-jump button{display:grid;height:28px;place-items:center;border:1px solid var(--ui-line);border-radius:7px;background:var(--ui-surface);color:var(--ui-accent-ink);font-weight:850;line-height:1;cursor:pointer}.history-page-stepper button{width:26px;font-size:17px}.history-page-stepper strong{display:grid;height:28px;place-items:center;border:1px solid var(--ui-line);border-radius:7px;background:var(--ui-surface);color:var(--ui-text-secondary);font-size:9px;text-align:center}.history-page-stepper button:hover:not(:disabled),.history-page-jump button:hover:not(:disabled){border-color:var(--ui-accent);background:var(--ui-surface-active)}.history-page-stepper button:focus-visible,.history-page-jump button:focus-visible{outline:3px solid var(--ui-focus);outline-offset:1px}.history-page-stepper button:disabled,.history-page-jump button:disabled{cursor:not-allowed;opacity:.35}.history-page-jump{display:flex;min-width:0;align-items:center;justify-content:flex-end;gap:3px;color:var(--ui-text-muted);font-size:9px;font-weight:800}.history-page-jump input{width:30px;height:28px;box-sizing:border-box;border:1px solid var(--ui-line);border-radius:7px;background:var(--ui-surface);color:var(--ui-text-secondary);padding:0 2px;font:850 9px/1 var(--ui-font-body);text-align:center;outline:0;-moz-appearance:textfield}.history-page-jump input::-webkit-inner-spin-button,.history-page-jump input::-webkit-outer-spin-button{margin:0;-webkit-appearance:none}.history-page-jump button{width:30px;padding:0;font-size:9px}.privacy-card { flex:0 0 auto;border:1px solid var(--ui-line); border-radius:10px; background:var(--ui-surface-soft); padding:8px 9px; }.privacy-card strong,.eyebrow { color:var(--ui-accent-ink); font-size:9px; font-weight:900; letter-spacing:.08em; }.privacy-card p { margin:3px 0 0; color:var(--ui-text-muted); font-size:9px; line-height:1.45; }
+.career-chat-panel { display:flex; height:100%; min-height:0; flex-direction:column; overflow:hidden; }.chat-header { display:flex; min-height:68px; align-items:center; border-bottom:1px solid #e3ebf5; padding:10px 14px 10px 20px; background:#fbfdff; }.chat-header>div:first-child{min-width:0}.chat-header h2,.model-settings h3,.empty-state h2 { margin:3px 0 0; color:#10294c; }.active-context-line{display:flex;align-items:center;gap:7px;margin:5px 0 0;color:#6d7f98;font-size:11px;font-weight:750}.active-context-line span{max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.active-context-line i{color:#0a67db;font-style:normal}.eyebrow { margin:0; }
+.chat-material-actions{display:flex;flex:none;align-items:center;gap:7px}.chat-material-button{position:relative;display:inline-flex;min-height:38px;align-items:center;justify-content:center;gap:7px;border:1px solid var(--ui-line-strong,#bfd2ea);border-radius:9px;background:var(--ui-surface,#fff);color:var(--ui-text-secondary,#526078);padding:8px 12px;font:800 12px/1 var(--ui-font-body,"Segoe UI",sans-serif);white-space:nowrap;cursor:pointer;transition:border-color .15s ease,background .15s ease,color .15s ease,box-shadow .15s ease}.chat-material-button svg{width:16px;height:16px;flex:none;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}.chat-material-button:hover:not(:disabled),.chat-material-button:focus-visible{border-color:var(--ui-accent,#0869d8);background:var(--ui-surface-active,#eaf3ff);color:var(--ui-accent-ink,#004aa8);box-shadow:0 0 0 3px var(--ui-focus,rgba(8,105,216,.14));outline:0}.chat-material-button.primary{border-color:var(--ui-accent,#0869d8);background:var(--ui-accent,#0869d8);color:#fff;padding-right:14px;padding-left:14px}.chat-material-button.primary:hover:not(:disabled),.chat-material-button.primary:focus-visible{background:var(--ui-accent-strong,#0056bd);color:#fff}.chat-material-button:disabled{cursor:wait;opacity:.58}.material-state-dot{width:6px;height:6px;flex:none;border-radius:50%;background:var(--ui-success,#21855b);box-shadow:0 0 0 2px var(--ui-success-soft,#e8f7f0)}
 .quiet-button,.chip-button { border:1px solid #dfe8d0; border-radius:10px; background:#f8fbf1; color:#61764b; padding:8px 11px; font-size:12px; font-weight:800; }.quiet-button.danger { border-color:#f0d5d5; background:#fff8f8; color:#ad5a5a; }
 .notice { margin:14px 22px 0; border-radius:12px; padding:10px 13px; font-size:13px; }.notice.success { border:1px solid #d7eabe; background:#f5faec; color:#5c7a2c; }
 .model-settings { display:grid; grid-template-columns:minmax(220px,.75fr) minmax(360px,1.25fr); gap:18px; border-bottom:1px solid #edf0e7; background:#fbfcf8; padding:18px 22px; }.model-settings p:not(.eyebrow) { color:#7b8574; font-size:13px; line-height:1.6; }
 .model-form { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }.model-form label { display:grid; gap:5px; color:#6e7b63; font-size:12px; font-weight:700; }.model-form input,.model-form select,.job-url-row input,.composer textarea,.model-select { width:100%; box-sizing:border-box; border:1px solid #dfe7d4; border-radius:10px; background:#fff; color:#324032; font:inherit; outline:none; }.model-form input,.model-form select { padding:8px 9px; }.check-label { display:flex !important; align-items:center; gap:7px; }.check-label input { width:auto; }.save-model { grid-column:1 / -1; padding:10px; }
 .model-profile-list { grid-column:1 / -1; display:grid; gap:7px; }.model-profile-list article { border:1px solid #e8ede0; border-radius:11px; background:#fff; padding:9px 11px; }.model-profile-list strong,.model-profile-list small { display:block; }.model-profile-list strong { color:#3a4837; font-size:13px; }.model-profile-list small { margin-top:3px; color:#8a9582; font-size:11px; }.readiness { border-radius:999px; padding:5px 8px; font-size:11px; font-weight:800; white-space:nowrap; }.readiness.ready { background:#edf7df; color:#5c7d27; }.readiness.credential_required { background:#fff4d9; color:#a16d12; }.readiness.policy_blocked { background:#fff0f0; color:#a65a5a; }.readiness.disabled { background:#f0f2ee; color:#7d8779; }
 .empty-state { display:grid; flex:1; place-content:center; justify-items:center; padding:50px 28px; text-align:center; }.empty-mark { display:grid; width:44px; height:44px; place-items:center; border-radius:14px; background:#89a93e; color:#fff; font-size:21px; }.empty-state > p:not(.eyebrow) { max-width:530px; color:#78836f; line-height:1.7; }.tag-row { display:flex; flex-wrap:wrap; justify-content:center; gap:8px; }.tag-row span { border-radius:999px; background:#f1f7e5; color:#668329; padding:7px 10px; font-size:12px; font-weight:800; }
-.message-list { display:flex; flex:1; flex-direction:column; gap:12px; overflow-y:auto; overscroll-behavior:contain; padding:18px 20px; }.message,.agent-message { max-width:min(760px,78%); border-radius:15px; padding:12px 14px; }.agent-message,.message.from-agent { align-self:flex-start; border:1px solid #e5ebdc; background:#fbfcf9; }.message.from-user { align-self:flex-end; background:#edf5dc; }.message span,.agent-message strong { color:#687c50; font-size:11px; font-weight:900; }.message p,.agent-message p { margin:6px 0; color:#344033; line-height:1.7; white-space:pre-wrap; }.message small { color:#99a38f; font-size:10px; }.turn-status { align-self:center; border-radius:999px; background:#f7f8f3; color:#64715a; padding:7px 11px; font-size:12px; }.turn-status.active { background:#fff5df; color:#a16e1b; }
-.message-sending { opacity:.76; }.message-failed { border:1px solid #edcaca; background:#fff8f8 !important; }.message-failed small { color:#b35454; font-weight:800; }.agent-pending { width:min(520px,78%); color:#607852; }.stream-pending-heading { display:flex; align-items:center; gap:8px; color:#607852; }.stream-pending-heading::before { width:13px; height:13px; flex:0 0 auto; border:2px solid #d7e5bc; border-top-color:#89a93e; border-radius:50%; content:''; animation:career-thinking-spin .8s linear infinite; }.stream-pending-heading span { color:#596d4d; font-size:12px; font-weight:850; }.stream-progress-list { display:grid; gap:7px; margin:11px 0 0; padding:0; list-style:none; }.stream-progress-item { display:flex; align-items:center; gap:8px; color:#75846d; font-size:12px; line-height:1.45; }.stream-progress-item i { width:7px; height:7px; flex:0 0 auto; border-radius:50%; background:#d2dcc5; }.stream-progress-item.running { color:#557525; font-weight:750; }.stream-progress-item.running i { background:#89a93e; animation:career-progress-pulse 1s ease-in-out infinite; }.stream-progress-item.completed i { background:#96b95a; }.stream-status,.streamed-answer { margin:10px 0 0 !important; }.streamed-answer { border-top:1px solid #e8eee0; padding-top:10px; } @keyframes career-progress-pulse { 50% { transform:scale(.72); opacity:.55; } }
+.empty-context-button{border:0;border-radius:11px;background:#0867d9;color:#fff;padding:11px 16px;font-weight:850;cursor:pointer}.active-context-chip{max-width:300px!important;border-color:#b8d1ed!important;background:#edf6ff!important;color:#0d5eB9!important}
+.message-list { display:flex; flex:1; flex-direction:column; gap:16px; overflow-y:auto; overscroll-behavior:contain; padding:22px 24px; }
+.message,.agent-message { box-sizing:border-box; max-width:min(820px,86%); padding:14px 16px; }
+.agent-message,.message.from-agent { align-self:flex-start; border:1px solid var(--ui-line); border-left:3px solid var(--ui-accent); border-radius:5px 13px 13px 5px; background:var(--ui-surface); box-shadow:0 8px 24px rgba(27,51,92,.045); }
+.message.from-user { width:fit-content; max-width:min(620px,72%); align-self:flex-end; border:1px solid #cfe0f5; border-radius:14px 14px 4px 14px; background:#edf5ff; padding:12px 15px 9px; box-shadow:none; }
+.message-role { display:flex; align-items:center; gap:7px; margin-bottom:10px; color:var(--ui-text-secondary); }
+.message-role i { display:grid; width:24px; height:24px; flex:0 0 auto; place-items:center; border-radius:7px; background:var(--ui-surface-active); color:var(--ui-accent-ink); font-size:11px; font-style:normal; font-weight:900; }
+.message-role strong { color:var(--ui-text-secondary); font-size:12px; font-weight:800; }
+.message-time { display:block; margin-top:10px; color:var(--ui-text-muted); font-size:10px; }.from-user .message-time { margin-top:6px; color:#8193aa; text-align:right; }
+.turn-status { align-self:center; border-radius:999px; background:var(--ui-surface-soft); color:var(--ui-text-secondary); padding:7px 11px; font-size:12px; }.turn-status.active { background:var(--ui-warning-soft); color:var(--ui-warning); }
+.message-sending { opacity:.76; }.message-failed { border-color:#edcaca; background:#fff8f8 !important; }.message-failed small { color:#b35454; font-weight:800; }.agent-pending { width:min(560px,86%); color:var(--ui-text-secondary); }.stream-pending-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; color:var(--ui-text-secondary); }.stream-pending-heading .message-role { margin-bottom:0; }.stream-pending-heading::before { width:13px; height:13px; flex:0 0 auto; border:2px solid var(--ui-line-strong); border-top-color:var(--ui-accent); border-radius:50%; content:''; animation:career-thinking-spin .8s linear infinite; }.stream-pending-heading span { color:var(--ui-text-muted); font-size:11px; font-weight:800; }.stream-progress-list { display:grid; gap:7px; margin:11px 0 0; padding:0; list-style:none; }.stream-progress-item { display:flex; align-items:center; gap:8px; color:var(--ui-text-muted); font-size:12px; line-height:1.45; }.stream-progress-item i { width:7px; height:7px; flex:0 0 auto; border-radius:50%; background:var(--ui-line-strong); }.stream-progress-item.running { color:var(--ui-accent-ink); font-weight:750; }.stream-progress-item.running i { background:var(--ui-accent); animation:career-progress-pulse 1s ease-in-out infinite; }.stream-progress-item.completed i { background:var(--ui-success); }.stream-status,.streamed-answer { margin:10px 0 0 !important; }.streamed-answer { border-top:1px solid var(--ui-line); padding-top:10px; } @keyframes career-progress-pulse { 50% { transform:scale(.72); opacity:.55; } }
 @keyframes career-thinking-spin { to { transform:rotate(360deg); } }
 .composer { border-top:1px solid #edf0e7; background:#fff; padding:12px 16px 14px; }.composer-toolbar { min-height:36px; flex-wrap:wrap; border-bottom:1px solid #edf0e7; padding-bottom:9px; }.input-tools,.session-tools { display:flex; min-width:0; flex-wrap:wrap; align-items:center; gap:7px; }.session-tools { margin-left:auto; justify-content:flex-end; }.job-url-row { display:grid; grid-template-columns:auto 1fr; align-items:center; gap:8px; margin:10px 0 9px; color:#738068; font-size:12px; font-weight:800; }.job-url-row input,.composer textarea { padding:10px 11px; }.composer textarea { display:block; min-height:68px; margin-top:10px; resize:vertical; }.composer-footer { margin-top:9px; }.input-tools { justify-content:flex-start; }.resume-input { display:none; }.chip-button.active { max-width:240px; overflow:hidden; background:#eaf4d4; color:#5a7d21; text-overflow:ellipsis; white-space:nowrap; }.file-clear-button { border-color:#f0d5d5; background:#fff8f8; color:#a65a5a; }.free-model-entry-button { border-style:dashed; background:#fff; color:#62812d; }.free-model-entry-button:hover { border-color:#9fbd67; background:#f5f9ed; }.model-select { width:auto; max-width:300px; padding:7px 9px; color:#65775a; font-size:12px; font-weight:700; }.send-button { min-width:88px; padding:9px 13px; }.composer-footer > small { color:#98a18e; font-size:11px; }
 .interview-reference-row { display:flex; flex-wrap:wrap; gap:7px; margin-top:9px; }
@@ -1309,6 +2186,7 @@ onMounted(refreshData)
 .interview-mention-menu { display:grid; max-height:206px; margin-top:8px; overflow:auto; border:1px solid #dce6ce; border-radius:12px; background:#fff; box-shadow:0 12px 28px rgba(68,84,44,.12); }
 .interview-mention-menu button { display:grid; gap:3px; border:0; border-bottom:1px solid #edf2e7; background:#fff; color:#34472a; padding:10px 12px; text-align:left; cursor:pointer; }
 .interview-mention-menu button:last-child { border-bottom:0; }.interview-mention-menu button:hover { background:#f3f8e9; }.interview-mention-menu strong { font-size:13px; }.interview-mention-menu small { color:#87977b; font-size:12px; }
+.skill-invocation-chip { border-color:#d8c9ef !important; background:#f7f2ff !important; color:#7250a0 !important; }.skill-invocation-menu { border-color:#ded1ef; }.suggestion-menu-label { margin:0; border-bottom:1px solid #eee7f6; background:#faf7fe; color:#8162a5; padding:7px 12px; font-size:10px; font-weight:900; letter-spacing:.08em; text-transform:uppercase; }.skill-invocation-menu button:hover { background:#f8f3fd; }
 .career-error-toast { position:fixed; z-index:1400; top:50%; left:50%; display:flex; width:min(620px,calc(100vw - 40px)); box-sizing:border-box; align-items:flex-start; justify-content:space-between; gap:18px; transform:translate(-50%,-50%); border:1px solid #efbcbc; border-radius:18px; background:#fff8f8; box-shadow:0 22px 70px rgba(114,42,42,.24); color:#943f3f; padding:19px 18px 19px 21px; animation:career-toast-in .18s ease-out; }.career-error-toast strong { display:block; font-size:17px; line-height:1.35; }.career-error-toast p { margin:5px 0 0; font-size:16px; font-weight:650; line-height:1.6; }.toast-close-button { display:grid; width:30px; height:30px; flex:0 0 auto; place-items:center; border:1px solid #edcaca; border-radius:9px; background:#fff; color:#a95050; font-size:22px; line-height:1; }.toast-close-button:hover { background:#fff0f0; }@keyframes career-toast-in { from { opacity:0; transform:translate(-50%,-46%); } to { opacity:1; transform:translate(-50%,-50%); } }
 .model-manager-button { border-color:#cfdcb7; background:#f1f7e5; color:#5c7a28; }.model-dialog-backdrop { position:fixed; z-index:1200; inset:0; display:grid; place-items:center; box-sizing:border-box; padding:28px; background:rgba(29,40,25,.42); backdrop-filter:blur(5px); }.model-dialog { display:flex; width:min(960px,100%); max-height:min(780px,calc(100vh - 56px)); flex-direction:column; overflow:hidden; border:1px solid #dce6cf; border-radius:24px; background:#fff; box-shadow:0 28px 80px rgba(23,37,20,.28); }.model-dialog-header { display:flex; align-items:flex-start; justify-content:space-between; gap:20px; border-bottom:1px solid #ecf0e5; padding:24px 28px 20px; }.model-dialog-header h2 { margin:4px 0 0; color:#243323; font-size:23px; }.dialog-close-button { display:grid; width:34px; height:34px; flex:0 0 auto; place-items:center; border:1px solid #e1e8d7; border-radius:10px; background:#fafcf7; color:#728067; font-size:23px; line-height:1; }.model-dialog-body { min-height:240px; overflow-y:auto; padding:22px 28px 26px; }.connection-toolbar { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:16px; }.connection-toolbar strong,.connection-toolbar small { display:block; }.connection-toolbar strong { color:#354333; font-size:16px; }.connection-toolbar small,.dialog-helper { margin-top:4px; color:#889281; font-size:12px; }.dialog-primary-button,.dialog-secondary-button { border:0; border-radius:11px; padding:10px 15px; font-size:13px; font-weight:850; }.dialog-primary-button { background:#89a93e; color:#fff; box-shadow:0 8px 18px rgba(112,144,51,.2); }.dialog-primary-button:disabled { cursor:wait; opacity:.6; }.dialog-secondary-button,.back-button { border:1px solid #e1e8d7; background:#fff; color:#64735a; }.connection-card-list { display:grid; gap:10px; }.connection-card { display:grid; width:100%; grid-template-columns:18px 42px minmax(0,1fr) auto; align-items:center; gap:13px; border:1px solid #e3ead9; border-radius:15px; background:#fff; color:#31402f; padding:13px 15px; text-align:left; transition:border-color .16s ease,background .16s ease,transform .16s ease; }.connection-card:hover { border-color:#a7c66d; background:#fbfdf7; transform:translateY(-1px); }.connection-drag { color:#bcc7b4; font-size:20px; letter-spacing:-3px; }.provider-avatar { display:grid; width:38px; height:38px; place-items:center; border:1px solid #dfe8d0; border-radius:12px; background:#f3f8e9; color:#6d8c33; font-size:11px; font-weight:900; }.provider-avatar.large { width:44px; height:44px; border-radius:14px; }.connection-card-copy { min-width:0; }.connection-card-copy strong,.connection-card-copy small { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.connection-card-copy strong { font-size:14px; }.connection-card-copy small { margin-top:3px; color:#899481; font-size:12px; }.connection-meta { display:grid; justify-items:end; gap:5px; }.connection-meta small { color:#98a18f; font-size:11px; }.connection-empty-state { display:grid; min-height:250px; place-content:center; justify-items:center; border:1px dashed #d9e4cb; border-radius:16px; background:#fbfdf8; color:#7a8870; text-align:center; }.connection-empty-state > span { color:#90b04c; font-size:30px; }.connection-empty-state strong { margin-top:8px; color:#526449; }.connection-empty-state p { max-width:320px; margin:7px 0 0; font-size:13px; line-height:1.6; }.back-button { border-radius:9px; padding:7px 10px; color:#66765b; font-size:12px; font-weight:800; }.model-dialog-body h3 { margin:20px 0 4px; color:#31402e; font-size:18px; }.provider-picker-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; margin-top:18px; }.provider-picker-card { display:grid; grid-template-columns:44px minmax(0,1fr); align-items:center; gap:11px; border:1px solid #e2ead8; border-radius:16px; background:#fbfcf9; color:#334131; padding:15px; text-align:left; transition:border-color .16s ease,box-shadow .16s ease; }.provider-picker-card:hover { border-color:#97ba57; box-shadow:0 10px 25px rgba(91,120,42,.1); }.provider-picker-card strong,.provider-picker-card small { display:block; }.provider-picker-card small { margin-top:4px; color:#84907c; font-size:11px; line-height:1.5; }.provider-picker-card em { grid-column:1 / -1; justify-self:start; border-radius:999px; background:#eef6df; color:#66842e; padding:4px 7px; font-size:10px; font-style:normal; font-weight:850; }.connection-form-body { padding-bottom:22px; }.selected-provider-banner { display:flex; align-items:center; gap:11px; margin-top:17px; border:1px solid #dce9c8; border-radius:15px; background:#f6faef; padding:12px; }.selected-provider-banner div { min-width:0; flex:1; }.selected-provider-banner strong,.selected-provider-banner small { display:block; }.selected-provider-banner small { margin-top:3px; color:#7d8973; font-size:12px; }.selected-provider-banner > span:last-child { border-radius:999px; background:#e7f1d4; color:#63822b; padding:5px 8px; font-size:11px; font-weight:850; }.connection-form-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; margin-top:18px; }.connection-form-grid label { display:grid; gap:5px; color:#4e5c49; font-size:13px; font-weight:850; }.connection-form-grid label > span { color:#8a9583; font-size:11px; font-weight:500; }.connection-form-grid input,.connection-form-grid select { width:100%; box-sizing:border-box; border:1px solid #dfe7d4; border-radius:10px; background:#fff; color:#354334; padding:10px 11px; font:inherit; outline:none; }.connection-form-grid input:focus,.connection-form-grid select:focus { border-color:#91b44b; box-shadow:0 0 0 3px rgba(137,169,62,.12); }.full-width { grid-column:1 / -1; }.capability-fieldset { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; margin:18px 0 0; border:0; padding:0; }.capability-fieldset legend { margin-bottom:8px; color:#4d5d48; font-size:13px; font-weight:850; }.capability-option { display:flex; align-items:flex-start; gap:8px; border:1px solid #e3ead9; border-radius:13px; background:#fbfcf9; padding:11px; }.capability-option input { margin-top:3px; accent-color:#89a93e; }.capability-option strong,.capability-option small { display:block; }.capability-option strong { color:#485846; font-size:12px; }.capability-option small { margin-top:3px; color:#899481; font-size:11px; line-height:1.45; }.connection-test-success,.connection-test-error { display:block; margin:14px 0 0; border-radius:11px; padding:10px 12px; font-size:12px; font-weight:750; line-height:1.6; }.connection-test-success { border:1px solid #cce5aa; background:#f4faea; color:#587b27; }.connection-test-error { border:1px solid #efcaca; background:#fff6f6; color:#9c4848; }.connection-test-error strong { display:block; margin-bottom:2px; }.model-dialog-footer { display:flex; justify-content:flex-end; gap:10px; border-top:1px solid #ecf0e5; background:#fbfcf9; padding:15px 28px; }
 .model-dialog { width:min(1080px,100%); max-height:min(840px,calc(100vh - 44px)); }
@@ -1327,9 +2205,19 @@ onMounted(refreshData)
 .free-provider-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; }.free-provider-card { display:flex; min-width:0; flex-direction:column; border:1px solid #dfe8d4; border-radius:18px; background:#fff; padding:16px; box-shadow:0 8px 24px rgba(65,82,50,.05); }.free-provider-card > header { display:grid; grid-template-columns:44px minmax(0,1fr) auto; align-items:center; gap:11px; }.free-provider-card > header strong,.free-provider-card > header small { display:block; }.free-provider-card > header strong { color:#31402e; font-size:14px; }.free-provider-card > header small { margin-top:3px; color:#839078; font-size:11px; }.catalog-readiness { border-radius:999px; background:#f4eee1; color:#9a7327; padding:5px 7px; font-size:10px; font-weight:850; }.catalog-readiness.ready { background:#eaf4d8; color:#5f8228; }.free-provider-card > p { min-height:44px; margin:13px 0 9px; color:#727f6c; font-size:12px; line-height:1.65; }.catalog-access-summary { margin-bottom:12px; border-left:3px solid #d9b86c; border-radius:0 9px 9px 0; background:#fff9eb; color:#866922; padding:8px 10px; font-size:11px; font-weight:800; line-height:1.5; }.catalog-access-summary.ready { border-left-color:#8dac4b; background:#f0f7e5; color:#5d7d28; }.free-model-template-list { display:grid; gap:8px; }.free-model-template { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:4px 10px; border:1px solid #e7ecdf; border-radius:12px; background:#fafcf7; padding:10px; }.free-model-template > div { min-width:0; }.free-model-template strong,.free-model-template code { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.free-model-template strong { color:#445340; font-size:12px; }.free-model-template code { margin-top:3px; color:#84917d; font-size:10px; }.free-model-template button { grid-row:1 / 3; grid-column:2; align-self:center; border:1px solid #b9cf8e; border-radius:9px; background:#f0f7e3; color:#5d7d28; padding:7px 9px; font-size:11px; font-weight:850; }.free-model-template > small { color:#96a08f; font-size:10px; }.free-provider-card > footer { display:flex; flex-wrap:wrap; gap:8px 14px; margin-top:auto; padding-top:14px; }.free-provider-card > footer a { color:#557825; font-size:11px; font-weight:850; text-decoration:none; }.free-provider-card > footer a:hover { text-decoration:underline; }
 .catalog-load-error { display:flex; align-items:center; justify-content:space-between; gap:14px; flex-wrap:wrap; }.catalog-load-error > div { min-width:0; flex:1 1 420px; }.catalog-load-error span { display:block; }.catalog-load-error button { flex:0 0 auto; background:#fff; }
 /* 只维护电脑与手机两档；手机端保留一个页面级滚动面。 */
-@media (max-width:640px) { .career-workspace { height:auto; min-height:calc(100dvh - 92px); grid-template-columns:1fr; grid-template-rows:auto auto; align-content:start; gap:10px; overflow:visible; }.career-chat-panel { height:auto; min-height:520px; overflow:visible; }.chat-header { min-height:60px; padding:12px 14px; }.message-list { min-height:270px; flex:none; overflow:visible; padding:14px; }.composer { position:sticky; z-index:5; bottom:0; padding:10px 12px max(12px, env(safe-area-inset-bottom)); box-shadow:0 -10px 22px rgba(47,62,37,.08); }.composer-toolbar,.composer-footer { align-items:flex-start; flex-direction:column; }.session-tools { margin-left:0; }.career-history-panel { height:auto; max-height:none; overflow:visible; }.conversation-list { grid-template-columns:1fr; max-height:200px; flex:none; overflow:auto; }.model-settings,.model-form,.provider-picker-grid,.provider-picker-grid-expanded { grid-template-columns:1fr; }.message,.agent-message { max-width:94%; }.model-select { max-width:100%; }.send-button { align-self:stretch; min-height:44px; }.career-error-toast { width:calc(100vw - 28px); gap:12px; padding:17px; }.career-error-toast strong { font-size:16px; }.career-error-toast p { font-size:15px; }.model-dialog-backdrop { align-items:end; padding:0; }.model-dialog { max-height:90dvh; border-radius:22px 22px 0 0; }.model-dialog-header,.model-dialog-body,.model-dialog-footer { padding-right:18px; padding-left:18px; }.connection-toolbar,.connection-card { align-items:flex-start; }.connection-toolbar { flex-direction:column; }.connection-toolbar-actions { width:100%; justify-content:stretch; }.connection-toolbar-actions button { flex:1; }.connection-card { grid-template-columns:18px 38px minmax(0,1fr); }.connection-meta { grid-column:3; justify-items:start; }.connection-form-grid,.capability-fieldset { grid-template-columns:1fr; }.dialog-primary-button,.dialog-secondary-button { min-height:44px; }.free-directory-intro { align-items:flex-start; flex-direction:column; gap:10px; }.free-provider-grid { grid-template-columns:1fr; }.free-provider-card { padding:14px; }.free-provider-card > header { grid-template-columns:40px minmax(0,1fr); }.free-provider-card > header .catalog-readiness { grid-column:2; justify-self:start; }.free-provider-card > p { min-height:0; }.free-model-template { grid-template-columns:1fr; }.free-model-template button { grid-row:auto; grid-column:auto; min-height:42px; }.free-provider-card > footer a { min-height:36px; display:inline-flex; align-items:center; } }
+@media (max-width:1500px) and (min-width:641px){.career-workspace{grid-template-columns:220px minmax(0,1fr);gap:10px}.career-workspace.has-context-rail{grid-template-columns:220px minmax(480px,1fr) min(var(--context-rail-width,620px),calc(100vw - 750px))}.career-workspace.history-collapsed{grid-template-columns:48px minmax(0,1fr)}.career-workspace.has-context-rail.history-collapsed{grid-template-columns:48px minmax(480px,1fr) min(var(--context-rail-width,620px),calc(100vw - 578px))}.career-history-panel{padding:11px}.career-history-panel.collapsed{padding:8px 5px}.chat-header{padding-right:14px;padding-left:14px}.message-list{padding-right:14px;padding-left:14px}}
+@media (max-width:640px) { .career-workspace,.career-workspace.history-collapsed,.career-workspace.has-context-rail.history-collapsed { height:auto; min-height:calc(100dvh - 92px); grid-template-columns:1fr; grid-template-rows:auto auto auto; align-content:start; gap:10px; overflow:visible; }.career-chat-panel { height:auto; min-height:520px; overflow:visible; }.chat-header { min-height:60px; align-items:flex-start; flex-direction:column; padding:12px 14px; }.chat-material-actions{width:100%}.chat-material-button{min-width:0;flex:1}.message-list { min-height:270px; flex:none; overflow:visible; padding:14px; }.composer { position:sticky; z-index:5; bottom:0; padding:10px 12px max(12px, env(safe-area-inset-bottom)); box-shadow:0 -10px 22px rgba(47,62,37,.08); }.composer-toolbar,.composer-footer { align-items:flex-start; flex-direction:column; }.session-tools { margin-left:0; }.career-history-panel { height:auto; max-height:none; overflow:visible; }.career-history-panel.collapsed{height:auto;flex-direction:row;justify-content:flex-start;padding:8px}.conversation-list { grid-template-columns:1fr; max-height:200px; flex:none; overflow:auto; }.model-settings,.model-form,.provider-picker-grid,.provider-picker-grid-expanded { grid-template-columns:1fr; }.message,.agent-message { max-width:94%; }.model-select { max-width:100%; }.send-button { align-self:stretch; min-height:44px; }.career-error-toast { width:calc(100vw - 28px); gap:12px; padding:17px; }.career-error-toast strong { font-size:16px; }.career-error-toast p { font-size:15px; }.model-dialog-backdrop { align-items:end; padding:0; }.model-dialog { max-height:90dvh; border-radius:22px 22px 0 0; }.model-dialog-header,.model-dialog-body,.model-dialog-footer { padding-right:18px; padding-left:18px; }.connection-toolbar,.connection-card { align-items:flex-start; }.connection-toolbar { flex-direction:column; }.connection-toolbar-actions { width:100%; justify-content:stretch; }.connection-toolbar-actions button { flex:1; }.connection-card { grid-template-columns:18px 38px minmax(0,1fr); }.connection-meta { grid-column:3; justify-items:start; }.connection-form-grid,.capability-fieldset { grid-template-columns:1fr; }.dialog-primary-button,.dialog-secondary-button { min-height:44px; }.free-directory-intro { align-items:flex-start; flex-direction:column; gap:10px; }.free-provider-grid { grid-template-columns:1fr; }.free-provider-card { padding:14px; }.free-provider-card > header { grid-template-columns:40px minmax(0,1fr); }.free-provider-card > header .catalog-readiness { grid-column:2; justify-self:start; }.free-provider-card > p { min-height:0; }.free-model-template { grid-template-columns:1fr; }.free-model-template button { grid-row:auto; grid-column:auto; min-height:42px; }.free-provider-card > footer a { min-height:36px; display:inline-flex; align-items:center; } }
 
 @media (max-width:640px) {
+  .career-workspace.has-context-rail,
+  .career-workspace.has-context-rail.history-collapsed {
+    grid-template-columns:1fr;
+  }
+
+  .context-rail-resizer {
+    display:none;
+  }
+
   .career-history-panel {
     padding:12px;
   }

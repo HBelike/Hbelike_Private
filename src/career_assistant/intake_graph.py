@@ -15,6 +15,7 @@ from src.career_assistant.attachments import (
     TemporaryAttachmentStore,
 )
 from src.career_assistant.contracts import (
+    ActivatedSkill,
     AgentStepName,
     AttachmentKind,
     CareerInboundMessage,
@@ -41,6 +42,7 @@ class TurnRuntimeContext:
     """
 
     original_text: str
+    model_text: str
     has_job_url: bool
     attachment_kind_codes: tuple[str, ...]
 
@@ -84,8 +86,12 @@ class ModelTurnContext:
     pdf_without_extractable_text_count: int
     redacted_resume_outline: str = ""
     redacted_interview_evidence: tuple[InterviewEvidence, ...] = ()
+    activated_skills: tuple[ActivatedSkill, ...] = ()
     document_processing_notices: tuple[str, ...] = ()
     attachment_processing_summaries: tuple["AttachmentProcessingSummary", ...] = ()
+    candidate_profile_context: str = ""
+    target_role_context: str = ""
+    context_binding_version: int | None = None
 
 
 @dataclass(frozen=True)
@@ -310,6 +316,11 @@ class CareerIntakeGraph:
         inbound_message = state["inbound_message"]
         context = TurnRuntimeContext(
             original_text=inbound_message.text.strip(),
+            model_text=(
+                inbound_message.effective_text.strip()
+                if inbound_message.effective_text is not None
+                else inbound_message.text.strip()
+            ),
             has_job_url=bool((inbound_message.job_url or "").strip()),
             attachment_kind_codes=tuple(
                 sorted(attachment.kind.value for attachment in inbound_message.attachments),
@@ -501,7 +512,12 @@ class CareerIntakeGraph:
         """构造发送给模型的脱敏上下文，材料原文只在本轮内存中短暂存在。"""
 
         parsed_attachments = state.get("parsed_attachments", ())
+        inbound_message = state["inbound_message"]
         resume_outline = self._build_redacted_resume_outline(parsed_attachments)
+        if inbound_message.candidate_profile_context.strip():
+            resume_outline = self._redactor.redact(
+                inbound_message.candidate_profile_context,
+            )[: self._MAX_MODEL_RESUME_OUTLINE_CHARACTERS]
         material_parts = [
             self._redactor.redact(parsed_attachment.extracted_text)
             for parsed_attachment in parsed_attachments
@@ -519,6 +535,10 @@ class CareerIntakeGraph:
         if job_snapshot is not None:
             redacted_job_text = self._redactor.redact(
                 job_snapshot.visible_text,
+            )[: self._MAX_MODEL_JOB_CHARACTERS]
+        if inbound_message.target_role_context.strip():
+            redacted_job_text = self._redactor.redact(
+                inbound_message.target_role_context,
             )[: self._MAX_MODEL_JOB_CHARACTERS]
 
         contains_image_material = any(
@@ -540,8 +560,8 @@ class CareerIntakeGraph:
 
         return ModelTurnContext(
             redacted_user_text=(
-                self._redactor.redact(runtime_context.original_text)
-                if runtime_context.original_text
+                self._redactor.redact(runtime_context.model_text)
+                if runtime_context.model_text
                 else ""
             ),
             redacted_material_text="\n\n".join(material_parts)[
@@ -564,6 +584,7 @@ class CareerIntakeGraph:
             ),
             redacted_resume_outline=resume_outline,
             redacted_interview_evidence=redacted_interview_evidence,
+            activated_skills=state["inbound_message"].activated_skills,
             document_processing_notices=tuple(
                 parsed_attachment.document_understanding_error
                 for parsed_attachment in parsed_attachments
@@ -572,6 +593,9 @@ class CareerIntakeGraph:
             attachment_processing_summaries=self._build_attachment_processing_summaries(
                 parsed_attachments,
             ),
+            candidate_profile_context=resume_outline,
+            target_role_context=redacted_job_text,
+            context_binding_version=inbound_message.context_binding_version,
         )
 
     @staticmethod

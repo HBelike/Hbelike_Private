@@ -10,7 +10,7 @@ from typing import Annotated, Any
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool
 from sqlalchemy.exc import SQLAlchemyError
 
 from src.career_assistant.persistence.database import CareerDatabase
@@ -115,6 +115,12 @@ class PipelineConfigRequest(BaseModel):
     """管理员保存的运行配置，保持 JSON 可扩展边界。"""
 
     config: dict[str, object]
+
+
+class RouteModuleConfigRequest(BaseModel):
+    """管理员提交的完整顶级路由模块开关。"""
+
+    modules: dict[str, StrictBool]
 
 
 class ManualPipelineRequest(BaseModel):
@@ -421,6 +427,31 @@ def current_user(user: Annotated[PlatformUser, Depends(get_current_platform_user
     """返回当前登录用户的安全资料。"""
 
     return {"user": _serialize_user(user)}
+
+
+@router.get("/api/navigation/modules")
+def get_route_modules(
+    request: Request,
+    user: Annotated[PlatformUser, Depends(get_current_platform_user)],
+) -> dict[str, object]:
+    """返回管理员配置后的有序模块目录及当前角色可访问状态。"""
+
+    return {"items": get_platform_access_service(request).get_route_modules(user)}
+
+
+@router.put("/api/admin/navigation-modules")
+def save_route_modules(
+    payload: RouteModuleConfigRequest,
+    request: Request,
+    user: Annotated[PlatformUser, Depends(require_admin)],
+) -> dict[str, object]:
+    """保存顶级路由模块开关；普通用户由依赖统一返回 403。"""
+
+    try:
+        items = get_platform_access_service(request).save_route_modules(user, payload.modules)
+    except (PermissionError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return {"items": items}
 
 
 @router.get("/api/admin/pipeline-config")

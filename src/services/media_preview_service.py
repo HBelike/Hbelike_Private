@@ -23,6 +23,8 @@ class MediaPreviewError(RuntimeError):
 class MediaPreviewService:
     """负责构建审核预览数据，并安全解析本地媒体文件。"""
 
+    media_library_asset_types = frozenset({"image", "audio", "video", "video_clip"})
+
     def __init__(self, config: AppConfig, database_manager: DatabaseManager) -> None:
         self.config = config
         self.database_manager = database_manager
@@ -388,22 +390,29 @@ class MediaPreviewService:
             if clip_plan.id not in clip_plan_ids_with_asset
         ]
 
+        library_assets = self._media_library_assets(media_assets)
         playable_video_types = {"video", "video_clip"}
         return {
             "content_id": normalized_content_id,
             "scope": "content" if normalized_content_id is not None else "all",
-            "items": [self._asset_to_preview_payload(asset) for asset in media_assets],
+            "items": [self._asset_to_preview_payload(asset) for asset in library_assets],
             "pending_video_clips": pending_video_clips,
             "summary": {
-                "total_asset_count": len(media_assets),
-                "image_count": sum(asset.asset_type == "image" for asset in media_assets),
-                "audio_count": sum(asset.asset_type == "audio" for asset in media_assets),
-                "video_count": sum(asset.asset_type in playable_video_types for asset in media_assets),
+                "total_asset_count": len(library_assets),
+                "image_count": sum(asset.asset_type == "image" for asset in library_assets),
+                "audio_count": sum(asset.asset_type == "audio" for asset in library_assets),
+                "video_count": sum(asset.asset_type in playable_video_types for asset in library_assets),
                 "pending_video_count": len(pending_video_clips),
-                "failed_asset_count": sum(asset.status == "failed" for asset in media_assets),
+                "failed_asset_count": sum(asset.status == "failed" for asset in library_assets),
                 "failed_video_plan_count": sum(item["status"] == "failed" for item in pending_video_clips),
             },
         }
+
+    @classmethod
+    def _media_library_assets(cls, media_assets: list[MediaAssetRecord]) -> list[MediaAssetRecord]:
+        """只向素材库暴露用户能够直接消费的图片、音频和视频文件。"""
+
+        return [asset for asset in media_assets if asset.asset_type in cls.media_library_asset_types]
 
     def _clip_plan_ids_with_asset(self, media_assets: list[MediaAssetRecord]) -> set[int]:
         """找出已经创建任务或已下载文件的视频分片计划。"""

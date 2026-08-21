@@ -30,6 +30,7 @@ from src.tasks.task_context import TaskContext
 from src.tasks.task_result import TaskResult
 from src.career_assistant.web import install_career_assistant_api
 from src.career_assistant.web.router import CareerRequestActor, reset_request_actor, set_request_actor
+from src.evaluation.web import install_evaluation_api
 from src.platform_access.contracts import PlatformRole
 from src.platform_access.web import (
     get_platform_access_service,
@@ -200,7 +201,12 @@ def create_app(project_root: Path | None = None) -> FastAPI:
         title="GitHub Weekly WeChat Agent Preview API",
         version="0.1.0",
     )
-    install_career_assistant_api(app, resolved_project_root)
+    install_career_assistant_api(
+        app,
+        resolved_project_root,
+        skill_library_service=skill_library_service,
+    )
+    install_evaluation_api(app)
     install_platform_access_api(app, resolved_project_root)
 
     @app.middleware("http")

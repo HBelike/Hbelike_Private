@@ -125,17 +125,40 @@ class Application:
     def _run_once_pipeline_unlocked(self) -> list[TaskResult]:
         """在已持有流水线锁时从 SummaryTask 开始消费现有周榜快照。"""
 
-        task_classes: tuple[type[BaseTask], ...] = (
-            SummaryTask, ShortVideoPromptTask, ImageTask, AudioTask,
-            VideoClipPlanTask, StorageTask, SeedanceClipTask, SeedanceClipStatusTask,
-            VideoVisualQualityTask, SeedanceClipTask, SeedanceClipStatusTask,
-            VideoNarrationTimelineTask, SegmentedAudioTask, VideoAssemblyTask,
-            StorageTask, PreviewTask, ArticleLayoutTask, DeliverTask, CatTask,
-        )
+        assert self.config is not None
+        task_classes = self._once_pipeline_task_classes(self.config)
         results = [self._run_task(task_class) for task_class in task_classes]
         assert self.logger is not None
         self.logger.info("一次性流水线执行完成")
         return results
+
+    @staticmethod
+    def _once_pipeline_task_classes(config: AppConfig) -> tuple[type[BaseTask], ...]:
+        """根据媒体开关构建一次性流水线，关闭时不进入对应任务阶段。"""
+
+        task_classes: list[type[BaseTask]] = [SummaryTask]
+        if config.video_submit_enabled:
+            task_classes.append(ShortVideoPromptTask)
+        task_classes.append(ImageTask)
+        if config.audio_enabled:
+            task_classes.append(AudioTask)
+        if config.video_submit_enabled:
+            task_classes.extend(
+                [
+                    VideoClipPlanTask,
+                    StorageTask,
+                    SeedanceClipTask,
+                    SeedanceClipStatusTask,
+                    VideoVisualQualityTask,
+                    SeedanceClipTask,
+                    SeedanceClipStatusTask,
+                    VideoNarrationTimelineTask,
+                    SegmentedAudioTask,
+                    VideoAssemblyTask,
+                ]
+            )
+        task_classes.extend([StorageTask, PreviewTask, ArticleLayoutTask, DeliverTask, CatTask])
+        return tuple(task_classes)
 
     def _run_weekly_content_production_job(self) -> None:
         """周五 08:00 内容生产 Job：采集、总结、生成素材、生成审核预览。"""
@@ -148,15 +171,19 @@ class Application:
     def _run_weekly_content_production_job_unlocked(self) -> None:
         """在已持有流水线锁的前提下执行周五 08:00 内容生产。"""
 
+        assert self.config is not None
         self._run_task(SearchTask)
         self._run_task(SummaryTask)
-        self._run_task(ShortVideoPromptTask)
+        if self.config.video_submit_enabled:
+            self._run_task(ShortVideoPromptTask)
         self._run_task(ImageTask)
-        # 审核台应先具备可试听的完整口播；最终视频仍在分镜完成后生成时间轴对齐音频。
-        self._run_task(AudioTask)
-        self._run_task(VideoClipPlanTask)
+        if self.config.audio_enabled:
+            self._run_task(AudioTask)
+        if self.config.video_submit_enabled:
+            self._run_task(VideoClipPlanTask)
         self._run_task(StorageTask)
-        self._run_task(SeedanceClipTask)
+        if self.config.video_submit_enabled:
+            self._run_task(SeedanceClipTask)
         self._run_task(PreviewTask)
         self._run_task(CatTask)
 
@@ -171,18 +198,20 @@ class Application:
     def _run_weekly_draft_creation_job_unlocked(self) -> None:
         """在已持有流水线锁的前提下执行周五 09:00 草稿推进。"""
 
-        # 兼容旧内容：若 08:00 的审核前音频未生成，在创建草稿前补齐。
-        self._run_task(AudioTask)
+        assert self.config is not None
+        if self.config.audio_enabled:
+            self._run_task(AudioTask)
         self._run_task(StorageTask)
-        self._run_task(SeedanceClipStatusTask)
-        self._run_task(VideoVisualQualityTask)
-        self._run_task(SeedanceClipTask)
-        self._run_task(SeedanceClipStatusTask)
-        self._run_task(VideoNarrationTimelineTask)
-        self._run_task(SegmentedAudioTask)
-        self._run_task(VideoAssemblyTask)
-        self._run_task(StorageTask)
-        self._run_task(VideoStatusTask)
+        if self.config.video_submit_enabled:
+            self._run_task(SeedanceClipStatusTask)
+            self._run_task(VideoVisualQualityTask)
+            self._run_task(SeedanceClipTask)
+            self._run_task(SeedanceClipStatusTask)
+            self._run_task(VideoNarrationTimelineTask)
+            self._run_task(SegmentedAudioTask)
+            self._run_task(VideoAssemblyTask)
+            self._run_task(StorageTask)
+            self._run_task(VideoStatusTask)
         self._run_task(PreviewTask)
         self._run_task(ArticleLayoutTask)
         self._run_task(DeliverTask)

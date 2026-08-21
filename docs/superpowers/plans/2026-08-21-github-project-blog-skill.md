@@ -1,5 +1,7 @@
 # GitHub 项目文章 Skill Implementation Plan
 
+> 状态说明（2026-08-21）：这是首次接入时的历史实施计划。计划中保留的标签下限和最大长度校验随后均已取消；现行合同以 `docs/summary_writing_skill_research.md` 为准。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 用一个自包含的 `github-project-blog` Skill 接管 `SummaryTask` 的写作方法，并取消每个项目至少 500 个中文字符及其派生的全文最低字数。

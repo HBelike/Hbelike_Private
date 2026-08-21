@@ -10,6 +10,8 @@
 
 **Spec:** `docs/superpowers/specs/2026-08-21-career-llm-job-assessment-design.md`
 
+**Implementation result (2026-08-21):** Completed inline because the optional executing-plans/subagent skills were unavailable and the user requested immediate implementation. The final implementation accepts a configured text-only profile through JSON Object mode, stores validated section text directly in `job_sections[].items`, and reschedules any still-queued record on conversation reads. Verification used Python `unittest` because this workspace environment does not include `pytest`.
+
 ## Global Constraints
 
 - The Judge model is selected by administrator-owned `profile_key`; it never follows the chat model selector.
@@ -109,7 +111,7 @@ Expected: PASS.
 **Interfaces:**
 - Consumes: `OpenAICompatibleChatClient`, `ModelGateway`, `CareerModelProfileRepository`, `CareerJobAssessmentRepository`, and `JobAssessmentSettings`.
 - Produces: `CareerJobAssessmentService.enqueue_context()`, `run_assessment()`, and `retry_context()`.
-- Produces validated result payload keys `algorithm_version`, `status`, `dimensions`, `items`, `job_sections`, `disclaimer`, and `source_lines`.
+- Produces validated result payload keys `algorithm_version`, `status`, `dimensions`, `items`, `job_sections`, and `disclaimer`; cited source text is materialized only after server-side ID validation.
 
 - [ ] **Step 1: Write failing source-numbering, validation, scoring, retry, and fallback tests**
 
@@ -151,7 +153,7 @@ The tool schema must constrain section categories, `requirement_type`, `verdict`
 
 - [ ] **Step 4: Implement the service and retry classification**
 
-Resolve the configured `profile_key` from the organization model list, require text plus tools or structured output, and use the stored credential returned by `ModelGateway`. Call the forced `submit_job_assessment` tool when tools are supported; otherwise call a new `complete_json()` client method using `response_format={"type": "json_object"}`. Retry only `ModelInvocationError(retryable=True)` and `JobAssessmentValidationError` up to `settings.max_attempts`. Non-retryable configuration errors enter legacy fallback immediately.
+Resolve the configured `profile_key` from the organization model list, require text plus tools when Tool Calling is declared and otherwise require text, then use the stored credential returned by `ModelGateway`. Call the forced `submit_job_assessment` tool when tools are supported; otherwise call a new `complete_json()` client method using `response_format={"type": "json_object"}`. Retry only retryable model failures and invalid JSON/Schema outputs up to `settings.max_attempts`. Non-retryable configuration errors enter legacy fallback immediately.
 
 Legacy fallback is accepted only when at least one requirement exists and two existing dimensions have `status == "ready"`; otherwise save `failed` with a stable error code.
 
@@ -199,7 +201,7 @@ Add `job_assessment_repository` and `job_assessment_service` fields to `CareerAs
 
 - [ ] **Step 4: Queue on create/update and expose status**
 
-Add `BackgroundTasks` to complete-context create/update routes. After binding, call `enqueue_context(context)` and schedule `run_assessment(record.id)` only when a queued row was newly created. Replace synchronous `build_match_assessment()` inside `_conversation_context_payload()` with repository lookup and serialized status/result.
+Add `BackgroundTasks` to complete-context create/update routes. After binding, call `enqueue_context(context)` and schedule `run_assessment(record.id)` whenever the current row remains queued; atomic `claim()` prevents duplicates and allows an interrupted queued row to recover on the next read. Replace synchronous `build_match_assessment()` inside `_conversation_context_payload()` with repository lookup and serialized status/result.
 
 - [ ] **Step 5: Implement manual retry**
 
@@ -223,8 +225,8 @@ Expected: PASS with old deterministic unit tests preserved as fallback tests.
 - Modify: `web-ui/src/job-canvas-parser.test.js`
 
 **Interfaces:**
-- Consumes: context `assessment.status`, `assessment.dimensions`, `assessment.items`, `assessment.job_sections`, and `assessment.source_lines`.
-- Produces: `buildAssessmentCards(assessment)`, `itemsForDimension(assessment, dimensionId)`, and `shouldPollAssessment(assessment)`.
+- Consumes: context `assessment.status`, `assessment.dimensions`, `assessment.items`, and validated `assessment.job_sections[].items`.
+- Produces: `buildAssessmentCards(assessment)`, `itemsForDimension(assessment, dimensionId)`, and `isAssessmentPending(assessment)`.
 
 - [ ] **Step 1: Write failing view-model and parser tests**
 
@@ -263,7 +265,7 @@ While the selected context status is `queued` or `analyzing`, refresh that conve
 
 - [ ] **Step 6: Use validated Judge sections for the lower canvas**
 
-Pass `assessment.job_sections` into `CareerJobCanvas`. Reconstruct section items from `assessment.source_lines.jd`; if absent, keep the current deterministic parser and full-original fallback.
+Pass `assessment.job_sections` into `CareerJobCanvas`. Render the source text materialized by the server after reference validation; if absent, keep the current deterministic parser and full-original fallback.
 
 - [ ] **Step 7: Run frontend tests and production build**
 

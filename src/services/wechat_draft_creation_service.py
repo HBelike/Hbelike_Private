@@ -10,7 +10,7 @@ from src.config.config_manager import AppConfig
 from src.providers.wechat_client import WechatClient, WechatDraft, WechatMaterial, WechatUploadedImage
 from src.repositories.article_layout_repository import ArticleLayoutRecord
 from src.repositories.media_asset_repository import MediaAssetRecord
-from src.services.article_layout_service import LOCAL_WECHAT_IMAGE_SCHEME
+from src.services.article_layout_service import LOCAL_WECHAT_IMAGE_SCHEME, resolve_expected_project_image_count
 from src.services.wechat_title_service import compact_wechat_title
 
 
@@ -52,6 +52,7 @@ class WechatDraftCreationService:
             config=config,
             client=client,
             access_token=token.access_token,
+            expected_image_count=resolve_expected_project_image_count(layout.payload),
             media_assets=media_assets,
         )
         final_article_html = self._replace_article_image_urls(
@@ -99,11 +100,15 @@ class WechatDraftCreationService:
         config: AppConfig,
         client: WechatClient,
         access_token: str,
+        expected_image_count: int,
         media_assets: list[MediaAssetRecord],
     ) -> list[dict[str, Any]]:
         """上传正文图片，并记录原始 URL 到微信 URL 的映射。"""
         uploaded_images: list[dict[str, Any]] = []
-        image_assets = self._select_article_image_assets(media_assets)
+        image_assets = self._select_article_image_assets(
+            media_assets=media_assets,
+            expected_image_count=expected_image_count,
+        )
 
         for asset in image_assets:
             upload_result = client.upload_article_image(
@@ -130,6 +135,9 @@ class WechatDraftCreationService:
         media_assets: list[MediaAssetRecord],
     ) -> WechatMaterial | None:
         """如存在本地视频文件，则上传为微信永久视频素材。"""
+        if not config.video_submit_enabled:
+            return None
+
         video_assets = sorted(
             [asset for asset in media_assets if asset.asset_type == "video" and asset.status != "replaced"],
             key=lambda item: item.id,
@@ -232,15 +240,21 @@ class WechatDraftCreationService:
                 return asset
         raise ValueError(f"封面图素材不存在：asset_id={layout.cover_asset_id}")
 
-    def _select_article_image_assets(self, media_assets: list[MediaAssetRecord]) -> list[MediaAssetRecord]:
-        """选择当前有效的五张正文项目图。"""
+    def _select_article_image_assets(
+        self,
+        media_assets: list[MediaAssetRecord],
+        expected_image_count: int,
+    ) -> list[MediaAssetRecord]:
+        """按本次排版项目数选择有效正文图片。"""
 
         image_assets = [
             asset
             for asset in media_assets
             if asset.asset_type == "image" and asset.status != "replaced"
         ]
-        return sorted(image_assets, key=lambda item: (self._image_provider_priority(item.provider), item.id))[:5]
+        return sorted(image_assets, key=lambda item: (self._image_provider_priority(item.provider), item.id))[
+            :expected_image_count
+        ]
 
     def _image_provider_priority(self, provider: str) -> int:
         """微信上传时使用与排版一致的图片优先级。"""

@@ -103,6 +103,11 @@ class DeepSeekProvider:
             "temperature": self.config.llm_temperature,
             "max_tokens": requested_max_tokens,
         }
+        # DeepSeek V4 默认开启 thinking，推理内容与最终正文共享输出预算。
+        # 周榜及媒体链路需要的是严格 JSON；显式关闭 thinking，避免内部推理
+        # 先耗尽 max_tokens，导致 article_markdown 在字符串中途被截断。
+        if self.config.llm_model.lower().startswith("deepseek-v4"):
+            payload["thinking"] = {"type": "disabled"}
         if self.config.llm_response_format_json:
             payload["response_format"] = {"type": "json_object"}
 
@@ -171,6 +176,12 @@ class DeepSeekProvider:
         message = first_choice.get("message", {})
         if not isinstance(message, dict):
             raise DeepSeekApiError(status_code, "DeepSeek message 不是对象")
+
+        if first_choice.get("finish_reason") == "length":
+            raise DeepSeekApiError(
+                status_code,
+                "DeepSeek 输出达到 max_tokens，返回内容被截断",
+            )
 
         content = str(message.get("content", "")).strip()
         if not content:

@@ -126,7 +126,8 @@ def main() -> None:
     )
     assert normal_messages[-1].role == "user"
     assert "你好，我想了解产品经理的职业发展。" in str(normal_messages[-1].content)
-    assert "不要机械要求用户先上传简历" in str(normal_messages[0].content)
+    assert "没有资料时也要正常回答通用求职问题" in str(normal_messages[0].content)
+    assert "请用户先建立上下文" not in str(normal_messages[0].content)
     assert any(message.content == "上一轮已讨论简历中的项目经历。" for message in normal_messages)
 
     pdf_messages = runner._build_prompt(
@@ -160,7 +161,7 @@ def main() -> None:
             redacted_resume_outline="【项目经历】\n智能客服系统：负责 RAG 检索链路。",
         ),
     )
-    assert "本轮简历结构化归纳" in str(normalized_resume_messages[-1].content)
+    assert "已确认的基准简历上下文" in str(normalized_resume_messages[-1].content)
     assert "RAG 检索链路" in str(normalized_resume_messages[-1].content)
 
     degraded_document_messages = runner._build_prompt(

@@ -20,6 +20,15 @@ class AudioTask(BaseTask):
     def execute(self, context: TaskContext) -> dict[str, Any]:
         """读取最新内容，生成或复用旁白音频，并写入 media_assets。"""
 
+        if not context.config.audio_enabled:
+            self.logger.info("audio.enabled=false，AudioTask 跳过全部音频生成")
+            return {
+                "skipped": True,
+                "skip_reason": "audio.enabled=false",
+                "disabled_by_config": True,
+                "network_called": False,
+            }
+
         content_repository = GeneratedContentRepository(database_manager=context.database_manager)
         media_asset_repository = MediaAssetRepository(database_manager=context.database_manager)
 

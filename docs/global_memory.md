@@ -9,8 +9,8 @@
 5. **生产配置**：服务器 `.env.production` 权限为 `600`，已切换 `APP_DOMAIN=xingxingtech.cn`，含数据库随机口令和独立 Fernet 主密钥；周榜所需 GitHub、DeepSeek、火山方舟和微信公众号凭据已写入生产环境且未回显，邮件与可选 Provider 仍按需配置。凡曾在聊天或旧文件中出现过的凭据均应在首次验收后轮换。
 6. **鉴权与管理员**：生产开启 API 登录强制、CLI 首管理员模式和公开邮箱注册；线上已存在首管理员，不应重复执行 bootstrap。登录页支持邮箱验证码、邮箱密码、注册和找回密码，注册用户默认获得基础访问权限。
 7. **模型凭据**：页面保存的 API Key 用 `CAREER_CREDENTIAL_MASTER_KEY` Fernet 加密后存 PostgreSQL；禁止记录或回显 Key，旧明文必须显式迁移。
-8. **技能库**：`find-skills`、`ai-image-generation`、`og-image-design`、`grill-me` 已作为 `deploy/skill-seeds` 种子；持久卷中的已编辑 Skill 不会被重新部署覆盖。
-9. **调度边界**：周五 08:00 生产、09:00 建微信草稿；Scheduler 与人工流水线共享文件锁，生产只能单实例运行。仓库 YAML 保持视频付费默认关闭，生产通过 `.env.production` 的 `VIDEO_SUBMIT_ENABLED=true` 独立开启真实 Seedance 付费任务；审核通过前不进入 `ArticleLayoutTask` / `DeliverTask`。
+8. **技能与代码流程**：`find-skills`、`ai-image-generation`、`og-image-design`、`grill-me` 已作为 `deploy/skill-seeds` 种子；持久卷中的已编辑 Skill 不会被重新部署覆盖。代码任务按实际复杂度使用项目 Skill 与自动化验证；在用户已明确授权的任务范围内自行完成检查、修复和投产，不设置额外人工质检确认点。
+9. **调度边界**：周五 08:00 生产、09:00 建微信草稿；Scheduler 与人工流水线共享文件锁，生产只能单实例运行。当前本地与生产均保持 `VIDEO_SUBMIT_ENABLED=false`、`AUDIO_ENABLED=false`，仅运行文章、图片、排版和图文草稿链路。
 10. **上线修复**：`eba2f08` 为生产 Nginx 增加静态 `root /usr/share/nginx/html` 与 `index index.html`；服务器已通过标准 Git 拉取、重建 Web/Caddy，`career-web` 健康检查恢复正常。
 11. **已验证**：前端构建、Python 编译/pip check、凭据加密/模型网关/API/登录访问控制/管理员 bootstrap/调度锁/Skill 便携性测试、Compose 静态校验均已通过；公网 `https://xingxingtech.cn/api/health` 返回 200，Caddy 已取得 Let’s Encrypt 证书。真实周榜测试已成功完成 Search、Summary、短视频蓝图、Seedream 五图、Edge TTS、存储和预览；GitHub API 与微信公众号 access token 均已连通。
-12. **当前修复/下一步**：登录页已形成邮箱验证码、邮箱密码、显式注册和找回密码入口；生产必须保持 `PLATFORM_PUBLIC_REGISTRATION_ENABLED=true`。求职助手模型选择器只展示真实可用模型；前端仅维护电脑端与手机端。后续改动继续遵循“本地验证通过、用户明确授权后再发布生产”。
+12. **当前修复/下一步**：登录页已形成邮箱验证码、邮箱密码、显式注册和找回密码入口；生产必须保持 `PLATFORM_PUBLIC_REGISTRATION_ENABLED=true`。求职助手模型选择器只展示真实可用模型；前端仅维护电脑端与手机端。发布遵循自动化门禁通过后直接投产并执行线上冒烟验证。

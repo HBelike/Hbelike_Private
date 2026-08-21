@@ -9,6 +9,7 @@ from urllib.parse import urljoin
 from src.config.config_manager import AppConfig
 from src.repositories.article_layout_repository import ArticleLayoutRecord
 from src.repositories.media_asset_repository import MediaAssetRecord
+from src.services.article_layout_service import resolve_expected_project_image_count
 
 
 @dataclass(frozen=True)
@@ -57,6 +58,7 @@ class WechatDraftPreflightService:
         public_video_count = sum(1 for asset in video_assets if self._asset_has_public_url(asset))
         local_uploadable_image_count = sum(1 for asset in image_assets if self._asset_has_uploadable_local_file(config, asset))
         local_uploadable_video_count = sum(1 for asset in video_assets if self._asset_has_uploadable_local_file(config, asset))
+        expected_image_count = resolve_expected_project_image_count(layout.payload)
 
         if bool(wechat_config.get("require_cover_asset", True)) and layout.cover_asset_id is None:
             missing_requirements.append("缺少封面图 cover_asset_id")
@@ -71,10 +73,18 @@ class WechatDraftPreflightService:
             missing_image_count = int(layout.payload.get("layout_stats", {}).get("missing_image_count", 0))
             if missing_image_count > 0:
                 missing_requirements.append(f"正文还有 {missing_image_count} 张项目图未生成或未上传")
-            if public_image_count < 5:
-                missing_requirements.append(f"公网项目图不足 5 张：当前 {public_image_count} 张")
-        if bool(wechat_config.get("require_local_uploadable_images", True)) and local_uploadable_image_count < 5:
-            missing_requirements.append(f"可上传到微信的本地项目图不足 5 张：当前 {local_uploadable_image_count} 张")
+            if public_image_count < expected_image_count:
+                missing_requirements.append(
+                    f"公网项目图不足 {expected_image_count} 张：当前 {public_image_count} 张"
+                )
+        if (
+            bool(wechat_config.get("require_local_uploadable_images", True))
+            and local_uploadable_image_count < expected_image_count
+        ):
+            missing_requirements.append(
+                f"可上传到微信的本地项目图不足 {expected_image_count} 张："
+                f"当前 {local_uploadable_image_count} 张"
+            )
 
         if bool(wechat_config.get("require_video_asset", True)) and public_video_count < 1:
             missing_requirements.append("缺少已上传并带公网 URL 的视频素材")
@@ -107,6 +117,7 @@ class WechatDraftPreflightService:
             },
             "assets": {
                 "image_count": len(image_assets),
+                "expected_image_count": expected_image_count,
                 "public_image_count": public_image_count,
                 "video_count": len(video_assets),
                 "public_video_count": public_video_count,

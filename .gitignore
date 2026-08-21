@@ -12,6 +12,7 @@ logs/
 outputs/
 .pytest_cache/
 .ruff_cache/
+.firecrawl/
 web-ui/node_modules/
 web-ui/.npm-cache/
 web-ui/dist/

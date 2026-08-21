@@ -25,6 +25,14 @@ class ModelCapability(StrEnum):
     VISION = "vision"
     STRUCTURED_OUTPUT = "structured_output"
     EMBEDDING = "embedding"
+    TOOLS = "tools"
+
+
+class SkillExecutionMode(StrEnum):
+    """Skill 在求职助手中的运行方式。"""
+
+    PROMPT = "prompt"
+    TOOL = "tool"
 
 
 class ModelSelectionMode(StrEnum):
@@ -127,6 +135,47 @@ class InterviewEvidence:
 
 
 @dataclass(frozen=True)
+class ActivatedSkill:
+    """用户在当前 Turn 显式激活的一份 Skill 指令。"""
+
+    skill_id: str
+    name: str
+    description: str
+    instructions: str
+    execution_mode: SkillExecutionMode = SkillExecutionMode.PROMPT
+    tool_names: tuple[str, ...] = ()
+    invocation_source: str = "mention"
+    arguments: str = ""
+    primary: bool = False
+
+    def validate(self) -> None:
+        """限制 Skill 注入长度，避免异常文件挤占整轮模型上下文。"""
+
+        if not self.skill_id.strip():
+            raise ValueError("Skill ID 不能为空")
+        if not self.name.strip():
+            raise ValueError("Skill 名称不能为空")
+        if not self.instructions.strip():
+            raise ValueError(f"Skill {self.name} 没有可执行指令")
+        if len(self.instructions) > 48_000:
+            raise ValueError(f"Skill {self.name} 的激活指令超过 48000 个字符")
+        if self.execution_mode is SkillExecutionMode.TOOL and not self.tool_names:
+            raise ValueError(f"Tool 型 Skill {self.name} 没有关联任何受控工具")
+
+
+@dataclass(frozen=True)
+class SkillExecutionTrace:
+    """单次真实 Skill 工具执行的安全摘要，不包含工具原始结果。"""
+
+    skill_name: str
+    tool_name: str
+    execution_mode: str
+    status: str
+    result_count: int = 0
+    message: str = ""
+
+
+@dataclass(frozen=True)
 class CareerInboundMessage:
     """从 WebUI 进入 AgentLoop 的统一输入事件。"""
 
@@ -138,6 +187,11 @@ class CareerInboundMessage:
     job_url: str | None = None
     attachments: tuple[AttachmentDescriptor, ...] = ()
     interview_evidence: tuple[InterviewEvidence, ...] = ()
+    activated_skills: tuple[ActivatedSkill, ...] = ()
+    effective_text: str | None = None
+    candidate_profile_context: str = ""
+    target_role_context: str = ""
+    context_binding_version: int | None = None
 
     def validate(self) -> None:
         """确保本轮输入至少有文本、职位链接或临时附件之一。"""
@@ -154,3 +208,13 @@ class CareerInboundMessage:
             raise ValueError("单轮最多引用 6 条面经证据")
         for evidence in self.interview_evidence:
             evidence.validate()
+        if len(self.activated_skills) > 3:
+            raise ValueError("单轮最多激活 3 个 Skill")
+        for skill in self.activated_skills:
+            skill.validate()
+        if len(self.candidate_profile_context) > 30_000:
+            raise ValueError("基准简历上下文不能超过 30000 个字符")
+        if len(self.target_role_context) > 30_000:
+            raise ValueError("目标岗位上下文不能超过 30000 个字符")
+        if self.context_binding_version is not None and self.context_binding_version <= 0:
+            raise ValueError("上下文绑定版本必须为正整数")

@@ -66,6 +66,7 @@ class ArticleLayoutTask(BaseTask):
             "status": layout.status,
             "cover_asset_id": layout.cover_asset_id,
             "html_length": len(layout.article_html),
+            "expected_image_count": build_result.expected_image_count,
             "embedded_image_count": build_result.embedded_image_count,
             "missing_image_count": build_result.missing_image_count,
             "style_version": build_result.style_version,

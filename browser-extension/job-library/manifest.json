@@ -1,0 +1,39 @@
+{
+  "manifest_version": 3,
+  "name": "Find Job 职位库助手",
+  "version": "0.1.2",
+  "description": "在用户主动搜索时，通过已登录的 BOSS 直聘页面读取真实职位列表与详情。",
+  "permissions": [
+    "tabs",
+    "scripting",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://www.zhipin.com/*",
+    "http://127.0.0.1/*",
+    "http://localhost/*",
+    "https://xingxingtech.cn/*",
+    "https://www.xingxingtech.cn/*"
+  ],
+  "background": {
+    "service_worker": "service-worker.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "http://127.0.0.1/*",
+        "http://localhost/*",
+        "https://xingxingtech.cn/*",
+        "https://www.xingxingtech.cn/*"
+      ],
+      "js": [
+        "content-script.js"
+      ],
+      "run_at": "document_start"
+    }
+  ],
+  "action": {
+    "default_title": "Find Job 职位库助手"
+  }
+}

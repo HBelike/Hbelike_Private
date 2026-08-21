@@ -141,7 +141,7 @@ items[]
 - `actor_id`
 - `candidate_profile_id`
 - `target_role_profile_id`
-- `judge_model_profile_id`
+- `judge_model_profile_id`（固定模型配置暂时不存在时允许为空，以便记录并执行基础规则降级）
 - `judge_provider_key`
 - `judge_model_id`
 - `prompt_version`

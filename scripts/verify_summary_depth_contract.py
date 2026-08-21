@@ -2,7 +2,7 @@
 
 本脚本不读取 API Key、不调用 GitHub 或 DeepSeek。它只验证：
 1. 动态 Top N 的每个项目都必须包含固定分析标签和真实 stars / 本周增长数字；
-2. 项目章节不再要求至少 500 个中文字符，技术深度改由结构与事实合同保证；
+2. 标题、摘要、全文、项目章节和标签解释均不再设置长度合同；
 3. SummaryTask 只请求文章字段，并在 system message 挂载项目写作 Skill；
 4. 短视频任务会读取每个项目的证据卡，并生成同源旁白。
 """
@@ -71,42 +71,20 @@ def build_evidence(rankings: list[WeeklyRankingRecord]) -> dict[str, GitHubRepos
 
 
 def build_project_section(item: WeeklyRankingRecord, index: int) -> str:
-    """构造结构与事实完整、但不足 500 个中文字符的项目正文。"""
+    """构造结构与事实完整、各标签都刻意极短的项目正文。"""
 
     labels_and_text = [
         (
             "本周判断",
-            f"{item.full_name} 当前 stars 为 {item.current_stars}，本周新增 {item.star_growth}。"
-            "这个增速说明开发者正在关注把零散能力放进可重复执行的工程环节，而不是继续堆叠聊天入口。",
+            f"{item.full_name} 当前 stars 为 {item.current_stars}，本周新增 {item.star_growth}。",
         ),
-        (
-            "问题与代价",
-            "很多团队的问题不是缺少模型，而是输入、状态、人工确认和结果回写散落在不同工具里。"
-            "如果每一步都靠人工复制，成本会在重试、审计和协作交接时迅速显现。",
-        ),
-        (
-            "机制拆解",
-            "README 把流程拆成明确的职责边界：前一层收集并规范输入，中间层依据规则组织任务，"
-            "后一层把结果和反馈重新放回可追踪的上下文。这样的分层让错误不必由整条链路一起承担。",
-        ),
-        (
-            "落到工作流",
-            "实际接入时，应先挑选一个输入稳定、结果可复核的小流程，例如资料归类、候选项筛选或任务分发。"
-            "先定义输入格式和完成标准，再把该项目放在最容易观察收益的位置，而不是替换全部系统。",
-        ),
-        (
-            "使用边界",
-            "它不适合在需求还没定义、数据来源持续变化且没有人工兜底的场景里直接自动决策。"
-            "当 README 没有展开权限、成本或失败恢复机制时，生产接入前仍应自行补足这些约束。",
-        ),
-        (
-            "工程启发",
-            "第一个可复用的价值不是功能数量，而是把一次执行留下的状态、原因和下一步动作变成团队可以检查的对象。"
-            "因此评估同类项目时，应优先看边界是否清楚、反馈是否能回流，以及最小接入点能否单独验证。",
-        ),
+        ("问题与代价", "人工复制成本高。"),
+        ("机制拆解", "流程按职责分层。"),
+        ("落到工作流", "先接入一个小流程。"),
+        ("使用边界", "生产接入仍需人工确认。"),
+        ("工程启发", "优先保留可检查状态。"),
     ]
     body = "\n\n".join(f"**{label}** {text}" for label, text in labels_and_text)
-    assert SummaryTask._count_chinese_characters(body) < 500
     return f"#### 项目 {index}：{item.full_name}\n\n{body}"
 
 
@@ -148,10 +126,34 @@ def main() -> None:
         ranking_evidence=evidence,
     )
     assert len(project_sections) == len(rankings)
-    assert all(
-        task._count_chinese_characters(section) < 500
-        for section in project_sections.values()
+
+    # 长度不再是生成失败条件：极短标签可通过，超长项目正文也可通过。
+    first_item = rankings[0]
+    long_article = article.replace(
+        project_sections[first_item.full_name],
+        project_sections[first_item.full_name] + ("补充机制说明" * 2_000),
     )
+    long_sections = task._validate_article_depth(
+        article_markdown=long_article,
+        rankings=rankings,
+        ranking_evidence=evidence,
+    )
+    assert len(long_sections) == len(rankings)
+    long_title = "标题" * 1_000
+    long_digest = "摘要" * 1_000
+    normalized_long_content = task._normalize_model_output(
+        parsed={
+            "title": long_title,
+            "digest": long_digest,
+            "article_markdown": long_article,
+        },
+        rankings=rankings,
+        highest_star_repository=max(rankings, key=lambda item: item.current_stars),
+        ranking_evidence=evidence,
+    )
+    assert normalized_long_content["title"] == long_title
+    assert normalized_long_content["digest"] == long_digest
+    assert normalized_long_content["article_markdown"] == long_article
 
     # 工作台可配置任意 Top N；用非默认数量验证标题、章节和校验器都不依赖 5。
     compact_rankings = build_rankings(count=3)
@@ -172,8 +174,7 @@ def main() -> None:
     assert not task._contains_exact_ranking_number("当前 stars 约为 14.4 万", 143902)
     assert not task._contains_exact_ranking_number("本周新增约 1.3k", 1281)
 
-    first_item = rankings[0]
-    # 章节可以短于 500 字，但不能丢失固定分析结构。
+    # 章节可以任意长短，但不能丢失固定分析结构。
     incomplete_article = article.replace(
         project_sections[first_item.full_name],
         (
@@ -203,8 +204,8 @@ def main() -> None:
     )
     assert article_skill_instructions in messages[0].content
     main_prompt = messages[-1].content
-    assert "不少于 500 个中文字符" not in main_prompt
-    assert "全文中文字符数不得超过" in main_prompt
+    for length_rule in ("字以内", "中文字符", "最低字数", "至少 45", "不得超过"):
+        assert length_rule not in main_prompt
     assert "source_evidence" in main_prompt
     assert "article_markdown 1900 字以内" not in main_prompt
     assert "JSON 只能包含 title、digest、article_markdown 三个字段" in main_prompt
@@ -221,8 +222,8 @@ def main() -> None:
     assert article_skill_instructions in retry_messages[0].content
     retry_prompt = retry_messages[-1].content
     assert "只修正合同缺陷" in retry_prompt
-    assert "不设置最低字数" in retry_prompt
-    assert "1600字以内" not in retry_prompt
+    for length_rule in ("字以内", "中文字符", "最低字数", "至少 45", "不得超过"):
+        assert length_rule not in retry_prompt
     assert "字段必须只有以下三个" in retry_prompt
     assert "voiceover_text:" not in retry_prompt
 
@@ -313,8 +314,7 @@ def main() -> None:
 
     print(
         "摘要深度合同验证通过："
-        f"projects={len(project_sections)} "
-        f"article_chinese_chars={task._count_chinese_characters(article)}"
+        f"projects={len(project_sections)} length_limits=disabled"
     )
 
 

@@ -1,5 +1,7 @@
 # GitHub 项目文章 Skill 最小集成设计
 
+> 状态说明（2026-08-21）：本文记录首次接入设计。后续已按人工审核流程的要求，取消标题、摘要、全文、项目章节和标签解释的全部输出长度限制；现行合同以 `docs/summary_writing_skill_research.md` 为准。
+
 ## 目标
 
 在不改变现有周榜文章流水线的前提下，用一个自包含的 `github-project-blog` Skill 替换 `SummaryTask` 内部写死的写作方法，改善动态 Top N 文章的技术密度、教学表达和 AI 腔问题。

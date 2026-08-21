@@ -142,3 +142,9 @@ career_assistant:
       minimax: MINIMAX_API_KEY
       volcengine: VOLCENGINE_ARK_API_KEY
       ollama: null
+
+  job_assessment:
+    # 岗位分析使用管理员固定模型，不跟随聊天框当前选择。
+    judge_profile_key: deepseek-deepseek-v4-flash
+    prompt_version: career-job-judge-v2
+    max_attempts: 3

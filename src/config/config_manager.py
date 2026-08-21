@@ -369,6 +369,15 @@ class AppConfig:
         return str(self.raw["audio"].get("provider", "doubao_tts"))
 
     @property
+    def audio_enabled(self) -> bool:
+        """是否允许生成音频；环境变量用于本地与生产统一控制。"""
+
+        environment_override = _optional_env_bool("AUDIO_ENABLED")
+        if environment_override is not None:
+            return environment_override
+        return bool(self.raw["audio"].get("enabled", False))
+
+    @property
     def audio_api_url(self) -> str:
         return str(self.raw["audio"]["api_url"])
 
@@ -973,6 +982,10 @@ class ConfigManager:
         video_submit_enabled = raw["video"].get("submit_enabled", False)
         if not isinstance(video_submit_enabled, bool):
             raise ValueError("video.submit_enabled 必须是布尔值")
+
+        audio_enabled = raw["audio"].get("enabled", False)
+        if not isinstance(audio_enabled, bool):
+            raise ValueError("audio.enabled 必须是布尔值")
 
         video_duration_seconds = int(raw["video"].get("duration_seconds", 60))
         if video_duration_seconds <= 0:

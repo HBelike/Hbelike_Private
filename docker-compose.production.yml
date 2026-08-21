@@ -113,6 +113,8 @@ services:
       CAREER_DOCLING_SERVICE_BASE_URL: ${CAREER_DOCLING_SERVICE_BASE_URL:-http://career-docling:5001}
       CAREER_GOTENBERG_ENABLED: ${CAREER_GOTENBERG_ENABLED:-true}
       CAREER_GOTENBERG_SERVICE_BASE_URL: ${CAREER_GOTENBERG_SERVICE_BASE_URL:-http://career-gotenberg:3000}
+      VIDEO_SUBMIT_ENABLED: ${VIDEO_SUBMIT_ENABLED:-false}
+      AUDIO_ENABLED: ${AUDIO_ENABLED:-false}
     expose:
       - "8012"
     tmpfs:
@@ -158,6 +160,8 @@ services:
       CAREER_DOCLING_SERVICE_BASE_URL: ${CAREER_DOCLING_SERVICE_BASE_URL:-http://career-docling:5001}
       CAREER_GOTENBERG_ENABLED: ${CAREER_GOTENBERG_ENABLED:-true}
       CAREER_GOTENBERG_SERVICE_BASE_URL: ${CAREER_GOTENBERG_SERVICE_BASE_URL:-http://career-gotenberg:3000}
+      VIDEO_SUBMIT_ENABLED: ${VIDEO_SUBMIT_ENABLED:-false}
+      AUDIO_ENABLED: ${AUDIO_ENABLED:-false}
     command: ["python", "main.py"]
     tmpfs:
       - /var/lib/career-temporary-attachments:size=128m,mode=1770,uid=100,gid=101

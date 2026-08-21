@@ -587,6 +587,55 @@ class PlatformAccessRepository:
             "created_at": row["created_at"].isoformat(),
         }
 
+    def get_route_module_settings(self, organization_id: UUID) -> dict[str, bool]:
+        """读取组织已显式保存的顶级路由模块开关。"""
+
+        with self._database.transaction() as connection:
+            rows = connection.execute(
+                text(
+                    """
+                    SELECT module_key, enabled
+                    FROM career_assistant.route_module_settings
+                    WHERE organization_id = :organization_id
+                    """
+                ),
+                {"organization_id": organization_id},
+            ).mappings().all()
+        return {str(row["module_key"]): bool(row["enabled"]) for row in rows}
+
+    def save_route_module_settings(
+        self,
+        organization_id: UUID,
+        actor_id: UUID,
+        settings: dict[str, bool],
+    ) -> dict[str, bool]:
+        """原子更新完整模块目录，未提交的半成品不会被普通用户读取。"""
+
+        with self._database.transaction() as connection:
+            for module_key, enabled in settings.items():
+                connection.execute(
+                    text(
+                        """
+                        INSERT INTO career_assistant.route_module_settings
+                            (organization_id, module_key, enabled, updated_by, updated_at)
+                        VALUES
+                            (:organization_id, :module_key, :enabled, :updated_by, NOW())
+                        ON CONFLICT (organization_id, module_key)
+                        DO UPDATE SET
+                            enabled = EXCLUDED.enabled,
+                            updated_by = EXCLUDED.updated_by,
+                            updated_at = NOW()
+                        """
+                    ),
+                    {
+                        "organization_id": organization_id,
+                        "module_key": module_key,
+                        "enabled": enabled,
+                        "updated_by": actor_id,
+                    },
+                )
+        return dict(settings)
+
     def create_pipeline_execution_request(
         self,
         *,

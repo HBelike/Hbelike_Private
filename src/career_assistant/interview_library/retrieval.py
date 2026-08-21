@@ -57,6 +57,20 @@ class InterviewRetrievalService:
     def vector_indexing_enabled(self) -> bool:
         return bool(self._embedding_client and self._embedding_client.is_configured)
 
+    @property
+    def configuration_snapshot(self) -> dict[str, object]:
+        """返回不含凭证的检索身份，供评测实验校验实际运行配置。"""
+
+        client = self._embedding_client
+        return {
+            "lexical_candidate_limit": self._settings.lexical_candidate_limit,
+            "semantic_candidate_limit": self._settings.semantic_candidate_limit,
+            "final_limit": self._settings.final_limit,
+            "reciprocal_rank_fusion_k": self._settings.reciprocal_rank_fusion_k,
+            "embedding_enabled": bool(client and client.is_configured),
+            "embedding_model_id": client.model_id if client and client.is_configured else None,
+        }
+
     def close(self) -> None:
         """由应用生命周期钩子关闭可选向量客户端。"""
 

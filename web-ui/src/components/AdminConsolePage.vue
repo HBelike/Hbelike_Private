@@ -1,5 +1,34 @@
 <script setup>
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
+
+const props = defineProps({
+  currentRoute: {
+    type: String,
+    default: '/admin/modules'
+  }
+})
+
+const emit = defineEmits(['navigation-config-updated', 'navigate'])
+
+const adminSections = [
+  {
+    path: '/admin/modules',
+    label: '可见模块',
+    description: '控制用户登录后可以看到和直接访问的顶级模块。'
+  },
+  {
+    path: '/admin/github',
+    label: 'GitHub 热门',
+    description: '管理每周热门项目的选题范围、数量与数据快照。'
+  },
+  {
+    path: '/admin/prompts',
+    label: '生成策略',
+    description: '管理文章、图片和视频任务使用的提示词。'
+  }
+]
+
+const activeSection = computed(() => adminSections.find((item) => item.path === props.currentRoute) ?? adminSections[0])
 
 const loading = ref(true)
 const saving = ref(false)
@@ -10,6 +39,12 @@ const githubSnapshot = ref(null)
 const snapshotLoading = ref(true)
 const snapshotRefreshing = ref(false)
 const snapshotError = ref('')
+const routeModules = ref([])
+const routeConfigLoading = ref(true)
+const routeConfigSaving = ref(false)
+const routeConfigError = ref('')
+const routeConfigSuccess = ref('')
+const enabledRouteModuleCount = computed(() => routeModules.value.filter((item) => item.enabled).length)
 
 const form = reactive({
   top_n: 5,
@@ -19,10 +54,69 @@ const form = reactive({
   video_prompt: ''
 })
 
-onMounted(() => {
-  void loadConfig()
-  void loadGithubSnapshot()
+const sectionStatus = computed(() => {
+  if (activeSection.value.path === '/admin/modules') {
+    return `${enabledRouteModuleCount.value}/${routeModules.value.length || 8} 已启用`
+  }
+  return version.value ? `当前版本 v${version.value}` : '尚未保存版本'
 })
+
+onMounted(loadActiveSection)
+
+watch(() => props.currentRoute, loadActiveSection)
+
+function loadActiveSection() {
+  errorMessage.value = ''
+  successMessage.value = ''
+  routeConfigError.value = ''
+  routeConfigSuccess.value = ''
+  if (activeSection.value.path === '/admin/modules') {
+    void loadRouteModules()
+    return
+  }
+  void loadConfig()
+  if (activeSection.value.path === '/admin/github') void loadGithubSnapshot()
+}
+
+async function loadRouteModules() {
+  routeConfigLoading.value = true
+  routeConfigError.value = ''
+  try {
+    const response = await fetch('/api/navigation/modules', { credentials: 'include', cache: 'no-store' })
+    if (!response.ok) throw new Error(await responseError(response, '无法读取路由模块配置'))
+    routeModules.value = (await response.json()).items ?? []
+  } catch (error) {
+    routeConfigError.value = error instanceof Error ? error.message : '无法读取路由模块配置'
+  } finally {
+    routeConfigLoading.value = false
+  }
+}
+
+async function saveRouteModules() {
+  if (routeConfigSaving.value) return
+  routeConfigSaving.value = true
+  routeConfigError.value = ''
+  routeConfigSuccess.value = ''
+  try {
+    const response = await fetch('/api/admin/navigation-modules', {
+      method: 'PUT',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        modules: Object.fromEntries(routeModules.value.map((item) => [item.key, Boolean(item.enabled)]))
+      })
+    })
+    if (!response.ok) throw new Error(await responseError(response, '保存路由模块失败'))
+    const items = (await response.json()).items ?? []
+    routeModules.value = items
+    routeConfigSuccess.value = `路由模块已更新，当前启用 ${enabledRouteModuleCount.value} 个。`
+    emit('navigation-config-updated', items)
+  } catch (error) {
+    routeConfigError.value = error instanceof Error ? error.message : '保存路由模块失败'
+  } finally {
+    routeConfigSaving.value = false
+  }
+}
 
 async function loadGithubSnapshot() {
   snapshotLoading.value = true
@@ -143,86 +237,147 @@ async function responseError(response, fallback) {
   <section class="admin-console-page">
     <header class="admin-console-heading">
       <div>
-        <p class="eyebrow">RUNTIME CONFIGURATION</p>
-        <h2>内容工作流管理台</h2>
-        <p>配置 GitHub 选题范围、热门项目数量与文案提示词。每次保存生成独立版本，运行中的任务不会读取半成品配置。</p>
+        <h2>{{ activeSection.label }}</h2>
+        <p>{{ activeSection.description }}</p>
       </div>
-      <div class="admin-config-version">{{ version ? `当前 v${version}` : '尚未保存版本' }}</div>
+      <div class="admin-config-version">{{ sectionStatus }}</div>
     </header>
 
-    <section v-if="loading" class="admin-console-state">正在读取工作流配置…</section>
-    <template v-else>
+    <nav class="admin-console-subnav" aria-label="管理台子页面">
+      <button
+        v-for="item in adminSections"
+        :key="item.path"
+        type="button"
+        :class="{ active: item.path === activeSection.path }"
+        :aria-current="item.path === activeSection.path ? 'page' : undefined"
+        @click="emit('navigate', item.path)"
+      >
+        {{ item.label }}
+      </button>
+    </nav>
+
+    <section v-if="activeSection.path === '/admin/modules'" class="admin-config-card admin-route-module-card">
+      <div class="admin-card-heading">
+        <div>
+          <h3>用户可见模块</h3>
+          <p>角色权限优先于模块开关；管理员专属模块不会向普通用户开放。</p>
+        </div>
+      </div>
+
+      <p v-if="routeConfigError" class="admin-console-alert danger">{{ routeConfigError }}</p>
+      <p v-if="routeConfigSuccess" class="admin-console-alert success">{{ routeConfigSuccess }}</p>
+      <div v-if="routeConfigLoading" class="admin-route-state">正在读取路由模块…</div>
+      <div v-else class="admin-route-list" role="list" aria-label="顶级路由模块配置">
+        <article v-for="item in routeModules" :key="item.key" class="admin-route-item" role="listitem">
+          <div class="admin-route-copy">
+            <div>
+              <strong>{{ item.label }}</strong>
+              <span v-if="item.admin_only">仅管理员</span>
+              <span v-if="item.locked" class="locked">固定开启</span>
+            </div>
+            <p>{{ item.description }}</p>
+            <code>{{ item.path }}</code>
+          </div>
+          <label class="admin-route-switch" :class="{ disabled: item.locked }">
+            <input v-model="item.enabled" type="checkbox" :disabled="item.locked" :aria-label="`${item.label}模块`" />
+            <span aria-hidden="true"></span>
+            <em>{{ item.enabled ? '已启用' : '已隐藏' }}</em>
+          </label>
+        </article>
+      </div>
+
+      <footer class="admin-route-footer">
+        <p>保存后，普通用户的导航和直接地址访问会同步更新。</p>
+        <button class="refresh-button" type="button" :disabled="routeConfigLoading || routeConfigSaving" @click="saveRouteModules">
+          {{ routeConfigSaving ? '正在保存…' : '保存模块配置' }}
+        </button>
+      </footer>
+    </section>
+
+    <section v-else-if="loading" class="admin-console-state">正在读取工作流配置…</section>
+
+    <form v-else-if="activeSection.path === '/admin/github'" class="admin-config-form" @submit.prevent="saveConfig">
       <section v-if="errorMessage" class="admin-console-alert danger">{{ errorMessage }}</section>
       <section v-if="successMessage" class="admin-console-alert success">{{ successMessage }}</section>
 
-      <form class="admin-config-form" @submit.prevent="saveConfig">
-        <section class="admin-config-card">
-          <div class="admin-card-heading">
-            <div><p class="eyebrow">DISCOVERY</p><h3>GitHub 热门项目筛选</h3></div>
+      <section class="admin-config-card">
+        <div class="admin-card-heading">
+          <div>
+            <h3>热门项目筛选</h3>
+            <p>配置选题范围后可手动刷新本周快照。</p>
           </div>
-          <div class="github-snapshot-bar">
-            <div class="github-snapshot-meta">
-              <strong>当前项目快照</strong>
-              <span v-if="snapshotLoading">正在读取…</span>
-              <template v-else-if="githubSnapshot">
-                <span>{{ githubSnapshot.week_start }} 至 {{ githubSnapshot.week_end }}</span>
-                <span>{{ githubSnapshot.project_count }} 个项目</span>
-                <span>更新于 {{ snapshotTime(githubSnapshot.updated_at) }}</span>
-              </template>
-              <span v-else>尚无快照，请先显式刷新 GitHub。</span>
-            </div>
-            <button
-              class="secondary-button"
-              type="button"
-              :disabled="snapshotRefreshing"
-              @click="refreshGithubSnapshot"
-            >
-              {{ snapshotRefreshing ? '正在刷新…' : '刷新 GitHub 热门项目' }}
-            </button>
+        </div>
+        <div class="github-snapshot-bar">
+          <div class="github-snapshot-meta">
+            <strong>当前项目快照</strong>
+            <span v-if="snapshotLoading">正在读取…</span>
+            <template v-else-if="githubSnapshot">
+              <span>{{ githubSnapshot.week_start }} 至 {{ githubSnapshot.week_end }}</span>
+              <span>{{ githubSnapshot.project_count }} 个项目</span>
+              <span>更新于 {{ snapshotTime(githubSnapshot.updated_at) }}</span>
+            </template>
+            <span v-else>尚无快照，请先刷新 GitHub 热门项目。</span>
           </div>
-          <p v-if="snapshotError" class="github-snapshot-error">{{ snapshotError }}</p>
-          <div class="admin-field-grid">
-            <label>
-              <span>本期项目数量</span>
-              <input v-model.number="form.top_n" type="number" min="1" max="12" />
-              <small>用于搜索、总结、图片和视频分镜的项目数量。</small>
-            </label>
-            <label>
-              <span>主题关键词</span>
-              <input v-model="form.github_keywords" type="text" placeholder="agent, AI, LLM, RAG" />
-              <small>用逗号分隔。为空时使用 GitHub 通用热门排行。</small>
-            </label>
-          </div>
-        </section>
-
-        <section class="admin-config-card">
-          <div class="admin-card-heading">
-            <div><p class="eyebrow">PROMPT TEMPLATES</p><h3>生成策略</h3></div>
-            <span>可留空以使用系统默认模板</span>
-          </div>
-          <div class="admin-prompt-grid">
-            <label>
-              <span>文章总结提示词</span>
-              <textarea v-model="form.summary_prompt" rows="7" placeholder="覆盖系统默认文章总结提示词"></textarea>
-            </label>
-            <label>
-              <span>生图提示词</span>
-              <textarea v-model="form.image_prompt" rows="7" placeholder="覆盖系统默认教学风插图提示词"></textarea>
-            </label>
-            <label>
-              <span>视频分镜提示词</span>
-              <textarea v-model="form.video_prompt" rows="7" placeholder="覆盖系统默认 Seedance 分镜提示词"></textarea>
-            </label>
-          </div>
-        </section>
-
-        <footer class="admin-config-footer">
-          <p>保存仅更新后续运行的配置快照；历史文章和正在执行的任务不会被改写。</p>
-          <button class="refresh-button" type="submit" :disabled="saving">
-            {{ saving ? '正在保存…' : '保存为新版本' }}
+          <button class="secondary-button" type="button" :disabled="snapshotRefreshing" @click="refreshGithubSnapshot">
+            {{ snapshotRefreshing ? '正在刷新…' : '刷新 GitHub 热门项目' }}
           </button>
-        </footer>
-      </form>
-    </template>
+        </div>
+        <p v-if="snapshotError" class="github-snapshot-error">{{ snapshotError }}</p>
+        <div class="admin-field-grid">
+          <label>
+            <span>本期项目数量</span>
+            <input v-model.number="form.top_n" type="number" min="1" max="12" />
+            <small>用于搜索、总结、图片和视频分镜的项目数量。</small>
+          </label>
+          <label>
+            <span>主题关键词</span>
+            <input v-model="form.github_keywords" type="text" placeholder="agent, AI, LLM, RAG" />
+            <small>用逗号分隔。为空时使用 GitHub 通用热门排行。</small>
+          </label>
+        </div>
+      </section>
+
+      <footer class="admin-config-footer">
+        <p>保存仅影响后续任务，当前运行和历史内容不会被改写。</p>
+        <button class="refresh-button" type="submit" :disabled="saving">
+          {{ saving ? '正在保存…' : '保存为新版本' }}
+        </button>
+      </footer>
+    </form>
+
+    <form v-else class="admin-config-form" @submit.prevent="saveConfig">
+      <section v-if="errorMessage" class="admin-console-alert danger">{{ errorMessage }}</section>
+      <section v-if="successMessage" class="admin-console-alert success">{{ successMessage }}</section>
+
+      <section class="admin-config-card">
+        <div class="admin-card-heading">
+          <div>
+            <h3>任务提示词</h3>
+            <p>留空时继续使用系统默认模板。</p>
+          </div>
+        </div>
+        <div class="admin-prompt-grid">
+          <label>
+            <span>文章总结提示词</span>
+            <textarea v-model="form.summary_prompt" rows="7" placeholder="覆盖系统默认文章总结提示词"></textarea>
+          </label>
+          <label>
+            <span>生图提示词</span>
+            <textarea v-model="form.image_prompt" rows="7" placeholder="覆盖系统默认教学风插图提示词"></textarea>
+          </label>
+          <label>
+            <span>视频分镜提示词</span>
+            <textarea v-model="form.video_prompt" rows="7" placeholder="覆盖系统默认 Seedance 分镜提示词"></textarea>
+          </label>
+        </div>
+      </section>
+
+      <footer class="admin-config-footer">
+        <p>保存仅影响后续任务，当前运行和历史内容不会被改写。</p>
+        <button class="refresh-button" type="submit" :disabled="saving">
+          {{ saving ? '正在保存…' : '保存为新版本' }}
+        </button>
+      </footer>
+    </form>
   </section>
 </template>

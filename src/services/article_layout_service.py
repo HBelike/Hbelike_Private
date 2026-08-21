@@ -11,6 +11,30 @@ from src.repositories.media_asset_repository import MediaAssetRecord
 
 
 LOCAL_WECHAT_IMAGE_SCHEME = "wechat-image-asset"
+DEFAULT_MAX_PROJECT_IMAGE_COUNT = 5
+
+
+def resolve_expected_project_image_count(layout_payload: dict[str, Any]) -> int:
+    """读取本次排版实际需要的项目图数量，并兼容旧排版记录。"""
+
+    layout_stats = layout_payload.get("layout_stats", {})
+    if not isinstance(layout_stats, dict):
+        return DEFAULT_MAX_PROJECT_IMAGE_COUNT
+
+    configured_count = layout_stats.get("expected_image_count")
+    if configured_count is not None:
+        try:
+            return max(0, int(configured_count))
+        except (TypeError, ValueError):
+            return DEFAULT_MAX_PROJECT_IMAGE_COUNT
+
+    try:
+        inferred_count = int(layout_stats.get("embedded_image_count", 0)) + int(
+            layout_stats.get("missing_image_count", 0)
+        )
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_PROJECT_IMAGE_COUNT
+    return inferred_count if inferred_count > 0 else DEFAULT_MAX_PROJECT_IMAGE_COUNT
 
 
 @dataclass(frozen=True)
@@ -19,6 +43,7 @@ class ArticleLayoutBuildResult:
 
     article_html: str
     cover_asset_id: int | None
+    expected_image_count: int
     embedded_image_count: int
     missing_image_count: int
     block_count: int
@@ -64,6 +89,7 @@ class ArticleLayoutService:
             project_visual_cards=project_visual_cards,
             inserted_repositories=inserted_repositories,
         )
+        expected_image_count = len(project_visual_cards)
         embedded_image_count = sum(1 for item in project_visual_cards.values() if item["did_embed"])
         missing_image_count = sum(1 for item in project_visual_cards.values() if not item["did_embed"])
 
@@ -79,6 +105,7 @@ class ArticleLayoutService:
         return ArticleLayoutBuildResult(
             article_html=article_html,
             cover_asset_id=cover_asset_id,
+            expected_image_count=expected_image_count,
             embedded_image_count=embedded_image_count,
             missing_image_count=missing_image_count,
             block_count=body_block_count,
@@ -103,6 +130,7 @@ class ArticleLayoutService:
             },
             "layout_stats": {
                 "block_count": result.block_count,
+                "expected_image_count": result.expected_image_count,
                 "embedded_image_count": result.embedded_image_count,
                 "missing_image_count": result.missing_image_count,
                 "media_asset_count": len(media_assets),

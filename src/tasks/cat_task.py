@@ -13,6 +13,20 @@ class CatTask(BaseTask):
     """负责观察全局任务运行状态，归纳异常和阻塞原因。"""
 
     task_name = "CatTask"
+    audio_task_names = frozenset({"AudioTask", "SegmentedAudioTask"})
+    video_task_names = frozenset(
+        {
+            "ShortVideoPromptTask",
+            "VideoClipPlanTask",
+            "VideoTask",
+            "SeedanceClipTask",
+            "SeedanceClipStatusTask",
+            "VideoVisualQualityTask",
+            "VideoNarrationTimelineTask",
+            "VideoAssemblyTask",
+            "VideoStatusTask",
+        }
+    )
 
     def execute(self, context: TaskContext) -> dict[str, Any]:
         """读取最近任务与异常事件，生成健康摘要。"""
@@ -20,8 +34,13 @@ class CatTask(BaseTask):
             run
             for run in self.task_run_repository.list_recent(limit=80)
             if run.task_name != self.task_name
+            and not self._task_channel_disabled(context.config, run.task_name)
         ]
-        recent_errors = self.error_event_repository.list_recent(limit=10)
+        recent_errors = [
+            error
+            for error in self.error_event_repository.list_recent(limit=10)
+            if not self._task_channel_disabled(context.config, error.task_name)
+        ]
         latest_by_task = self._latest_run_by_task(recent_runs)
         latest_failed_runs = [
             run
@@ -117,6 +136,16 @@ class CatTask(BaseTask):
                     }
                 )
         return blocking_items
+
+    @classmethod
+    def _task_channel_disabled(cls, config: Any, task_name: str) -> bool:
+        """主动关闭的媒体任务不参与当前健康状态计算。"""
+
+        if task_name in cls.audio_task_names and not config.audio_enabled:
+            return True
+        if task_name in cls.video_task_names and not config.video_submit_enabled:
+            return True
+        return False
 
     def _extract_missing_requirements(self, metadata: dict[str, Any]) -> list[str]:
         """从不同任务的 metadata 结构里提取缺失项。"""

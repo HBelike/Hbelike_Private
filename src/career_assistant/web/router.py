@@ -8,7 +8,7 @@ import logging
 import os
 from contextvars import ContextVar, Token
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
 from queue import Empty, Queue
@@ -19,15 +19,17 @@ from uuid import UUID, uuid4
 from fastapi import (
     APIRouter,
     BackgroundTasks,
+    Depends,
     FastAPI,
     File,
     Form,
     HTTPException,
     Request,
+    Query,
     UploadFile,
     status,
 )
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -45,6 +47,9 @@ from src.career_assistant.contracts import (
     ModelCapability,
     ModelSelectionMode,
     ModelSelectionRequest,
+)
+from src.career_assistant.context_profiles import (
+    extract_job_requirements,
 )
 from src.career_assistant.document_parsing import DoclingServiceDocumentParser
 from src.career_assistant.cloud_vision import CloudVisionRouter
@@ -73,6 +78,7 @@ from src.career_assistant.interview_library.service import (
     InterviewLibraryService,
 )
 from src.career_assistant.job_sources import JobPostingExtractor
+from src.career_assistant.job_assessment import CareerJobAssessmentService
 from src.career_assistant.legacy_office import GotenbergOfficeConverter
 from src.career_assistant.model_gateway import (
     ModelGateway,
@@ -86,11 +92,26 @@ from src.career_assistant.model_clients import (
 )
 from src.career_assistant.privacy import SensitiveDataRedactor
 from src.career_assistant.response_runner import CareerResponseRunner
+from src.career_assistant.resume_normalizer import ResumeNormalizer
+from src.career_assistant.resume_assistant import (
+    ResumeOptimizationRepository,
+    ResumeOptimizationService,
+)
+from src.career_assistant.resume_assistant.models import ResumeSuggestion
+from src.career_assistant.skill_runtime import CareerSkillRuntime
+from src.career_assistant.skill_tools import SkillToolRegistry
+from src.config.config_manager import ConfigManager
 from src.observability.langsmith_runtime import trace_operation, trace_stream
+from src.platform_access.contracts import PlatformRole, PlatformUser
+from src.platform_access.web import get_current_platform_user
+from src.services.skill_library_service import SkillLibraryService
 from src.career_assistant.persistence import (
     CareerConversationRepository,
+    CareerContextRepository,
     CareerDatabase,
+    CareerJobAssessmentRepository,
     CareerModelProfileRepository,
+    MessageRole,
     ModelCostTier,
     ModelProfileDraft,
     ModelProfileRecord,
@@ -111,6 +132,7 @@ from src.career_assistant.settings import (
     load_legacy_office_conversion_settings,
     load_model_gateway_settings,
     load_interview_retrieval_settings,
+    load_job_assessment_settings,
     load_response_generation_settings,
 )
 
@@ -136,23 +158,42 @@ _request_actor_context: ContextVar[CareerRequestActor | None] = ContextVar(
 )
 
 
+@dataclass(frozen=True)
+class CareerAssistantReadServices:
+    """首屏只读接口共享的轻量服务，不创建任何外部 HTTP Client。"""
+
+    database: CareerDatabase
+    conversation_repository: CareerConversationRepository
+    context_repository: CareerContextRepository
+    job_assessment_repository: CareerJobAssessmentRepository
+    model_profile_repository: CareerModelProfileRepository
+    model_gateway: ModelGateway
+
+
 @dataclass
 class CareerAssistantServices:
     """一个 FastAPI 进程内共享的求职助手服务容器。"""
 
     database: CareerDatabase
     conversation_repository: CareerConversationRepository
+    context_repository: CareerContextRepository
+    job_assessment_repository: CareerJobAssessmentRepository
+    job_assessment_service: CareerJobAssessmentService
     model_profile_repository: CareerModelProfileRepository
     interview_library_repository: InterviewLibraryRepository
     interview_library_service: InterviewLibraryService
     interview_retrieval_service: InterviewRetrievalService
     interview_collection_service: InterviewCollectionService
+    skill_runtime: CareerSkillRuntime
     agent_loop: CareerAgentLoop
     intake_graph: CareerIntakeGraph
     model_gateway: ModelGateway
     response_runner: CareerResponseRunner
     temporary_attachment_store: TemporaryAttachmentStore
     attachment_parser: AttachmentParser
+    redactor: SensitiveDataRedactor
+    resume_optimization_repository: ResumeOptimizationRepository
+    resume_optimization_service: ResumeOptimizationService
     model_connection_client: OpenAICompatibleChatClient
     document_understanding_client: DoclingServiceDocumentParser | None
     legacy_office_converter: GotenbergOfficeConverter | None
@@ -180,6 +221,39 @@ class CreateConversationRequest(BaseModel):
     """新建求职会话请求。"""
 
     title: str = Field(min_length=1, max_length=160)
+    candidate_profile_id: UUID | None = None
+    target_role_profile_id: UUID | None = None
+
+
+class CreateCandidateProfileRequest(BaseModel):
+    """确认一份已解析的基准简历。"""
+
+    display_name: str = Field(min_length=1, max_length=120)
+    source_filename: str = Field(min_length=1, max_length=255)
+    resume_outline: str = Field(min_length=1, max_length=30_000)
+
+
+class CreateTargetRoleRequest(BaseModel):
+    """确认一份目标岗位信息。"""
+
+    company_name: str = Field(min_length=1, max_length=120)
+    role_name: str = Field(min_length=1, max_length=160)
+    source_kind: str = Field(default="text", min_length=1, max_length=30)
+    source_label: str = Field(default="", max_length=500)
+    job_text: str = Field(min_length=1, max_length=30_000)
+
+
+class UpdateConversationContextRequest(BaseModel):
+    """为既有会话增量添加简历或岗位，并创建新的绑定版本。"""
+
+    candidate_profile_id: UUID | None = None
+    target_role_profile_id: UUID | None = None
+
+
+class RenameConversationRequest(BaseModel):
+    """重命名求职会话请求。"""
+
+    title: str = Field(min_length=1, max_length=160)
 
 
 class SubmitIntakeRequest(BaseModel):
@@ -190,6 +264,7 @@ class SubmitIntakeRequest(BaseModel):
     selection_mode: ModelSelectionMode = ModelSelectionMode.FREE_QUOTA_FIRST
     model_profile_id: UUID | None = None
     interview_experience_ids: list[UUID] = Field(default_factory=list, max_length=5)
+    selected_skill_ids: list[str] = Field(default_factory=list, max_length=3)
 
 
 class UpsertModelProfileRequest(BaseModel):
@@ -285,15 +360,60 @@ class ImportInterviewCollectionCandidateRequest(BaseModel):
     markdown_content: str | None = Field(default=None, min_length=1, max_length=300_000)
 
 
-def install_career_assistant_api(app: FastAPI, project_root: Path) -> None:
+class ResumeSuggestionRequest(BaseModel):
+    """前端勾选后回传的一条简历修改意见。"""
+
+    id: str = Field(min_length=1, max_length=80)
+    category: str = Field(min_length=1, max_length=80)
+    title: str = Field(min_length=1, max_length=200)
+    rationale: str = Field(default="", max_length=4_000)
+    original_evidence: str = Field(default="", max_length=4_000)
+    job_evidence: str = Field(default="", max_length=4_000)
+    proposed_change: str = Field(min_length=1, max_length=8_000)
+    priority: str = Field(default="medium", max_length=20)
+
+    def to_domain(self) -> ResumeSuggestion:
+        """转换为服务层不可变契约。"""
+
+        return ResumeSuggestion(**self.model_dump())
+
+
+class GenerateOptimizedResumeRequest(BaseModel):
+    """根据用户确认的意见生成优化简历。"""
+
+    original_markdown: str = Field(min_length=1, max_length=300_000)
+    job_description_text: str = Field(min_length=1, max_length=100_000)
+    suggestions: list[ResumeSuggestionRequest] = Field(min_length=1, max_length=80)
+    extra_prompt: str = Field(default="", max_length=20_000)
+    model_profile_id: UUID
+
+
+def install_career_assistant_api(
+    app: FastAPI,
+    project_root: Path,
+    *,
+    skill_library_service: SkillLibraryService | None = None,
+) -> None:
     """将独立 Router 安装到既有 FastAPI 应用，不初始化旧模块以外的资源。
 
     PostgreSQL 连接采用懒加载：预览服务即使尚未配置 ``CAREER_DATABASE_URL`` 也能正常
     启动；只有访问求职助手接口时才会返回明确的配置错误。
     """
 
+    if skill_library_service is None:
+        skill_library_service = SkillLibraryService(
+            ConfigManager(project_root=project_root).load(),
+        )
+
     app.include_router(router)
     app.state.career_assistant_project_root = project_root
+    app.state.career_skill_runtime = CareerSkillRuntime(skill_library_service)
+    app.state.career_skill_tool_registry = SkillToolRegistry(skill_library_service)
+    # 会话列表只依赖 PostgreSQL 仓储，不应为了读取标题先初始化模型、Embedding、
+    # 文档解析和云视觉客户端。轻量仓储与完整服务共享同一个 Engine，但使用独立锁，
+    # 避免首屏并发加载模型配置时把历史列表阻塞在重服务初始化之后。
+    app.state.career_assistant_read_services = None
+    app.state.career_assistant_repository_lock = Lock()
     app.state.career_assistant_services = None
     app.state.career_assistant_services_lock = Lock()
 
@@ -305,6 +425,13 @@ def install_career_assistant_api(app: FastAPI, project_root: Path) -> None:
         if services is not None:
             services.close()
             app.state.career_assistant_services = None
+        else:
+            read_services: CareerAssistantReadServices | None = (
+                app.state.career_assistant_read_services
+            )
+            if read_services is not None:
+                read_services.database.close()
+        app.state.career_assistant_read_services = None
 
 
 def set_request_actor(actor: CareerRequestActor) -> Token[CareerRequestActor | None]:
@@ -335,17 +462,15 @@ def get_request_actor() -> CareerRequestActor:
 def get_career_services(request: Request) -> CareerAssistantServices:
     """懒加载求职助手服务；连接配置缺失时返回 503，不干扰旧接口。"""
 
-    try:
-        _load_career_environment(request.app.state.career_assistant_project_root)
-    except (CredentialCipherError, RuntimeError) as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"求职助手运行配置加载失败：{exc}",
-        ) from exc
-
     existing_services: CareerAssistantServices | None = request.app.state.career_assistant_services
     if existing_services is not None:
         return existing_services
+
+    # 先取得可复用的轻量只读边界。该步骤不创建任何 HTTP Client，因此首屏历史、
+    # 简历档案和模型可用性可先返回，再按实际操作初始化完整 Agent 服务。
+    read_services = get_career_read_services(request)
+    database = read_services.database
+    conversation_repository = read_services.conversation_repository
 
     services_lock: Lock = request.app.state.career_assistant_services_lock
     with services_lock:
@@ -353,24 +478,13 @@ def get_career_services(request: Request) -> CareerAssistantServices:
         if existing_services is not None:
             return existing_services
 
-        database_url = os.getenv("CAREER_DATABASE_URL", "").strip()
-        if not database_url:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="求职助手数据库尚未配置 CAREER_DATABASE_URL",
-            )
-
         try:
-            database = CareerDatabase(database_url)
-            conversation_repository = CareerConversationRepository(database)
-            model_profile_repository = CareerModelProfileRepository(database)
+            context_repository = read_services.context_repository
+            model_profile_repository = read_services.model_profile_repository
             interview_library_repository = InterviewLibraryRepository(database)
             agent_loop = CareerAgentLoop(conversation_repository)
             project_root: Path = request.app.state.career_assistant_project_root
             career_config_path = _resolve_career_config_path(project_root)
-            settings = load_model_gateway_settings(
-                career_config_path,
-            )
             attachment_settings = load_attachment_processing_settings(
                 career_config_path,
             )
@@ -384,6 +498,9 @@ def get_career_services(request: Request) -> CareerAssistantServices:
                 career_config_path,
             )
             response_generation_settings = load_response_generation_settings(
+                career_config_path,
+            )
+            job_assessment_settings = load_job_assessment_settings(
                 career_config_path,
             )
             interview_retrieval_settings = load_interview_retrieval_settings(
@@ -404,10 +521,19 @@ def get_career_services(request: Request) -> CareerAssistantServices:
             redactor = SensitiveDataRedactor(
                 enabled=attachment_settings.redaction_enabled,
             )
-            model_gateway = ModelGateway(model_profile_repository, settings)
+            model_gateway = read_services.model_gateway
             model_connection_client = OpenAICompatibleChatClient(
                 completion_max_tokens=response_generation_settings.max_completion_tokens,
                 request_timeout_seconds=response_generation_settings.request_timeout_seconds,
+            )
+            job_assessment_repository = read_services.job_assessment_repository
+            job_assessment_service = CareerJobAssessmentService(
+                repository=job_assessment_repository,
+                context_repository=context_repository,
+                model_repository=model_profile_repository,
+                model_gateway=model_gateway,
+                model_client=model_connection_client,
+                settings=job_assessment_settings,
             )
             interview_retrieval_service = InterviewRetrievalService(
                 interview_library_repository,
@@ -441,6 +567,16 @@ def get_career_services(request: Request) -> CareerAssistantServices:
                 legacy_office_converter=legacy_office_converter,
                 cloud_vision_parser=cloud_vision_client,
             )
+            resume_optimization_repository = ResumeOptimizationRepository(database)
+            resume_optimization_service = ResumeOptimizationService(
+                repository=resume_optimization_repository,
+                model_repository=model_profile_repository,
+                model_gateway=model_gateway,
+                chat_client=model_connection_client,
+                attachment_parser=attachment_parser,
+                legacy_office_converter=legacy_office_converter,
+                storage_root=project_root / "data" / "resume-assistant",
+            )
             interview_collection_service = InterviewCollectionService(
                 interview_library_repository,
                 interview_library_service,
@@ -452,11 +588,15 @@ def get_career_services(request: Request) -> CareerAssistantServices:
             services = CareerAssistantServices(
                 database=database,
                 conversation_repository=conversation_repository,
+                context_repository=context_repository,
+                job_assessment_repository=job_assessment_repository,
+                job_assessment_service=job_assessment_service,
                 model_profile_repository=model_profile_repository,
                 interview_library_repository=interview_library_repository,
                 interview_library_service=interview_library_service,
                 interview_retrieval_service=interview_retrieval_service,
                 interview_collection_service=interview_collection_service,
+                skill_runtime=request.app.state.career_skill_runtime,
                 agent_loop=agent_loop,
                 intake_graph=CareerIntakeGraph(
                     agent_loop,
@@ -471,6 +611,7 @@ def get_career_services(request: Request) -> CareerAssistantServices:
                     model_gateway,
                     chat_client=model_connection_client,
                     redactor=redactor,
+                    skill_tool_registry=request.app.state.career_skill_tool_registry,
                     max_persisted_response_characters=(
                         response_generation_settings.max_persisted_response_characters
                     ),
@@ -479,6 +620,9 @@ def get_career_services(request: Request) -> CareerAssistantServices:
                 ),
                 temporary_attachment_store=temporary_attachment_store,
                 attachment_parser=attachment_parser,
+                redactor=redactor,
+                resume_optimization_repository=resume_optimization_repository,
+                resume_optimization_service=resume_optimization_service,
                 model_connection_client=model_connection_client,
                 document_understanding_client=document_understanding_client,
                 legacy_office_converter=legacy_office_converter,
@@ -497,6 +641,86 @@ def get_career_services(request: Request) -> CareerAssistantServices:
 
         request.app.state.career_assistant_services = services
         return services
+
+
+def get_career_read_services(
+    request: Request,
+) -> CareerAssistantReadServices:
+    """返回首屏只读数据所需的轻量服务，不触发外部客户端初始化。"""
+
+    try:
+        _load_career_environment(request.app.state.career_assistant_project_root)
+    except (CredentialCipherError, RuntimeError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"求职助手运行配置加载失败：{exc}",
+        ) from exc
+
+    services: CareerAssistantServices | None = request.app.state.career_assistant_services
+    if services is not None:
+        existing_read_services: CareerAssistantReadServices | None = (
+            request.app.state.career_assistant_read_services
+        )
+        if existing_read_services is not None:
+            return existing_read_services
+
+    existing_read_services: CareerAssistantReadServices | None = (
+        request.app.state.career_assistant_read_services
+    )
+    if existing_read_services is not None:
+        return existing_read_services
+
+    repository_lock: Lock = request.app.state.career_assistant_repository_lock
+    with repository_lock:
+        existing_read_services = request.app.state.career_assistant_read_services
+        if existing_read_services is not None:
+            return existing_read_services
+
+        database_url = os.getenv("CAREER_DATABASE_URL", "").strip()
+        if not database_url:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="求职助手数据库尚未配置 CAREER_DATABASE_URL",
+            )
+
+        try:
+            database = CareerDatabase(database_url)
+            conversation_repository = CareerConversationRepository(database)
+            context_repository = CareerContextRepository(database)
+            job_assessment_repository = CareerJobAssessmentRepository(database)
+            model_profile_repository = CareerModelProfileRepository(database)
+            model_gateway = ModelGateway(
+                model_profile_repository,
+                load_model_gateway_settings(
+                    _resolve_career_config_path(
+                        request.app.state.career_assistant_project_root,
+                    ),
+                ),
+            )
+        except (OSError, SQLAlchemyError, ValueError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"求职助手数据库初始化失败：{exc}",
+            ) from exc
+
+        read_services = CareerAssistantReadServices(
+            database=database,
+            conversation_repository=conversation_repository,
+            context_repository=context_repository,
+            job_assessment_repository=job_assessment_repository,
+            model_profile_repository=model_profile_repository,
+            model_gateway=model_gateway,
+        )
+        request.app.state.career_assistant_read_services = read_services
+        return read_services
+
+
+def get_career_conversation_repository(
+    request: Request,
+) -> CareerConversationRepository:
+    """兼容会话仓储调用点，并保持首屏轻量初始化语义。"""
+
+    return get_career_read_services(request).conversation_repository
 
 
 def _load_career_environment(project_root: Path) -> None:
@@ -553,20 +777,200 @@ def _resolve_temporary_attachment_root(project_root: Path) -> Path:
     return candidate.resolve()
 
 
-@router.get("/conversations")
-def list_conversations(request: Request) -> dict[str, object]:
-    """读取当前用户的求职会话历史摘要。"""
+def _resolve_conversation_skill_activation(
+    services: CareerAssistantServices,
+    actor_id: UUID,
+    conversation_id: UUID,
+    selected_skill_ids: list[str],
+    user_text: str,
+):
+    """让一次显式 Skill 调用在当前会话的后续轮次持续生效。"""
+
+    messages = services.conversation_repository.list_messages(
+        actor_id,
+        conversation_id,
+        limit=200,
+    )
+    previous_user_texts = [
+        message.content_text
+        for message in messages
+        if message.role is MessageRole.USER
+    ]
+    return services.skill_runtime.resolve_for_conversation(
+        selected_skill_ids,
+        user_text,
+        previous_user_texts,
+    )
+
+
+@router.get("/candidate-profiles")
+def list_candidate_profiles(request: Request) -> dict[str, object]:
+    """列出当前用户可复用的基准简历版本，最近使用的版本排在前面。"""
+
+    actor = get_request_actor()
+    read_services = get_career_read_services(request)
+    profiles = read_services.context_repository.list_candidate_profiles(actor.actor_id)
+    return {"items": [_candidate_profile_payload(item) for item in profiles]}
+
+
+@router.post("/candidate-profiles/parse")
+async def parse_candidate_profile(
+    request: Request,
+    resume_file: UploadFile = File(...),
+) -> dict[str, object]:
+    """真实解析基准简历并返回待确认提纲；原文件在响应前清理。"""
+
+    services = get_career_services(request)
+    attachments = []
+    try:
+        attachment = await services.temporary_attachment_store.save_upload(
+            resume_file,
+            _upload_kind(resume_file, is_resume=True),
+        )
+        attachments.append(attachment)
+        parsed = await asyncio.to_thread(services.attachment_parser.parse, attachment)
+        extracted_text = parsed.extracted_text.strip()
+        if not extracted_text:
+            raise ValueError("简历没有解析出可确认文本，请上传可复制文本的文件或清晰图片")
+        profile = ResumeNormalizer().normalize(extracted_text)
+        outline = profile.to_model_outline()
+        if not outline.strip():
+            outline = extracted_text[:30_000]
+        outline = services.redactor.redact(outline)[:30_000]
+        return {
+            "source_filename": attachment.original_filename,
+            "resume_outline": outline,
+            "source_character_count": profile.source_character_count,
+            "sections": [
+                {
+                    "key": section.section.value,
+                    "content": services.redactor.redact(section.content)[:4_000],
+                    "confidence": section.recognition_confidence,
+                }
+                for section in profile.sections
+            ],
+            "notices": [
+                item for item in (parsed.document_understanding_error,) if item
+            ],
+        }
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    finally:
+        services.temporary_attachment_store.cleanup(tuple(attachments))
+
+
+@router.post("/candidate-profiles", status_code=status.HTTP_201_CREATED)
+def create_candidate_profile(
+    request_body: CreateCandidateProfileRequest,
+    request: Request,
+) -> dict[str, object]:
+    """保存用户已确认的基准简历版本。"""
 
     actor = get_request_actor()
     services = get_career_services(request)
-    conversations = services.conversation_repository.list_conversations(actor.actor_id)
-    return {"items": [_conversation_payload(item) for item in conversations]}
+    try:
+        profile = services.context_repository.create_candidate_profile(
+            actor.organization_id,
+            actor.actor_id,
+            display_name=request_body.display_name,
+            source_filename=Path(request_body.source_filename).name,
+            resume_outline=services.redactor.redact(request_body.resume_outline),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return _candidate_profile_payload(profile)
+
+
+@router.post("/target-role-profiles", status_code=status.HTTP_201_CREATED)
+def create_target_role_profile(
+    request_body: CreateTargetRoleRequest,
+    request: Request,
+) -> dict[str, object]:
+    """保存用户确认后的目标岗位，并确定性拆解可复核要求项。"""
+
+    actor = get_request_actor()
+    services = get_career_services(request)
+    job_text = request_body.job_text.strip()
+    requirements = extract_job_requirements(job_text)
+    try:
+        role = services.context_repository.create_target_role(
+            actor.organization_id,
+            actor.actor_id,
+            company_name=request_body.company_name,
+            role_name=request_body.role_name,
+            source_kind=request_body.source_kind,
+            source_label=request_body.source_label,
+            job_text=job_text,
+            requirements=requirements,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return _target_role_payload(role)
+
+
+@router.post("/target-role-profiles/parse-file")
+async def parse_target_role_file(
+    request: Request,
+    job_file: UploadFile = File(...),
+) -> dict[str, object]:
+    """解析岗位文件为可编辑正文；原文件在响应前清理。"""
+
+    services = get_career_services(request)
+    attachments = []
+    try:
+        attachment = await services.temporary_attachment_store.save_upload(
+            job_file,
+            _upload_kind(job_file, is_resume=False),
+        )
+        attachments.append(attachment)
+        parsed = await asyncio.to_thread(services.attachment_parser.parse, attachment)
+        job_text = parsed.extracted_text.strip()
+        if not job_text:
+            raise ValueError("岗位文件没有解析出可编辑文本，请改为粘贴职位要求")
+        return {
+            "source_filename": attachment.original_filename,
+            "job_text": job_text[:30_000],
+            "requirements": list(extract_job_requirements(job_text)),
+            "notices": [
+                item for item in (parsed.document_understanding_error,) if item
+            ],
+        }
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    finally:
+        services.temporary_attachment_store.cleanup(tuple(attachments))
+
+
+@router.get("/conversations")
+def list_conversations(
+    request: Request,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=15, ge=1, le=100),
+) -> dict[str, object]:
+    """读取当前用户的求职会话历史摘要。"""
+
+    actor = get_request_actor()
+    repository = get_career_conversation_repository(request)
+    conversations, total = repository.list_conversation_page(
+        actor.actor_id,
+        page=page,
+        page_size=page_size,
+    )
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    return {
+        "items": [_conversation_payload(item) for item in conversations],
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "total_pages": total_pages,
+    }
 
 
 @router.post("/conversations", status_code=status.HTTP_201_CREATED)
 def create_conversation(
     request_body: CreateConversationRequest,
     request: Request,
+    background_tasks: BackgroundTasks,
 ) -> dict[str, object]:
     """创建新会话；由 AgentLoop 而不是 Web 层直接调用仓储。"""
 
@@ -577,11 +981,40 @@ def create_conversation(
         actor.actor_id,
         request_body.title,
     )
-    return _conversation_payload(conversation)
+    context = None
+    if request_body.candidate_profile_id or request_body.target_role_profile_id:
+        try:
+            context = services.context_repository.bind_conversation(
+                actor.actor_id,
+                conversation.id,
+                request_body.candidate_profile_id,
+                request_body.target_role_profile_id,
+            )
+            _enqueue_job_assessment(services, background_tasks, context)
+        except (LookupError, ValueError) as exc:
+            services.conversation_repository.delete_conversation_permanently(
+                actor.actor_id,
+                conversation.id,
+            )
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    payload = _conversation_payload(conversation)
+    payload["context"] = (
+        _conversation_context_payload(
+            context,
+            _current_job_assessment(services, context),
+        )
+        if context
+        else None
+    )
+    return payload
 
 
 @router.get("/conversations/{conversation_id}")
-def get_conversation(conversation_id: UUID, request: Request) -> dict[str, object]:
+def get_conversation(
+    conversation_id: UUID,
+    request: Request,
+    background_tasks: BackgroundTasks,
+) -> dict[str, object]:
     """读取会话及其已脱敏消息历史。"""
 
     actor = get_request_actor()
@@ -599,12 +1032,122 @@ def get_conversation(conversation_id: UUID, request: Request) -> dict[str, objec
         actor.actor_id,
         conversation_id,
     )
+    context = services.context_repository.get_conversation_context(
+        actor.actor_id,
+        conversation_id,
+    )
+    if context is not None:
+        _enqueue_job_assessment(services, background_tasks, context)
     return {
         "conversation": _conversation_payload(conversation),
         "messages": [_message_payload(item) for item in messages],
         "last_model_selection": _model_selection_payload(last_model_selection),
         "latest_turn": _turn_payload(latest_turn) if latest_turn is not None else None,
+        "context": (
+            _conversation_context_payload(
+                context,
+                _current_job_assessment(services, context),
+            )
+            if context
+            else None
+        ),
     }
+
+
+@router.post("/conversations/{conversation_id}/context")
+def update_conversation_context(
+    conversation_id: UUID,
+    request_body: UpdateConversationContextRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
+) -> dict[str, object]:
+    """显式创建会话上下文新版本；历史消息不会被重写。"""
+
+    actor = get_request_actor()
+    services = get_career_services(request)
+    if not request_body.candidate_profile_id and not request_body.target_role_profile_id:
+        raise HTTPException(status_code=422, detail="至少需要添加基准简历或目标岗位中的一项")
+    try:
+        context = services.context_repository.bind_conversation(
+            actor.actor_id,
+            conversation_id,
+            request_body.candidate_profile_id,
+            request_body.target_role_profile_id,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    _enqueue_job_assessment(services, background_tasks, context)
+    return _conversation_context_payload(
+        context,
+        _current_job_assessment(services, context),
+    )
+
+
+@router.post("/conversations/{conversation_id}/assessment/retry")
+def retry_conversation_assessment(
+    conversation_id: UUID,
+    request: Request,
+    background_tasks: BackgroundTasks,
+) -> dict[str, object]:
+    """重新排队当前简历与岗位版本的分析，不并发重复调用 Judge。"""
+
+    actor = get_request_actor()
+    services = get_career_services(request)
+    context = services.context_repository.get_conversation_context(
+        actor.actor_id,
+        conversation_id,
+    )
+    if context is None:
+        raise HTTPException(status_code=404, detail="会话不存在或无访问权限")
+    if context.candidate is None or context.target_role is None:
+        raise HTTPException(status_code=422, detail="需要同时添加简历和目标岗位后才能分析")
+    record = services.job_assessment_service.retry_context(context)
+    if record.status.value == "queued":
+        background_tasks.add_task(
+            services.job_assessment_service.run_assessment,
+            record.id,
+        )
+    return _conversation_context_payload(context, record)
+
+
+@router.patch("/conversations/{conversation_id}")
+def rename_conversation(
+    conversation_id: UUID,
+    request_body: RenameConversationRequest,
+    request: Request,
+) -> dict[str, object]:
+    """重命名当前用户拥有的会话。"""
+
+    actor = get_request_actor()
+    services = get_career_services(request)
+    try:
+        conversation = services.conversation_repository.rename_conversation(
+            actor.actor_id,
+            conversation_id,
+            request_body.title,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="会话不存在、无访问权限或已删除")
+    return _conversation_payload(conversation)
+
+
+@router.delete("/conversations/{conversation_id}")
+def delete_conversation(conversation_id: UUID, request: Request) -> dict[str, bool]:
+    """永久删除当前用户会话及其服务端关联历史。"""
+
+    actor = get_request_actor()
+    services = get_career_services(request)
+    deleted = services.conversation_repository.delete_conversation_permanently(
+        actor.actor_id,
+        conversation_id,
+    )
+    if not deleted:
+        raise HTTPException(status_code=404, detail="会话不存在或无访问权限")
+    return {"deleted": True}
 
 
 @router.post("/conversations/{conversation_id}/archive")
@@ -640,15 +1183,25 @@ def submit_intake(
             actor,
             request_body.interview_experience_ids,
             request_body.text,
+            conversation_id=conversation_id,
+        )
+        skill_activation = _resolve_conversation_skill_activation(
+            services,
+            actor.actor_id,
+            conversation_id,
+            request_body.selected_skill_ids,
+            request_body.text,
         )
         inbound_message = CareerInboundMessage(
             turn_id=uuid4(),
             conversation_id=conversation_id,
             actor_id=actor.actor_id,
             text=request_body.text,
+            effective_text=skill_activation.user_task_text,
             job_url=request_body.job_url,
             model_selection=selection,
             interview_evidence=interview_evidence,
+            activated_skills=skill_activation.skills,
         )
         result, response_result = _run_career_turn(
             services,
@@ -663,6 +1216,8 @@ def submit_intake(
         "assistant_message": _message_payload(response_result.assistant_message),
         "completed_steps": [step.value for step in result.completed_steps],
         "job_source": _job_source_payload(result),
+        "activated_skills": _activated_skill_payloads(inbound_message.activated_skills),
+        "skill_executions": _skill_execution_payloads(response_result.skill_executions),
     }
 
 
@@ -682,18 +1237,28 @@ def stream_intake(
             actor,
             request_body.interview_experience_ids,
             request_body.text,
+            conversation_id=conversation_id,
+        )
+        skill_activation = _resolve_conversation_skill_activation(
+            services,
+            actor.actor_id,
+            conversation_id,
+            request_body.selected_skill_ids,
+            request_body.text,
         )
         inbound_message = CareerInboundMessage(
             turn_id=uuid4(),
             conversation_id=conversation_id,
             actor_id=actor.actor_id,
             text=request_body.text,
+            effective_text=skill_activation.user_task_text,
             job_url=request_body.job_url,
             model_selection=ModelSelectionRequest(
                 mode=request_body.selection_mode,
                 profile_id=request_body.model_profile_id,
             ),
             interview_evidence=interview_evidence,
+            activated_skills=skill_activation.skills,
         )
     except (LookupError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -717,6 +1282,7 @@ async def submit_intake_with_materials(
     ),
     model_profile_id: UUID | None = Form(default=None),
     interview_experience_ids: list[UUID] = Form(default_factory=list),
+    selected_skill_ids: list[str] = Form(default_factory=list),
     resume_file: UploadFile | None = File(default=None),
     job_description_file: UploadFile | None = File(default=None),
 ) -> dict[str, object]:
@@ -737,6 +1303,14 @@ async def submit_intake_with_materials(
             services,
             actor,
             interview_experience_ids,
+            text,
+            conversation_id=conversation_id,
+        )
+        skill_activation = _resolve_conversation_skill_activation(
+            services,
+            actor.actor_id,
+            conversation_id,
+            selected_skill_ids,
             text,
         )
         if resume_file is not None:
@@ -759,6 +1333,7 @@ async def submit_intake_with_materials(
             conversation_id=conversation_id,
             actor_id=actor.actor_id,
             text=text,
+            effective_text=skill_activation.user_task_text,
             job_url=job_url,
             model_selection=ModelSelectionRequest(
                 mode=selection_mode,
@@ -766,6 +1341,7 @@ async def submit_intake_with_materials(
             ),
             attachments=tuple(attachments),
             interview_evidence=interview_evidence,
+            activated_skills=skill_activation.skills,
         )
         result, response_result = _run_career_turn(
             services,
@@ -788,6 +1364,8 @@ async def submit_intake_with_materials(
         "assistant_message": _message_payload(response_result.assistant_message),
         "completed_steps": [step.value for step in result.completed_steps],
         "job_source": _job_source_payload(result),
+        "activated_skills": _activated_skill_payloads(inbound_message.activated_skills),
+        "skill_executions": _skill_execution_payloads(response_result.skill_executions),
         "attachment_processing": {
             "temporary_only": True,
             "count": len(attachments),
@@ -819,6 +1397,7 @@ async def stream_intake_with_materials(
     ),
     model_profile_id: UUID | None = Form(default=None),
     interview_experience_ids: list[UUID] = Form(default_factory=list),
+    selected_skill_ids: list[str] = Form(default_factory=list),
     resume_file: UploadFile | None = File(default=None),
     job_description_file: UploadFile | None = File(default=None),
 ) -> StreamingResponse:
@@ -839,6 +1418,14 @@ async def stream_intake_with_materials(
             services,
             actor,
             interview_experience_ids,
+            text,
+            conversation_id=conversation_id,
+        )
+        skill_activation = _resolve_conversation_skill_activation(
+            services,
+            actor.actor_id,
+            conversation_id,
+            selected_skill_ids,
             text,
         )
         if resume_file is not None:
@@ -867,6 +1454,7 @@ async def stream_intake_with_materials(
         conversation_id=conversation_id,
         actor_id=actor.actor_id,
         text=text,
+        effective_text=skill_activation.user_task_text,
         job_url=job_url,
         model_selection=ModelSelectionRequest(
             mode=selection_mode,
@@ -874,6 +1462,7 @@ async def stream_intake_with_materials(
         ),
         attachments=tuple(attachments),
         interview_evidence=interview_evidence,
+        activated_skills=skill_activation.skills,
     )
     return _create_career_streaming_response(
         services,
@@ -1465,6 +2054,32 @@ def search_interview_library_mentions(
     }
 
 
+@router.get("/skills/mentions")
+def search_skill_mentions(
+    request: Request,
+    query: str = Query(default="", max_length=80),
+) -> dict[str, object]:
+    """返回输入框可调用的 Skill 元数据，不提前读取 SKILL.md 正文。"""
+
+    runtime: CareerSkillRuntime = request.app.state.career_skill_runtime
+    items = runtime.list_mentions(query, limit=8)
+    return {
+        "items": [
+            {
+                "id": item.id,
+                "name": item.name,
+                "description": item.description,
+                "description_zh": item.description_zh,
+                "source_label": item.source_label,
+                "command": f"/{item.name}",
+                "mention": f"@{item.name}",
+            }
+            for item in items
+        ],
+        "total": len(items),
+    }
+
+
 @router.get("/interview-library/search")
 def retrieve_interview_library_chunks(
     request: Request,
@@ -1506,8 +2121,8 @@ def list_model_profiles(request: Request) -> dict[str, object]:
     """列出模型设置页档案及其无密钥可用性状态。"""
 
     actor = get_request_actor()
-    services = get_career_services(request)
-    availability = services.model_gateway.list_availability(actor.organization_id)
+    read_services = get_career_read_services(request)
+    availability = read_services.model_gateway.list_availability(actor.organization_id)
     return {"items": [_availability_payload(item) for item in availability]}
 
 
@@ -1520,8 +2135,8 @@ def list_free_model_catalog(request: Request) -> dict[str, object]:
     """
 
     actor = get_request_actor()
-    services = get_career_services(request)
-    availability = services.model_gateway.list_availability(actor.organization_id)
+    read_services = get_career_read_services(request)
+    availability = read_services.model_gateway.list_availability(actor.organization_id)
     return {"items": build_free_model_catalog_payload(availability)}
 
 
@@ -1680,6 +2295,7 @@ def _stream_career_response(
 ) -> Iterator[str]:
     """为真实处理流补充 SSE 心跳，Turn 完成后才归还并发名额。"""
 
+    inbound_message = _attach_conversation_context(services, inbound_message)
     yield from _stream_events_with_heartbeats(
         _stream_career_response_events(
             services,
@@ -1699,6 +2315,8 @@ def _run_career_turn(
     attachment_count: int = 0,
 ):
     """执行一次非流式求职对话，并建立与流式接口一致的根 Trace。"""
+
+    inbound_message = _attach_conversation_context(services, inbound_message)
 
     def execute_turn():
         intake_result = services.intake_graph.run(inbound_message)
@@ -1726,6 +2344,37 @@ def _run_career_turn(
         tags=("career", "agent", "turn"),
         execute=execute_turn,
         summarize=lambda _: {"status": "completed"},
+    )
+
+
+def _attach_conversation_context(
+    services: CareerAssistantServices,
+    inbound_message: CareerInboundMessage,
+) -> CareerInboundMessage:
+    """在服务端按会话归属读取已确认上下文，浏览器不能直接伪造 Prompt 数据。"""
+
+    context = services.context_repository.get_conversation_context(
+        inbound_message.actor_id,
+        inbound_message.conversation_id,
+    )
+    if context is None:
+        return inbound_message
+    target = context.target_role
+    target_context = ""
+    if target is not None:
+        target_context = (
+            f"公司：{target.company_name}\n"
+            f"岗位：{target.role_name}\n"
+            f"岗位版本：v{target.version}\n\n"
+            f"{target.job_text}"
+        )
+    return replace(
+        inbound_message,
+        candidate_profile_context=(
+            context.candidate.resume_outline if context.candidate is not None else ""
+        ),
+        target_role_context=target_context,
+        context_binding_version=context.binding_version,
     )
 
 
@@ -1840,7 +2489,11 @@ def _stream_career_response_events_untraced(
                 yield _sse_event(
                     "progress",
                     {
-                        "key": "model_retry",
+                        "key": (
+                            "skill_execution"
+                            if "Skill" in event.content
+                            else "model_retry"
+                        ),
                         "label": event.content,
                         "state": "running",
                     },
@@ -2037,6 +2690,10 @@ def _stream_result_payload(
         "assistant_message": _message_payload(response_result.assistant_message),
         "completed_steps": [step.value for step in intake_result.completed_steps],
         "job_source": _job_source_payload(intake_result),
+        "activated_skills": _activated_skill_payloads(
+            intake_result.model_context.activated_skills,
+        ),
+        "skill_executions": _skill_execution_payloads(response_result.skill_executions),
     }
     if attachment_count:
         payload["attachment_processing"] = {
@@ -2059,6 +2716,40 @@ def _stream_result_payload(
             "cleaned_after_turn": True,
         }
     return payload
+
+
+def _activated_skill_payloads(activated_skills) -> list[dict[str, object]]:
+    """只返回调用结果元数据，绝不把 SKILL.md 正文暴露给浏览器。"""
+
+    return [
+        {
+            "id": skill.skill_id,
+            "name": skill.name,
+            "description": skill.description,
+            "status": "mounted",
+            "execution_mode": skill.execution_mode.value,
+            "tool_names": list(skill.tool_names),
+            "invocation_source": skill.invocation_source,
+            "primary": skill.primary,
+        }
+        for skill in activated_skills
+    ]
+
+
+def _skill_execution_payloads(executions) -> list[dict[str, object]]:
+    """返回真实工具执行摘要，不向浏览器暴露工具原始 JSON。"""
+
+    return [
+        {
+            "skill_name": execution.skill_name,
+            "tool_name": execution.tool_name,
+            "execution_mode": execution.execution_mode,
+            "status": execution.status,
+            "result_count": execution.result_count,
+            "message": execution.message,
+        }
+        for execution in executions
+    ]
 
 
 def _job_source_payload(intake_result) -> dict[str, str | None]:
@@ -2277,16 +2968,16 @@ def _build_interview_evidence(
     actor: CareerRequestActor,
     experience_ids: list[UUID] | tuple[UUID, ...],
     query: str,
+    *,
+    conversation_id: UUID | None = None,
 ) -> tuple[InterviewEvidence, ...]:
-    """将前端 ``@面经`` 选择转换为服务端可校验、可追溯的最小 RAG 证据。
+    """将显式选择或岗位驱动的自动检索转换为可追溯的最小 RAG 证据。
 
-    前端只能提交面经 ID；服务端在组织边界内重新校验资料存在性后，按当前问题检索
-    少量切片。这样既避免浏览器伪造或传入整篇 Markdown，也控制单轮 Prompt 的长度。
+    前端只能提交面经 ID；服务端重新校验资料存在性。未显式选择时，只对面试准备意图
+    使用当前会话的公司、岗位与问题自动检索，避免普通闲聊被无关面经污染。
     """
 
     normalized_ids = tuple(dict.fromkeys(experience_ids))
-    if not normalized_ids:
-        return ()
     if len(normalized_ids) > 5:
         raise ValueError("单轮最多引用 5 份面经资料")
 
@@ -2298,11 +2989,31 @@ def _build_interview_evidence(
         if experience is None:
             raise LookupError("引用的面经不存在或无访问权限")
 
-    query_for_retrieval = query.strip()[:240] or "面经核心信息"
+    context = (
+        services.context_repository.get_conversation_context(actor.actor_id, conversation_id)
+        if conversation_id is not None
+        else None
+    )
+    if not normalized_ids and (
+        context is None
+        or context.target_role is None
+        or not _is_interview_preparation_query(query)
+    ):
+        return ()
+    query_parts = []
+    if context is not None and context.target_role is not None:
+        query_parts.extend(
+            (
+                context.target_role.company_name,
+                context.target_role.role_name,
+            )
+        )
+    query_parts.append(query.strip() or "面经核心信息")
+    query_for_retrieval = " ".join(part for part in query_parts if part).strip()[:360]
     retrieval_result = services.interview_retrieval_service.retrieve(
         actor.organization_id,
         query_for_retrieval,
-        limit=6,
+        limit=6 if normalized_ids else 4,
         experience_ids=normalized_ids,
     )
     evidence: list[InterviewEvidence] = []
@@ -2320,6 +3031,24 @@ def _build_interview_evidence(
     return tuple(evidence)
 
 
+def _is_interview_preparation_query(query: str) -> bool:
+    """只在面试准备意图下自动检索，避免普通职业闲聊被无关面经污染。"""
+
+    normalized = query.casefold()
+    markers = (
+        "面试",
+        "面经",
+        "追问",
+        "怎么答",
+        "如何回答",
+        "会问",
+        "考察",
+        "准备",
+        "interview",
+    )
+    return any(marker in normalized for marker in markers)
+
+
 def _conversation_payload(conversation) -> dict[str, object]:
     """把仓储会话模型转换为 API JSON。"""
 
@@ -2331,6 +3060,109 @@ def _conversation_payload(conversation) -> dict[str, object]:
         "updated_at": conversation.updated_at.isoformat(),
         "archived_at": conversation.archived_at.isoformat() if conversation.archived_at else None,
     }
+
+
+def _candidate_profile_payload(profile) -> dict[str, object]:
+    """返回可用于启动向导的基准简历元数据，不下发完整简历正文。"""
+
+    return {
+        "id": str(profile.id),
+        "display_name": profile.display_name,
+        "source_filename": profile.source_filename,
+        "version": profile.version,
+        "created_at": profile.created_at.isoformat(),
+    }
+
+
+def _target_role_payload(
+    role,
+    *,
+    include_text: bool = True,
+    requirements: tuple[dict[str, object], ...] | None = None,
+) -> dict[str, object]:
+    effective_requirements = requirements if requirements is not None else role.requirements
+    payload: dict[str, object] = {
+        "id": str(role.id),
+        "company_name": role.company_name,
+        "role_name": role.role_name,
+        "source_kind": role.source_kind,
+        "source_label": role.source_label,
+        "version": role.version,
+        "requirements": list(effective_requirements),
+        "created_at": role.created_at.isoformat(),
+    }
+    if include_text:
+        payload["job_text"] = role.job_text
+    return payload
+
+
+def _conversation_context_payload(context, assessment_record=None) -> dict[str, object]:
+    # requirement JSON 是创建岗位时的解析快照；当前旧算法仍负责降级展示所需的
+    # 技能标签，但岗位匹配结果只读取异步 Judge 的持久化记录。
+    requirements = (
+        extract_job_requirements(context.target_role.job_text)
+        if context.target_role is not None
+        else ()
+    )
+    assessment = _job_assessment_payload(assessment_record)
+    return {
+        "binding_id": str(context.binding_id),
+        "binding_version": context.binding_version,
+        "candidate_profile": (
+            _candidate_profile_payload(context.candidate)
+            if context.candidate is not None
+            else None
+        ),
+        "target_role": (
+            _target_role_payload(context.target_role, requirements=requirements)
+            if context.target_role is not None
+            else None
+        ),
+        "assessment": assessment,
+        "created_at": context.created_at.isoformat(),
+    }
+
+
+def _current_job_assessment(services: CareerAssistantServices, context):
+    if context.candidate is None or context.target_role is None:
+        return None
+    return services.job_assessment_repository.get_current(
+        context.candidate.actor_id,
+        context.candidate.id,
+        context.target_role.id,
+    )
+
+
+def _enqueue_job_assessment(
+    services: CareerAssistantServices,
+    background_tasks: BackgroundTasks,
+    context,
+) -> None:
+    queued = services.job_assessment_service.enqueue_context(context)
+    if queued is None:
+        return
+    record, _ = queued
+    if record.status.value == "queued":
+        background_tasks.add_task(
+            services.job_assessment_service.run_assessment,
+            record.id,
+        )
+
+
+def _job_assessment_payload(record) -> dict[str, object] | None:
+    if record is None:
+        return None
+    payload: dict[str, object] = {
+        "id": str(record.id),
+        "status": record.status.value,
+        "attempt_count": record.attempt_count,
+        "error_code": record.error_code,
+        "judge_model": record.judge_model_id,
+        "prompt_version": record.prompt_version,
+    }
+    if record.result:
+        payload.update(record.result)
+    return payload
 
 
 def _message_payload(message) -> dict[str, object]:
@@ -2410,3 +3242,263 @@ def _resolution_payload(resolution: ModelResolution) -> dict[str, object]:
         "readiness": resolution.readiness.value,
         "credential_env_name": resolution.credential_env_name,
     }
+
+
+def _resume_record_payload(record, *, include_content: bool) -> dict[str, object]:
+    """将简历优化历史转换为前端契约，不暴露服务器文件路径。"""
+
+    payload: dict[str, object] = {
+        "id": str(record.id),
+        "job_title": record.job_title,
+        "creator_name": record.creator_name,
+        "owner_id": str(record.owner_id),
+        "source_filename": record.source_filename,
+        "source_media_type": record.source_media_type,
+        "model_profile_id": str(record.model_profile_id) if record.model_profile_id else None,
+        "model_display_name": record.model_display_name,
+        "created_at": record.created_at.isoformat(),
+    }
+
+    payload["download_urls"] = {
+        "original": f"/api/career/resume-optimizations/{str(record.id)}/download/original",
+        "original_preview_pdf": f"/api/career/resume-optimizations/{str(record.id)}/download/original-preview",
+        "optimized_text": f"/api/career/resume-optimizations/{str(record.id)}/download/optimized-text",
+        "optimized_docx": f"/api/career/resume-optimizations/{str(record.id)}/download/optimized-docx",
+        "optimized_pdf": f"/api/career/resume-optimizations/{str(record.id)}/download/optimized-pdf",
+    }
+
+    if include_content:
+        payload.update(
+            {
+                "original_preview_markdown": record.original_preview_markdown,
+                "job_description_text": record.job_description_text,
+                "extra_prompt": record.extra_prompt,
+                "suggestions": [suggestion.__dict__ for suggestion in record.suggestions],
+            },
+        )
+    return payload
+
+
+def _resume_owner_scope(user: PlatformUser) -> UUID | None:
+    """管理员查看组织记录，普通用户只能查看自己的记录。"""
+
+    return None if user.role is PlatformRole.ADMIN else user.id
+
+
+@router.post("/resume-optimizations/analyze")
+async def analyze_resume_optimization(
+    request: Request,
+    resume_file: UploadFile = File(...),
+    job_description: str = Form(default=""),
+    job_screenshots: list[UploadFile] | None = File(default=None),
+    extra_prompt: str = Form(default=""),
+    model_profile_id: UUID | None = Form(default=None),
+    user: PlatformUser = Depends(get_current_platform_user),
+) -> dict[str, object]:
+    """解析简历和岗位材料并返回建议；分析阶段不创建历史。"""
+
+    services = get_career_services(request)
+    attachments = []
+    suffix = Path(resume_file.filename or "").suffix.lower()
+    if suffix not in {".pdf", ".doc", ".docx"}:
+        raise HTTPException(status_code=400, detail="简历仅支持 PDF、DOC、DOCX")
+    try:
+        resume = await services.temporary_attachment_store.save_upload(
+            resume_file,
+            AttachmentKind.RESUME_PDF if suffix == ".pdf" else AttachmentKind.RESUME_DOCUMENT,
+        )
+        attachments.append(resume)
+        screenshots = []
+        for upload in job_screenshots or []:
+            screenshot = await services.temporary_attachment_store.save_upload(
+                upload,
+                AttachmentKind.JOB_DESCRIPTION_IMAGE,
+            )
+            screenshots.append(screenshot)
+            attachments.append(screenshot)
+        result = services.resume_optimization_service.analyze(
+            user.organization_id,
+            resume,
+            job_description,
+            tuple(screenshots),
+            extra_prompt,
+            model_profile_id,
+        )
+        return {
+            "original_markdown": result.original_markdown,
+            "job_description_text": result.job_description_text,
+            "job_title": result.job_title,
+            "analysis_summary": result.analysis_summary,
+            "suggestions": [suggestion.__dict__ for suggestion in result.suggestions],
+            "model_profile_id": str(result.model_profile_id),
+            "model_display_name": result.model_display_name,
+            "provider_key": result.provider_key,
+            "model_id": result.model_id,
+        }
+    except (ValueError, LookupError, ModelInvocationError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    finally:
+        services.temporary_attachment_store.cleanup(tuple(attachments))
+
+
+@router.post("/resume-optimizations/generate")
+def generate_resume_optimization(
+    payload: GenerateOptimizedResumeRequest,
+    request: Request,
+    user: PlatformUser = Depends(get_current_platform_user),
+) -> dict[str, str]:
+    """根据用户确认的意见生成新简历；仍不创建历史。"""
+
+    try:
+        optimized = get_career_services(request).resume_optimization_service.generate(
+            user.organization_id,
+            payload.original_markdown,
+            payload.job_description_text,
+            tuple(item.to_domain() for item in payload.suggestions),
+            payload.extra_prompt,
+            payload.model_profile_id,
+        )
+    except (ValueError, LookupError, ModelInvocationError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"optimized_markdown": optimized}
+
+
+@router.post("/resume-optimizations")
+async def save_resume_optimization(
+    request: Request,
+    original_file: UploadFile = File(...),
+    original_preview_markdown: str = Form(...),
+    job_title: str = Form(...),
+    job_description_text: str = Form(...),
+    extra_prompt: str = Form(default=""),
+    suggestions_json: str = Form(...),
+    optimized_markdown: str = Form(...),
+    model_profile_id: UUID = Form(...),
+    user: PlatformUser = Depends(get_current_platform_user),
+) -> dict[str, object]:
+    """用户显式保存后创建一条不可变历史。"""
+
+    services = get_career_services(request)
+    suffix = Path(original_file.filename or "").suffix.lower()
+    if suffix not in {".pdf", ".doc", ".docx"}:
+        raise HTTPException(status_code=400, detail="简历仅支持 PDF、DOC、DOCX")
+    descriptor = None
+    try:
+        suggestion_values = json.loads(suggestions_json)
+        if not isinstance(suggestion_values, list):
+            raise ValueError("修改意见格式无效")
+        suggestions = tuple(
+            ResumeSuggestionRequest.model_validate(item).to_domain()
+            for item in suggestion_values
+        )
+        descriptor = await services.temporary_attachment_store.save_upload(
+            original_file,
+            AttachmentKind.RESUME_PDF if suffix == ".pdf" else AttachmentKind.RESUME_DOCUMENT,
+        )
+        record = services.resume_optimization_service.save_record(
+            organization_id=user.organization_id,
+            owner_id=user.id,
+            creator_name=user.display_name,
+            source_descriptor=descriptor,
+            original_preview_markdown=original_preview_markdown,
+            job_title=job_title,
+            job_description_text=job_description_text,
+            extra_prompt=extra_prompt,
+            suggestions=suggestions,
+            optimized_markdown=optimized_markdown,
+            model_profile_id=model_profile_id,
+        )
+        return _resume_record_payload(record, include_content=True)
+    except (ValueError, LookupError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    finally:
+        if descriptor is not None:
+            services.temporary_attachment_store.cleanup((descriptor,))
+
+
+@router.get("/resume-optimizations")
+def list_resume_optimizations(
+    request: Request,
+    job_title: str | None = Query(default=None, max_length=160),
+    start_date: date | None = Query(default=None),
+    end_date: date | None = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=16, ge=1, le=64),
+    user: PlatformUser = Depends(get_current_platform_user),
+) -> dict[str, object]:
+    """分页检索优化历史，并在数据库查询层执行用户范围过滤。"""
+
+    records, total = get_career_services(request).resume_optimization_repository.list_records(
+        user.organization_id,
+        owner_id=_resume_owner_scope(user),
+        job_title=job_title,
+        start_date=start_date,
+        end_date=end_date,
+        page=page,
+        page_size=page_size,
+    )
+    return {
+        "items": [_resume_record_payload(item, include_content=False) for item in records],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
+
+
+@router.get("/resume-optimizations/{record_id}")
+def get_resume_optimization(
+    record_id: UUID,
+    request: Request,
+    user: PlatformUser = Depends(get_current_platform_user),
+) -> dict[str, object]:
+    """读取某次历史的大画布内容。"""
+
+    record = get_career_services(request).resume_optimization_repository.get(
+        user.organization_id,
+        record_id,
+        owner_id=_resume_owner_scope(user),
+    )
+    if record is None:
+        raise HTTPException(status_code=404, detail="简历优化记录不存在")
+    return _resume_record_payload(record, include_content=True)
+
+
+@router.get("/resume-optimizations/{record_id}/download/{version}")
+def download_resume_optimization(
+    record_id: UUID,
+    version: str,
+    request: Request,
+    user: PlatformUser = Depends(get_current_platform_user),
+) -> FileResponse:
+    """下载原始文件或优化后的文本 / DOCX / PDF 文件。"""
+
+    record = get_career_services(request).resume_optimization_repository.get(
+        user.organization_id,
+        record_id,
+        owner_id=_resume_owner_scope(user),
+    )
+    if record is None:
+        raise HTTPException(status_code=404, detail="简历优化记录不存在")
+    if version == "original":
+        path = Path(record.original_file_path)
+        filename = record.source_filename
+    elif version == "original-preview":
+        path = Path(record.original_preview_pdf_path)
+        filename = f"{Path(record.source_filename).stem}-原始预览.pdf"
+    elif version == "optimized-text":
+        path = Path(record.optimized_text_path)
+        filename = f"{record.job_title}-优化简历.txt"
+    elif version == "optimized-docx":
+        path = Path(record.optimized_docx_path)
+        filename = f"{record.job_title}-优化简历.docx"
+    elif version == "optimized-pdf":
+        path = Path(record.optimized_pdf_path)
+        filename = f"{record.job_title}-优化简历.pdf"
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="下载版本仅支持 original、original-preview、optimized-text、optimized-docx、optimized-pdf",
+        )
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="简历文件不存在")
+    return FileResponse(path, filename=filename)

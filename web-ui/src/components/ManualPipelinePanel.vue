@@ -139,13 +139,10 @@ async function responseError(response, fallback) {
   <section class="manual-pipeline-card" aria-labelledby="manual-pipeline-title">
     <div class="manual-pipeline-heading">
       <div>
-        <p class="eyebrow">Manual run</p>
         <h2 id="manual-pipeline-title">手动运行本周工作流</h2>
-        <p>读取最近一次 GitHub 周榜快照，依次执行总结、图片、视频蓝图、排版和草稿创建；不会自动请求 GitHub。</p>
+        <p>基于最近一次 GitHub 周榜快照执行总结、图片、排版和草稿创建。</p>
       </div>
-      <span class="manual-pipeline-badge" :class="{ running: runningPipeline }">
-        {{ runningPipeline ? '任务运行中' : '管理员操作' }}
-      </span>
+      <span v-if="runningPipeline" class="manual-pipeline-badge running">任务运行中</span>
     </div>
 
     <div v-if="errorMessage" class="manual-pipeline-alert danger" role="alert">{{ errorMessage }}</div>

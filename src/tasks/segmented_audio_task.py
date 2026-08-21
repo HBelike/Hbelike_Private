@@ -24,6 +24,15 @@ class SegmentedAudioTask(BaseTask):
     def execute(self, context: TaskContext) -> dict[str, Any]:
         """使用豆包 TTS 生成分段旁白；任何段落超长都不会被硬裁切。"""
 
+        if not context.config.audio_enabled:
+            self.logger.info("audio.enabled=false，SegmentedAudioTask 跳过全部音频生成")
+            return {
+                "skipped": True,
+                "skip_reason": "audio.enabled=false",
+                "disabled_by_config": True,
+                "network_called": False,
+            }
+
         content_repository = GeneratedContentRepository(database_manager=context.database_manager)
         asset_repository = MediaAssetRepository(database_manager=context.database_manager)
         content = content_repository.latest_for_video_generation()

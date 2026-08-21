@@ -6,12 +6,16 @@ import json
 import logging
 import os
 import re
+import shutil
+import tempfile
 import time
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
+from io import BytesIO
 from pathlib import Path
 from typing import Any
+from zipfile import BadZipFile, ZipFile
 
 import requests
 
@@ -48,6 +52,8 @@ class SkillDetail:
 
     summary: SkillSummary
     markdown: str
+    # 仅供服务端 Skill Runtime 解析相对资源和 ${SKILL_DIR}；Web API 不返回该字段。
+    skill_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -90,6 +96,41 @@ class SkillSaveResult:
     markdown: str
     created: bool
     saved_path: Path
+
+
+@dataclass(frozen=True)
+class SkillRepositoryItem:
+    """GitHub 仓库中一份可独立安装的 Agent Skill。"""
+
+    name: str
+    description: str
+    path: str
+    file_count: int
+    size_bytes: int
+
+
+@dataclass(frozen=True)
+class SkillRepositoryInspection:
+    """远端 Skill 仓库的真实元数据与可安装清单。"""
+
+    repository_full_name: str
+    default_branch: str
+    homepage_url: str
+    stars: int
+    forks: int
+    license_spdx: str | None
+    pushed_at: str | None
+    skills: tuple[SkillRepositoryItem, ...]
+
+
+@dataclass(frozen=True)
+class SkillRepositoryInstallResult:
+    """一次项目级 Skill 安装的结果摘要。"""
+
+    repository_full_name: str
+    installed_names: tuple[str, ...]
+    skipped_names: tuple[str, ...]
+    installed_file_count: int
 
 
 class SkillLibraryService:
@@ -211,7 +252,7 @@ class SkillLibraryService:
             path_hint=path_hint,
             editable=self._is_project_skill(skill_path),
         )
-        return SkillDetail(summary=summary, markdown=markdown)
+        return SkillDetail(summary=summary, markdown=markdown, skill_path=skill_path)
 
     def refresh_stale_star_snapshots(self) -> dict[str, int]:
         """按周刷新本地 Skill 的 GitHub Star 快照，供独立定时命令调用。
@@ -461,6 +502,193 @@ class SkillLibraryService:
             markdown=saved_detail.markdown,
             created=created,
             saved_path=destination_path,
+        )
+
+    def inspect_skill_repository(self, source: str) -> SkillRepositoryInspection:
+        """读取 GitHub 仓库元数据和其中可独立安装的 ``SKILL.md`` 目录。"""
+
+        repository_full_name = self._require_github_repository(source)
+        repository, tree = self._load_github_repository_snapshot(repository_full_name)
+        default_branch = str(repository.get("default_branch") or "main")
+        skill_paths = self._repository_skill_paths(tree)
+        file_stats: dict[str, tuple[int, int]] = {}
+        for skill_path in skill_paths:
+            directory = skill_path.rsplit("/", 1)[0] if "/" in skill_path else ""
+            prefix = f"{directory}/" if directory else ""
+            files = [
+                item
+                for item in tree
+                if item.get("type") == "blob"
+                and str(item.get("path") or "").startswith(prefix)
+            ]
+            file_stats[skill_path] = (
+                len(files),
+                sum(
+                    int(item.get("size") or 0)
+                    for item in files
+                    if isinstance(item.get("size"), int)
+                ),
+            )
+
+        def inspect_path(skill_path: str) -> SkillRepositoryItem:
+            markdown = self._fetch_github_raw_text(
+                repository_full_name,
+                default_branch,
+                skill_path,
+                timeout_seconds=20,
+            )
+            fallback_name = self._skill_name_from_github_path(
+                path=skill_path,
+                repo_name=repository_full_name,
+            )
+            name, description = self._parse_frontmatter(markdown, fallback_name=fallback_name)
+            file_count, size_bytes = file_stats[skill_path]
+            return SkillRepositoryItem(
+                name=name,
+                description=description,
+                path=skill_path,
+                file_count=file_count,
+                size_bytes=size_bytes,
+            )
+
+        with ThreadPoolExecutor(max_workers=6) as executor:
+            skills = list(executor.map(inspect_path, skill_paths))
+
+        license_payload = repository.get("license")
+        license_spdx = None
+        if isinstance(license_payload, dict):
+            normalized_license = str(license_payload.get("spdx_id") or "").strip()
+            license_spdx = normalized_license or None
+        return SkillRepositoryInspection(
+            repository_full_name=repository_full_name,
+            default_branch=default_branch,
+            homepage_url=str(repository.get("html_url") or f"https://github.com/{repository_full_name}"),
+            stars=int(repository.get("stargazers_count") or 0),
+            forks=int(repository.get("forks_count") or 0),
+            license_spdx=license_spdx,
+            pushed_at=str(repository.get("pushed_at") or "").strip() or None,
+            skills=tuple(skills),
+        )
+
+    def install_skill_repository(
+        self,
+        source: str,
+        skill_names: list[str] | tuple[str, ...] = (),
+    ) -> SkillRepositoryInstallResult:
+        """把远端仓库中的完整 Skill 目录复制到项目 ``.agents/skills``。"""
+
+        inspection = self.inspect_skill_repository(source)
+        by_name = {item.name.casefold(): item for item in inspection.skills}
+        requested_names = [name.strip() for name in skill_names if name.strip()]
+        if not requested_names or "*" in requested_names:
+            selected = list(inspection.skills)
+        else:
+            missing = [name for name in requested_names if name.casefold() not in by_name]
+            if missing:
+                raise ValueError(f"仓库中未找到 Skill：{', '.join(missing)}")
+            selected = []
+            seen: set[str] = set()
+            for name in requested_names:
+                item = by_name[name.casefold()]
+                if item.name.casefold() not in seen:
+                    selected.append(item)
+                    seen.add(item.name.casefold())
+
+        preexisting_names: list[str] = []
+        pending: list[SkillRepositoryItem] = []
+        for skill in selected:
+            destination = (self.project_skill_root / skill.name).resolve()
+            self._assert_inside_project_skill_root(destination)
+            if destination.exists():
+                preexisting_names.append(skill.name)
+            else:
+                pending.append(skill)
+        selected = pending
+        if not selected:
+            return SkillRepositoryInstallResult(
+                repository_full_name=inspection.repository_full_name,
+                installed_names=(),
+                skipped_names=tuple(preexisting_names),
+                installed_file_count=0,
+            )
+
+        archive_response = requests.get(
+            f"https://codeload.github.com/{inspection.repository_full_name}/zip/refs/heads/"
+            f"{inspection.default_branch}",
+            timeout=60,
+        )
+        if not archive_response.ok:
+            raise ValueError(f"GitHub 仓库归档下载失败：status={archive_response.status_code}")
+        if len(archive_response.content) > 100 * 1024 * 1024:
+            raise ValueError("GitHub 仓库归档超过 100 MB，已拒绝安装")
+        try:
+            archive = ZipFile(BytesIO(archive_response.content))
+        except BadZipFile as exc:
+            raise ValueError("GitHub 返回的仓库归档不是有效 ZIP") from exc
+
+        archive_members: dict[str, list[tuple[object, str]]] = {}
+        selected_total_size = 0
+        selected_file_count = 0
+        for skill in selected:
+            directory = skill.path.rsplit("/", 1)[0] if "/" in skill.path else ""
+            directory_marker = f"/{directory}/" if directory else "/"
+            members: list[tuple[object, str]] = []
+            for member in archive.infolist():
+                normalized_name = member.filename.replace("\\", "/")
+                marker_index = normalized_name.find(directory_marker)
+                if member.is_dir() or marker_index < 0:
+                    continue
+                relative_path = normalized_name[marker_index + len(directory_marker) :]
+                if not relative_path or self._unsafe_relative_path(relative_path):
+                    continue
+                members.append((member, relative_path))
+                selected_total_size += int(member.file_size)
+                selected_file_count += 1
+            archive_members[skill.name] = members
+        if selected_file_count > 2_000:
+            raise ValueError("待安装 Skill 文件数超过 2000，已拒绝安装")
+        if selected_total_size > 80 * 1024 * 1024:
+            raise ValueError("待安装 Skill 总大小超过 80 MB，已拒绝安装")
+
+        self.project_skill_root.mkdir(parents=True, exist_ok=True)
+        installed_names: list[str] = []
+        skipped_names: list[str] = list(preexisting_names)
+        installed_file_count = 0
+        with tempfile.TemporaryDirectory(
+            prefix=".skill-install-",
+            dir=self.project_skill_root,
+        ) as temporary_root:
+            staging_root = Path(temporary_root).resolve()
+            for skill in selected:
+                destination = (self.project_skill_root / skill.name).resolve()
+                self._assert_inside_project_skill_root(destination)
+                if destination.exists():
+                    skipped_names.append(skill.name)
+                    continue
+                staging = (staging_root / skill.name).resolve()
+                try:
+                    staging.relative_to(staging_root)
+                except ValueError as exc:
+                    raise ValueError(f"Skill 名称产生了非法安装路径：{skill.name}") from exc
+                for member, relative_path in archive_members.get(skill.name, []):
+                    target = (staging / relative_path).resolve()
+                    try:
+                        target.relative_to(staging)
+                    except ValueError as exc:
+                        raise ValueError(f"Skill 文件路径越界：{relative_path}") from exc
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(archive.read(member))
+                    installed_file_count += 1
+                if not (staging / "SKILL.md").is_file():
+                    raise ValueError(f"Skill {skill.name} 缺少 SKILL.md")
+                shutil.copytree(staging, destination)
+                installed_names.append(skill.name)
+
+        return SkillRepositoryInstallResult(
+            repository_full_name=inspection.repository_full_name,
+            installed_names=tuple(installed_names),
+            skipped_names=tuple(skipped_names),
+            installed_file_count=installed_file_count,
         )
 
     def _ensure_saved_skill_metadata(
@@ -877,6 +1105,120 @@ find-skills 的本地说明片段：
             headers["Authorization"] = f"Bearer {token}"
         return headers
 
+    def _require_github_repository(self, source: str) -> str:
+        """把 HTTPS、SSH 或 owner/repo 输入规范化为 GitHub full_name。"""
+
+        repository = self._extract_github_repository_full_name(source)
+        if repository is None:
+            raise ValueError("只支持 GitHub 仓库地址或 owner/repo")
+        return repository
+
+    def _load_github_repository_snapshot(
+        self,
+        repository_full_name: str,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """读取仓库元数据和默认分支递归 Tree。"""
+
+        headers = self._github_headers()
+        repository_response = requests.get(
+            f"https://api.github.com/repos/{repository_full_name}",
+            headers=headers,
+            timeout=20,
+        )
+        if not repository_response.ok:
+            raise ValueError(
+                f"GitHub 仓库读取失败：status={repository_response.status_code}",
+            )
+        repository = repository_response.json()
+        if not isinstance(repository, dict):
+            raise ValueError("GitHub 仓库响应不是对象")
+        default_branch = str(repository.get("default_branch") or "main")
+        tree_response = requests.get(
+            f"https://api.github.com/repos/{repository_full_name}/git/trees/{default_branch}",
+            params={"recursive": "1"},
+            headers=headers,
+            timeout=30,
+        )
+        if not tree_response.ok:
+            raise ValueError(f"GitHub 文件树读取失败：status={tree_response.status_code}")
+        tree_payload = tree_response.json()
+        raw_tree = tree_payload.get("tree") if isinstance(tree_payload, dict) else None
+        if not isinstance(raw_tree, list):
+            raise ValueError("GitHub 文件树响应缺少 tree")
+        tree = [item for item in raw_tree if isinstance(item, dict)]
+        return repository, tree
+
+    @staticmethod
+    def _repository_skill_paths(tree: list[dict[str, Any]]) -> tuple[str, ...]:
+        """优先识别标准 ``skills/``，避免把仓库维护用内部 Skill 一并安装。"""
+
+        candidates = sorted(
+            {
+                str(item.get("path") or "")
+                for item in tree
+                if item.get("type") == "blob"
+                and str(item.get("path") or "").lower().endswith("skill.md")
+            },
+        )
+        preferred_roots = ("skills/", ".agents/skills/", ".claude/skills/")
+        for root in preferred_roots:
+            rooted = tuple(path for path in candidates if path.startswith(root))
+            if rooted:
+                return rooted
+        return tuple(candidates)
+
+    def _fetch_github_raw_text(
+        self,
+        repository_full_name: str,
+        branch: str,
+        path: str,
+        *,
+        timeout_seconds: float,
+    ) -> str:
+        """读取 GitHub 默认分支中的 UTF-8 文本。"""
+
+        content = self._fetch_github_raw_bytes(
+            repository_full_name,
+            branch,
+            path,
+            timeout_seconds=timeout_seconds,
+        )
+        try:
+            return content.decode("utf-8-sig")
+        except UnicodeDecodeError as exc:
+            raise ValueError(f"远端文件不是 UTF-8：{path}") from exc
+
+    @staticmethod
+    def _fetch_github_raw_bytes(
+        repository_full_name: str,
+        branch: str,
+        path: str,
+        *,
+        timeout_seconds: float,
+    ) -> bytes:
+        """下载 GitHub Raw 文件，不执行下载内容。"""
+
+        response = requests.get(
+            f"https://raw.githubusercontent.com/{repository_full_name}/{branch}/{path}",
+            timeout=timeout_seconds,
+        )
+        if not response.ok:
+            raise ValueError(f"GitHub 文件下载失败：status={response.status_code} path={path}")
+        return response.content
+
+    @staticmethod
+    def _unsafe_relative_path(path: str) -> bool:
+        """拒绝绝对路径、空路径和父目录跳转。"""
+
+        normalized = path.replace("\\", "/").strip()
+        parts = [part for part in normalized.split("/") if part]
+        return (
+            not normalized
+            or normalized.startswith("/")
+            or re.match(r"^[A-Za-z]:", normalized) is not None
+            or any(part in {".", ".."} for part in parts)
+        )
+
     def _skill_name_from_github_path(self, path: str, repo_name: str) -> str:
         """从 GitHub 路径推断 Skill 名称。"""
 
@@ -997,6 +1339,7 @@ GitHub Skill 候选：
         if not normalized:
             return None
 
+        normalized = re.sub(r"^git@github\.com:", "https://github.com/", normalized)
         github_match = re.search(r"github\.com/([^/\s]+)/([^/\s#?]+)", normalized)
         if github_match:
             owner = github_match.group(1).strip()

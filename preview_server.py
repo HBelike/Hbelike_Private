@@ -30,14 +30,17 @@ if __name__ == "__main__":
         os.environ.setdefault("WATCHFILES_FORCE_POLLING", "true")
         os.environ.setdefault("WATCHFILES_POLL_DELAY_MS", "300")
 
+    reload_dirs = (
+        [str(PROJECT_ROOT / "src"), str(PROJECT_ROOT / "config")] if reload_enabled else None
+    )
+
     uvicorn.run(
         "preview_server:app",
         host="127.0.0.1",
         port=port,
         reload=reload_enabled,
-        # 监听项目根目录，才能捕获 .env.career-assistant；include 仍限定为源码、
-        # 配置和该私有环境文件，不会因数据库或前端构建产物触发重启。
-        reload_dirs=[str(PROJECT_ROOT)] if reload_enabled else None,
+        # 监听源码与配置目录，减少权限噪音；保留 .env.career-assistant 让配置热更新更及时。
+        reload_dirs=reload_dirs,
         reload_includes=["*.py", "*.yaml", ".env.career-assistant"]
         if reload_enabled
         else None,

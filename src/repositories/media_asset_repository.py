@@ -258,6 +258,7 @@ class MediaAssetRepository:
                 FROM media_assets
                 WHERE content_id IN ({placeholders})
                   AND status != 'replaced'
+                  AND asset_type IN ('image', 'audio', 'video', 'video_clip')
                 GROUP BY content_id
                 """,
                 tuple(normalized_ids),

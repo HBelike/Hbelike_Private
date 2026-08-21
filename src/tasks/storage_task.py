@@ -16,7 +16,8 @@ class StorageTask(BaseTask):
     def execute(self, context: TaskContext) -> dict[str, Any]:
         """扫描待上传媒体资产，上传后把 remote_url 合并回 metadata。"""
         media_asset_repository = MediaAssetRepository(database_manager=context.database_manager)
-        candidates = media_asset_repository.list_upload_candidates(context.config.storage_asset_types)
+        enabled_asset_types = self._enabled_asset_types(context.config)
+        candidates = media_asset_repository.list_upload_candidates(enabled_asset_types)
 
         if not candidates:
             self.logger.info("没有待上传媒体资产，StorageTask 跳过")
@@ -104,3 +105,16 @@ class StorageTask(BaseTask):
             "skipped": False,
             "network_called": context.config.storage_provider != "local",
         }
+
+    @staticmethod
+    def _enabled_asset_types(config: Any) -> list[str]:
+        """关闭媒体通道后仅保留仍允许上传的素材类型。"""
+
+        enabled_types: list[str] = []
+        for asset_type in config.storage_asset_types:
+            if asset_type == "audio" and not config.audio_enabled:
+                continue
+            if asset_type == "video" and not config.video_submit_enabled:
+                continue
+            enabled_types.append(asset_type)
+        return enabled_types

@@ -51,6 +51,7 @@ cd /opt/wechat-agent-platform
 cp .env.production.example .env.production
 chmod 600 .env.production
 # 编辑 .env.production，填写域名、数据库密码、账号邮件服务、微信与模型凭据。
+# 保持 VIDEO_SUBMIT_ENABLED=false、AUDIO_ENABLED=false；API 与 Scheduler 均不进入音视频链路。
 # CAREER_CREDENTIAL_MASTER_KEY 可留空，API 首次启动会在 application_data 卷自动创建。
 docker compose --env-file .env.production -f docker-compose.production.yml config --quiet
 docker compose --env-file .env.production -f docker-compose.production.yml up -d --build
@@ -77,6 +78,9 @@ docker compose --env-file .env.production -f docker-compose.production.yml logs 
 docker compose --env-file .env.production -f docker-compose.production.yml logs --tail=120 skill-seed
 docker compose --env-file .env.production -f docker-compose.production.yml logs --tail=120 pipeline-scheduler
 docker compose --env-file .env.production -f docker-compose.production.yml ps
+docker compose --env-file .env.production -f docker-compose.production.yml exec career-api sh -lc 'test "$VIDEO_SUBMIT_ENABLED" = false && test "$AUDIO_ENABLED" = false'
+docker compose --env-file .env.production -f docker-compose.production.yml exec pipeline-scheduler sh -lc 'test "$VIDEO_SUBMIT_ENABLED" = false && test "$AUDIO_ENABLED" = false'
+docker compose --env-file .env.production -f docker-compose.production.yml exec pipeline-scheduler python scripts/check_media_production_readiness.py
 ```
 
 验收顺序：`skill-seed` 日志显示已导入或保留种子 → HTTPS 页面可访问 → 邮箱 bootstrap 创建首个管理员 → 登录后打开技能库并确认 `find-skills` 等项目本地 Skill 可见且可编辑 → 访问工作台与 Career → 验证 PostgreSQL 会话持久化 → 查看 Scheduler 日志中的下次周五执行时间 → 管理员手动跑一次不产生付费视频的流水线 → 创建微信草稿 → 确认首次备份可恢复。
@@ -86,5 +90,5 @@ docker compose --env-file .env.production -f docker-compose.production.yml ps
 - 每日对 PostgreSQL 执行 `pg_dump -Fc`，并备份 `application_data`（SQLite）、`application_outputs`（媒体）与 `application_skills`（编辑后的 Skill）到异地对象存储；保留至少 7 个日备份与 4 个周备份。
 - Caddy 的 `caddy_data`、`caddy_config` 卷必须保留，否则会丢失证书账户状态。
 - 首发不启用 GPU Docling；有 NVIDIA GPU 的服务器再使用 `document-processing` profile。
-- 仓库中的 `config/app.yaml` 始终保留 `video.submit_enabled: false`，避免开发机误提交付费任务；生产环境通过 `.env.production` 的 `VIDEO_SUBMIT_ENABLED=true` 单独开启真实 Seedance 提交。开启前必须确认火山方舟 Key、公开媒体地址和语音配置可用。
+- 仓库、本地与生产均保持 `video.submit_enabled/VIDEO_SUBMIT_ENABLED=false` 和 `audio.enabled/AUDIO_ENABLED=false`。工作流只运行文章、图片、排版与图文草稿任务；部署后必须重建 API 与 Scheduler 容器并执行上面的容器内检查，旧容器不会自动获得新环境变量。
 - 旧公众号 SQLite 工作流、Skill 文件持久化、多用户 Career 角色授权、Docker secrets 与 CI/CD 是下一阶段演进项，不应在未验证的情况下横向扩容。

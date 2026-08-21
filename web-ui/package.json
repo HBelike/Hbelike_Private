@@ -6,12 +6,13 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 5173",
     "build": "vite build",
-    "preview": "vite preview --host 127.0.0.1 --port 4173"
+    "preview": "vite preview --host 127.0.0.1 --port 4173",
+    "test": "node --test src/*.test.js"
   },
   "dependencies": {
     "@vitejs/plugin-vue": "^6.0.0",
+    "v-region": "^3.5.2",
     "vite": "^7.0.0",
     "vue": "^3.5.0"
-  },
-  "devDependencies": {}
+  }
 }
