@@ -476,8 +476,8 @@ html[data-ui-theme="blue"] .history-title small {
 }
 
 html[data-ui-theme="blue"] .conversation-item {
-  border-radius: 8px;
-  background: var(--ui-surface-soft);
+  border-radius: 10px;
+  background: transparent;
   color: var(--ui-text-secondary);
 }
 
@@ -917,19 +917,6 @@ html[data-ui-theme="blue"] body .module-card .article-node {
 }
 
 /* 求职助手：补齐通知、空态、执行进度和模型目录里的绿色残留。 */
-html[data-ui-theme="blue"] body .career-workspace .privacy-card {
-  border-color: var(--ui-line);
-  background: var(--ui-surface-soft);
-}
-
-html[data-ui-theme="blue"] body .career-workspace .privacy-card strong {
-  color: var(--ui-accent-ink);
-}
-
-html[data-ui-theme="blue"] body .career-workspace .privacy-card p {
-  color: var(--ui-text-muted);
-}
-
 html[data-ui-theme="blue"] body .career-workspace .notice.success {
   border-color: var(--ui-line-strong);
   background: var(--ui-surface-active);

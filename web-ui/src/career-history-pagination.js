@@ -1,5 +1,12 @@
-export const DEFAULT_HISTORY_PAGE_SIZE = 15
-export const HISTORY_PAGE_SIZE_OPTIONS = [10, 15, 20, 25]
+export const DEFAULT_HISTORY_PAGE_SIZE = 7
+
+export function historyPageSizeForViewportHeight(viewportHeight) {
+  const normalizedHeight = Number(viewportHeight)
+  if (!Number.isFinite(normalizedHeight) || normalizedHeight <= 0) return DEFAULT_HISTORY_PAGE_SIZE
+  if (normalizedHeight <= 950) return 5
+  if (normalizedHeight <= 1240) return 7
+  return 9
+}
 
 export function pageRequestUrl(page, pageSize) {
   const normalizedPage = Math.max(1, Number(page) || 1)

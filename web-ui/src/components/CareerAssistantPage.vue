@@ -8,8 +8,8 @@ import { toTargetRolePayload } from '../job-library-target-role.js'
 import { isAssessmentPending } from '../career-assessment-view.js'
 import {
   DEFAULT_HISTORY_PAGE_SIZE,
-  HISTORY_PAGE_SIZE_OPTIONS,
   historyPageRange,
+  historyPageSizeForViewportHeight,
   normalizeHistoryPage,
   normalizeHistoryPageTarget,
   pageRequestUrl
@@ -75,13 +75,11 @@ const historyPage = ref(1)
 const historyPageSize = ref(DEFAULT_HISTORY_PAGE_SIZE)
 const historyTotal = ref(0)
 const historyLoading = ref(false)
-const historyJumpPage = ref(1)
 const contextRailWidth = ref(620)
 const resizingContextRail = ref(false)
 const viewportWidth = ref(typeof window === 'undefined' ? 1600 : window.innerWidth)
 
 const HISTORY_COLLAPSED_STORAGE_KEY = 'career-assistant-history-collapsed'
-const HISTORY_PAGE_SIZE_STORAGE_KEY = 'career-assistant-history-page-size'
 const CONTEXT_RAIL_WIDTH_STORAGE_KEY = 'career-assistant-context-rail-width'
 const CONTEXT_RAIL_MIN_WIDTH = 360
 const CONTEXT_RAIL_MAX_WIDTH = 760
@@ -139,6 +137,7 @@ let interviewMentionDebounceTimer = null
 let interviewMentionRequestId = 0
 let skillMentionDebounceTimer = null
 let skillMentionRequestId = 0
+let historyViewportResizeTimer = null
 
 function dismissError() {
   errorMessage.value = ''
@@ -162,6 +161,7 @@ onBeforeUnmount(() => {
   if (errorToastTimer) clearTimeout(errorToastTimer)
   if (interviewMentionDebounceTimer) clearTimeout(interviewMentionDebounceTimer)
   if (skillMentionDebounceTimer) clearTimeout(skillMentionDebounceTimer)
+  if (historyViewportResizeTimer) clearTimeout(historyViewportResizeTimer)
   document.removeEventListener('pointerdown', handleConversationActionPointerDown)
   window.removeEventListener('resize', updateCareerViewportWidth)
   stopContextRailResize()
@@ -186,7 +186,6 @@ function applyHistoryPage(payload, fallbackPage = historyPage.value) {
   const normalized = normalizeHistoryPage(payload, fallbackPage, historyPageSize.value)
   conversations.value = normalized.items
   historyPage.value = normalized.page
-  historyJumpPage.value = normalized.page
   historyPageSize.value = normalized.pageSize
   historyTotal.value = normalized.total
   return normalized
@@ -213,19 +212,8 @@ async function loadConversationPage(page = historyPage.value) {
   }
 }
 
-function changeHistoryPageSize() {
-  const selectedSize = Number(historyPageSize.value)
-  historyPageSize.value = HISTORY_PAGE_SIZE_OPTIONS.includes(selectedSize)
-    ? selectedSize
-    : DEFAULT_HISTORY_PAGE_SIZE
-  window.localStorage.setItem(HISTORY_PAGE_SIZE_STORAGE_KEY, String(historyPageSize.value))
-  historyJumpPage.value = 1
-  void loadConversationPage(1)
-}
-
 function goToHistoryPage(page) {
   const target = normalizeHistoryPageTarget(page, historyTotalPages.value)
-  historyJumpPage.value = target
   if (target === historyPage.value || historyLoading.value) return
   void loadConversationPage(target)
 }
@@ -282,6 +270,16 @@ function resetContextRailWidth() {
 
 function updateCareerViewportWidth() {
   viewportWidth.value = window.innerWidth
+  if (historyViewportResizeTimer) clearTimeout(historyViewportResizeTimer)
+  historyViewportResizeTimer = window.setTimeout(() => {
+    historyViewportResizeTimer = null
+    const nextPageSize = historyPageSizeForViewportHeight(window.innerHeight)
+    if (nextPageSize === historyPageSize.value) return
+    const firstVisibleIndex = (historyPage.value - 1) * historyPageSize.value
+    const targetPage = Math.floor(firstVisibleIndex / nextPageSize) + 1
+    historyPageSize.value = nextPageSize
+    void loadConversationPage(targetPage)
+  }, 160)
 }
 
 function handleConversationActionPointerDown(event) {
@@ -1719,10 +1717,7 @@ async function testModelConnection() {
 
 onMounted(() => {
   historyCollapsed.value = window.localStorage.getItem(HISTORY_COLLAPSED_STORAGE_KEY) === '1'
-  const storedHistoryPageSize = Number(window.localStorage.getItem(HISTORY_PAGE_SIZE_STORAGE_KEY))
-  if (HISTORY_PAGE_SIZE_OPTIONS.includes(storedHistoryPageSize)) {
-    historyPageSize.value = storedHistoryPageSize
-  }
+  historyPageSize.value = historyPageSizeForViewportHeight(window.innerHeight)
   const storedContextRailWidth = Number(window.localStorage.getItem(CONTEXT_RAIL_WIDTH_STORAGE_KEY))
   if (Number.isFinite(storedContextRailWidth) && storedContextRailWidth > 0) {
     contextRailWidth.value = clampContextRailWidth(storedContextRailWidth)
@@ -1754,7 +1749,7 @@ onMounted(() => {
           </button>
           <button class="history-collapse-button" type="button" aria-label="折叠会话历史" title="折叠会话历史" @click="toggleHistoryPanel">‹</button>
         </div>
-        <div class="history-title"><span>会话历史</span><small>{{ historyTotal }}</small></div>
+        <div class="history-title"><span>历史对话</span><small>{{ historyTotal }}</small></div>
         <p v-if="(loading || historyLoading) && !conversations.length" class="list-empty">正在加载会话...</p>
         <p v-else-if="!conversations.length" class="list-empty">还没有求职会话</p>
         <div v-else class="conversation-list" :class="{ 'is-loading': historyLoading }">
@@ -1823,38 +1818,14 @@ onMounted(() => {
         </article>
         </div>
         <nav v-if="historyTotal" class="history-pagination" aria-label="会话历史分页">
-          <div class="history-page-meta">
-            <span>{{ historyRange.start }}–{{ historyRange.end }} / {{ historyTotal }}</span>
-            <label>
-              <span>每页</span>
-              <select v-model.number="historyPageSize" :disabled="historyLoading" aria-label="每页会话数量" @change="changeHistoryPageSize">
-                <option v-for="size in HISTORY_PAGE_SIZE_OPTIONS" :key="size" :value="size">{{ size }}</option>
-              </select>
-            </label>
-          </div>
+          <span class="history-page-range">{{ historyRange.start }}–{{ historyRange.end }} / {{ historyTotal }}</span>
           <div class="history-page-actions">
-            <div class="history-page-stepper">
-              <button type="button" :disabled="historyLoading || historyPage <= 1" aria-label="上一页" @click="goToHistoryPage(historyPage - 1)">‹</button>
-              <strong aria-live="polite" :aria-label="`第 ${historyPage} 页，共 ${historyTotalPages} 页`">{{ historyPage }} / {{ historyTotalPages }}</strong>
-              <button type="button" :disabled="historyLoading || historyPage >= historyTotalPages" aria-label="下一页" @click="goToHistoryPage(historyPage + 1)">›</button>
-            </div>
-            <form class="history-page-jump" aria-label="跳转到指定页面" @submit.prevent="goToHistoryPage(historyJumpPage)">
-              <span>到</span>
-              <input
-                v-model="historyJumpPage"
-                type="number"
-                inputmode="numeric"
-                min="1"
-                :max="historyTotalPages"
-                :disabled="historyLoading"
-                aria-label="目标页码"
-              />
-              <span>页</span>
-              <button type="submit" :disabled="historyLoading">前往</button>
-            </form>
+            <span aria-live="polite" :aria-label="`第 ${historyPage} 页，共 ${historyTotalPages} 页`">{{ historyPage }} / {{ historyTotalPages }}</span>
+            <button type="button" :disabled="historyLoading || historyPage <= 1" aria-label="上一页" title="上一页" @click="goToHistoryPage(historyPage - 1)">‹</button>
+            <button type="button" :disabled="historyLoading || historyPage >= historyTotalPages" aria-label="下一页" title="下一页" @click="goToHistoryPage(historyPage + 1)">›</button>
           </div>
         </nav>
-        <div class="privacy-card"><strong>隐私边界</strong><p>简历原文件不入库；历史保存对话文本，是否脱敏由个人部署配置决定。</p></div>
+        <div class="privacy-note"><span aria-hidden="true">盾</span><p>简历原文件不入库，仅保留配置允许的历史文本</p></div>
       </template>
     </aside>
 
@@ -2144,19 +2115,19 @@ onMounted(() => {
 .career-workspace.has-context-rail.history-collapsed { grid-template-columns:52px minmax(560px,1fr) var(--context-rail-width,620px); }
 .career-history-panel,.career-chat-panel { border:1px solid #e0e6d8; border-radius:20px; background:#fff; box-shadow:none; }
 .context-rail-slot{position:relative;height:100%;min-width:0;min-height:0;overflow:hidden}.context-rail-slot>:deep(.context-rail){height:100%;max-height:100%}.context-rail-resizer{position:absolute;z-index:30;top:0;bottom:0;left:-13px;width:12px;border:0;background:transparent;padding:0;cursor:col-resize;touch-action:none}.context-rail-resizer:before{position:absolute;top:0;bottom:0;left:5px;width:2px;border-radius:999px;background:transparent;content:"";transition:background .15s ease,box-shadow .15s ease}.context-rail-resizer i{position:absolute;top:50%;left:1px;display:block;width:10px;height:42px;transform:translateY(-50%);border:1px solid var(--ui-line-strong);border-radius:999px;background:var(--ui-surface);box-shadow:0 3px 12px rgba(31,60,96,.1)}.context-rail-resizer i:after{position:absolute;top:50%;left:3px;width:2px;height:18px;transform:translateY(-50%);border-radius:999px;background:var(--ui-accent);content:""}.context-rail-resizer:hover:before,.context-rail-resizer:focus-visible:before,.resizing-context-rail .context-rail-resizer:before{background:var(--ui-accent);box-shadow:0 0 0 3px var(--ui-focus)}.context-rail-resizer:focus-visible{outline:0}
-.career-history-panel { display:flex; height:100%; min-height:0; flex-direction:column; gap:10px; overflow:hidden; padding:14px; }
-.career-history-panel.collapsed{align-items:center;gap:9px;padding:10px 7px;border-radius:16px}.history-actions{display:grid;grid-template-columns:minmax(0,1fr) 34px;gap:7px}.history-collapse-button,.history-rail-button{display:grid;place-items:center;border:1px solid var(--ui-line);border-radius:10px;background:var(--ui-surface-soft);color:var(--ui-text-secondary);font-size:22px;font-weight:850;cursor:pointer}.history-collapse-button:hover,.history-rail-button:hover{border-color:var(--ui-accent);background:var(--ui-surface-active);color:var(--ui-accent-ink)}.history-rail-button{width:36px;height:36px}.history-rail-button.primary{border-color:var(--ui-accent);background:var(--ui-accent);color:#fff;font-size:18px}.history-rail-button:disabled{cursor:wait;opacity:.6}.history-rail-count{display:grid;min-width:25px;height:25px;place-items:center;border-radius:999px;background:var(--ui-surface-soft);color:var(--ui-text-muted);font-size:10px;font-weight:850}
+.career-history-panel { display:flex; height:100%; min-height:0; flex-direction:column; gap:0; overflow:hidden; padding:14px; }
+.career-history-panel.collapsed{align-items:center;gap:9px;padding:10px 7px;border-radius:16px}.history-actions{display:grid;grid-template-columns:minmax(0,1fr) 34px;gap:7px;margin-bottom:14px}.history-collapse-button,.history-rail-button{display:grid;place-items:center;border:1px solid var(--ui-line);border-radius:10px;background:var(--ui-surface-soft);color:var(--ui-text-secondary);font-size:22px;font-weight:850;cursor:pointer}.history-collapse-button:hover,.history-rail-button:hover{border-color:var(--ui-accent);background:var(--ui-surface-active);color:var(--ui-accent-ink)}.history-rail-button{width:36px;height:36px}.history-rail-button.primary{border-color:var(--ui-accent);background:var(--ui-accent);color:#fff;font-size:18px}.history-rail-button:disabled{cursor:wait;opacity:.6}.history-rail-count{display:grid;min-width:25px;height:25px;place-items:center;border-radius:999px;background:var(--ui-surface-soft);color:var(--ui-text-muted);font-size:10px;font-weight:850}
 .primary-button,.send-button { border:0; border-radius:13px; background:#89a93e; color:#fff; font-weight:800; }
 .primary-button { padding:12px 14px; }.primary-button:disabled,.send-button:disabled { cursor:wait; opacity:.6; }
 .history-title,.chat-header,.composer-toolbar,.composer-footer,.session-tools,.model-profile-list article { display:flex; align-items:center; justify-content:space-between; gap:10px; }
-.history-title { color:var(--ui-text-muted); font-size:12px; font-weight:850; }.history-title small { display:grid; min-width:25px; height:25px; place-items:center; border-radius:999px; background:var(--ui-surface-active); color:var(--ui-accent-ink); }
-.conversation-list { display:flex; min-height:0; flex:1; flex-direction:column; gap:7px; overflow-y:auto; overscroll-behavior:contain; scrollbar-width:thin; transition:opacity .15s ease; }.conversation-list.is-loading{opacity:.55;pointer-events:none}.list-empty { display:grid; min-height:0; flex:1; place-content:center; color:var(--ui-text-muted); font-size:13px; text-align:center; }
-.conversation-item { position:relative; display:grid; width:100%; min-height:48px; flex:1 0 48px; box-sizing:border-box; grid-template-columns:minmax(0,1fr) auto; overflow:visible; border:1px solid var(--ui-line); border-radius:11px; background:var(--ui-surface-soft); color:var(--ui-text-secondary); text-align:left; transition:border-color .14s ease,background .14s ease,box-shadow .14s ease; }.conversation-item:hover{border-color:var(--ui-line-strong);background:var(--ui-surface)}.conversation-item.active { border-color:var(--ui-accent); background:var(--ui-surface-active); box-shadow:inset 3px 0 0 var(--ui-accent); color:var(--ui-accent-ink); }.conversation-item.managing{flex:none;overflow:hidden}
-.conversation-item-main { display:grid; min-width:0; grid-template-columns:minmax(0,1fr) auto; align-items:center; gap:7px; border:0; background:transparent; color:inherit; padding:9px 3px 9px 11px; text-align:left; cursor:pointer; }.conversation-item-main:disabled { cursor:wait; opacity:.62; }.conversation-item-main strong { overflow:hidden; min-width:0; font-size:12px; line-height:1.35; text-overflow:ellipsis; white-space:nowrap; }.conversation-item-main small { flex:0 0 auto; color:var(--ui-text-muted); font-size:9px; white-space:nowrap; }
-.conversation-menu-button { align-self:center; border:0; border-radius:7px; background:transparent; color:#7c8875; padding:5px 7px; font-size:15px; font-weight:900; line-height:1; cursor:pointer; }.conversation-menu-button:hover,.conversation-menu-button[aria-expanded="true"] { background:var(--ui-surface-active); color:var(--ui-accent-ink); }.conversation-menu-button:disabled { cursor:not-allowed; opacity:.45; }
+.history-title { margin-bottom:9px; padding:0 3px; color:var(--ui-text-muted); font-size:12px; font-weight:850; }.history-title small { display:grid; min-width:29px; height:23px; place-items:center; border-radius:999px; background:var(--ui-surface-active); color:var(--ui-accent-ink); }
+.conversation-list { display:flex; min-height:0; flex:1; flex-direction:column; gap:6px; overflow-y:auto; overscroll-behavior:contain; scrollbar-width:thin; transition:opacity .15s ease; }.conversation-list.is-loading{opacity:.55;pointer-events:none}.list-empty { display:grid; min-height:0; flex:1; place-content:center; color:var(--ui-text-muted); font-size:13px; text-align:center; }
+.conversation-item { position:relative; display:grid; width:100%; height:72px; min-height:72px; flex:0 0 72px; box-sizing:border-box; grid-template-columns:minmax(0,1fr) auto; overflow:visible; border:1px solid transparent; border-radius:10px; background:transparent; color:var(--ui-text-secondary); text-align:left; transition:border-color .14s ease,background .14s ease; }.conversation-item:hover{border-color:var(--ui-line);background:var(--ui-surface-soft)}.conversation-item.active { border-color:var(--ui-line-strong); background:var(--ui-surface-active); color:var(--ui-accent-ink); }.conversation-item.active::before{position:absolute;top:11px;bottom:11px;left:-1px;width:3px;border-radius:0 3px 3px 0;background:var(--ui-accent);content:""}.conversation-item.managing{height:auto;min-height:72px;flex:0 0 auto;overflow:hidden}
+.conversation-item-main { display:grid; min-width:0; align-content:center; gap:6px; border:0; border-radius:9px; background:transparent; color:inherit; padding:10px 3px 9px 14px; text-align:left; cursor:pointer; }.conversation-item-main:focus-visible{outline:3px solid var(--ui-focus);outline-offset:-3px}.conversation-item-main:disabled { cursor:wait; opacity:.62; }.conversation-item-main strong { overflow:hidden; min-width:0; font-size:12px; line-height:1.4; text-overflow:ellipsis; white-space:nowrap; }.conversation-item-main small { color:var(--ui-text-muted); font-size:10px; white-space:nowrap; }
+.conversation-menu-button { align-self:center; border:0; border-radius:7px; background:transparent; color:var(--ui-text-muted); padding:5px 7px; font-size:15px; font-weight:900; line-height:1; opacity:0; cursor:pointer; transition:opacity .14s ease,background .14s ease,color .14s ease; }.conversation-item:hover .conversation-menu-button,.conversation-item.active .conversation-menu-button,.conversation-menu-button:focus-visible,.conversation-menu-button[aria-expanded="true"]{opacity:1}.conversation-menu-button:hover,.conversation-menu-button[aria-expanded="true"] { background:var(--ui-surface); color:var(--ui-accent-ink); }.conversation-menu-button:focus-visible{outline:3px solid var(--ui-focus);outline-offset:1px}.conversation-menu-button:disabled { cursor:not-allowed; opacity:.45; }
 .conversation-action-menu { display:grid; grid-column:1 / -1; gap:9px; border-top:1px solid var(--ui-line); background:var(--ui-surface); padding:10px; }.conversation-action-menu label { display:grid; gap:5px; color:var(--ui-text-secondary); font-size:11px; font-weight:800; }.conversation-action-menu input { width:100%; box-sizing:border-box; border:1px solid var(--ui-line); border-radius:8px; background:var(--ui-surface); color:var(--ui-text); padding:8px 9px; font:inherit; }.conversation-action-menu input:focus { border-color:var(--ui-accent); box-shadow:0 0 0 3px var(--ui-focus); outline:0; }.conversation-action-menu p { display:grid; gap:3px; margin:0; }.conversation-action-menu p strong { color:var(--ui-text); font-size:12px; }.conversation-action-menu p span { color:var(--ui-text-muted); font-size:11px; line-height:1.5; }
 .conversation-action-options,.conversation-action-buttons { display:flex; gap:7px; }.conversation-action-buttons { justify-content:flex-end; }.conversation-action-menu button { border:1px solid var(--ui-line); border-radius:7px; background:var(--ui-surface); color:var(--ui-text-secondary); padding:7px 9px; font-size:11px; font-weight:800; cursor:pointer; }.conversation-action-options button { flex:1; }.conversation-action-menu button:hover { background:var(--ui-surface-soft); }.conversation-action-menu button.primary { border-color:var(--ui-accent); background:var(--ui-accent); color:#fff; }.conversation-action-menu button.danger { border-color:#efcaca; background:#fff6f6; color:#b54747; }.conversation-action-menu button:disabled { cursor:wait; opacity:.6; }
-.history-pagination{display:grid;flex:0 0 auto;gap:7px;border:1px solid var(--ui-line);border-radius:11px;background:var(--ui-surface-soft);padding:8px}.history-page-meta,.history-page-actions{display:flex;align-items:center;justify-content:space-between;gap:6px}.history-page-meta>span{color:var(--ui-text-muted);font-size:9px;font-weight:850}.history-page-meta label{display:flex;align-items:center;gap:5px;color:var(--ui-text-muted);font-size:9px;font-weight:800}.history-page-meta select{height:25px;border:1px solid var(--ui-line);border-radius:7px;background:var(--ui-surface);color:var(--ui-text-secondary);padding:0 5px;font:inherit;outline:0}.history-page-meta select:focus,.history-page-jump input:focus{border-color:var(--ui-accent);box-shadow:0 0 0 3px var(--ui-focus)}.history-page-stepper{display:grid;flex:0 0 auto;grid-template-columns:26px 36px 26px;gap:3px}.history-page-stepper button,.history-page-jump button{display:grid;height:28px;place-items:center;border:1px solid var(--ui-line);border-radius:7px;background:var(--ui-surface);color:var(--ui-accent-ink);font-weight:850;line-height:1;cursor:pointer}.history-page-stepper button{width:26px;font-size:17px}.history-page-stepper strong{display:grid;height:28px;place-items:center;border:1px solid var(--ui-line);border-radius:7px;background:var(--ui-surface);color:var(--ui-text-secondary);font-size:9px;text-align:center}.history-page-stepper button:hover:not(:disabled),.history-page-jump button:hover:not(:disabled){border-color:var(--ui-accent);background:var(--ui-surface-active)}.history-page-stepper button:focus-visible,.history-page-jump button:focus-visible{outline:3px solid var(--ui-focus);outline-offset:1px}.history-page-stepper button:disabled,.history-page-jump button:disabled{cursor:not-allowed;opacity:.35}.history-page-jump{display:flex;min-width:0;align-items:center;justify-content:flex-end;gap:3px;color:var(--ui-text-muted);font-size:9px;font-weight:800}.history-page-jump input{width:30px;height:28px;box-sizing:border-box;border:1px solid var(--ui-line);border-radius:7px;background:var(--ui-surface);color:var(--ui-text-secondary);padding:0 2px;font:850 9px/1 var(--ui-font-body);text-align:center;outline:0;-moz-appearance:textfield}.history-page-jump input::-webkit-inner-spin-button,.history-page-jump input::-webkit-outer-spin-button{margin:0;-webkit-appearance:none}.history-page-jump button{width:30px;padding:0;font-size:9px}.privacy-card { flex:0 0 auto;border:1px solid var(--ui-line); border-radius:10px; background:var(--ui-surface-soft); padding:8px 9px; }.privacy-card strong,.eyebrow { color:var(--ui-accent-ink); font-size:9px; font-weight:900; letter-spacing:.08em; }.privacy-card p { margin:3px 0 0; color:var(--ui-text-muted); font-size:9px; line-height:1.45; }
+.history-pagination{display:flex;min-height:42px;flex:0 0 auto;align-items:center;justify-content:space-between;gap:8px;margin-top:10px;border-top:1px solid var(--ui-line);border-bottom:1px solid var(--ui-line);padding:5px 3px 5px 10px}.history-page-range{color:var(--ui-text-muted);font-size:10px;font-weight:850}.history-page-actions{display:flex;align-items:center;gap:5px}.history-page-actions>span{min-width:36px;color:var(--ui-text-muted);font-size:9px;text-align:center}.history-page-actions button{display:grid;width:30px;height:30px;place-items:center;border:1px solid var(--ui-line);border-radius:8px;background:var(--ui-surface);color:var(--ui-accent-ink);font-size:17px;font-weight:850;line-height:1;cursor:pointer}.history-page-actions button:hover:not(:disabled){border-color:var(--ui-accent);background:var(--ui-surface-active)}.history-page-actions button:focus-visible{outline:3px solid var(--ui-focus);outline-offset:1px}.history-page-actions button:disabled{cursor:not-allowed;opacity:.35}.privacy-note{display:flex;min-height:44px;flex:0 0 auto;align-items:center;gap:7px;padding:8px 7px 0;color:var(--ui-text-muted)}.privacy-note>span{display:grid;width:20px;height:20px;flex:0 0 auto;place-items:center;border-radius:6px;background:var(--ui-surface-active);color:var(--ui-accent-ink);font-size:9px;font-weight:850}.privacy-note p{margin:0;font-size:9px;line-height:1.45}.eyebrow { color:var(--ui-accent-ink); font-size:9px; font-weight:900; letter-spacing:.08em; }
 .career-chat-panel { display:flex; height:100%; min-height:0; flex-direction:column; overflow:hidden; }.chat-header { display:flex; min-height:68px; align-items:center; border-bottom:1px solid #e3ebf5; padding:10px 14px 10px 20px; background:#fbfdff; }.chat-header>div:first-child{min-width:0}.chat-header h2,.model-settings h3,.empty-state h2 { margin:3px 0 0; color:#10294c; }.active-context-line{display:flex;align-items:center;gap:7px;margin:5px 0 0;color:#6d7f98;font-size:11px;font-weight:750}.active-context-line span{max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.active-context-line i{color:#0a67db;font-style:normal}.eyebrow { margin:0; }
 .chat-material-actions{display:flex;flex:none;align-items:center;gap:7px}.chat-material-button{position:relative;display:inline-flex;min-height:38px;align-items:center;justify-content:center;gap:7px;border:1px solid var(--ui-line-strong,#bfd2ea);border-radius:9px;background:var(--ui-surface,#fff);color:var(--ui-text-secondary,#526078);padding:8px 12px;font:800 12px/1 var(--ui-font-body,"Segoe UI",sans-serif);white-space:nowrap;cursor:pointer;transition:border-color .15s ease,background .15s ease,color .15s ease,box-shadow .15s ease}.chat-material-button svg{width:16px;height:16px;flex:none;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}.chat-material-button:hover:not(:disabled),.chat-material-button:focus-visible{border-color:var(--ui-accent,#0869d8);background:var(--ui-surface-active,#eaf3ff);color:var(--ui-accent-ink,#004aa8);box-shadow:0 0 0 3px var(--ui-focus,rgba(8,105,216,.14));outline:0}.chat-material-button.primary{border-color:var(--ui-accent,#0869d8);background:var(--ui-accent,#0869d8);color:#fff;padding-right:14px;padding-left:14px}.chat-material-button.primary:hover:not(:disabled),.chat-material-button.primary:focus-visible{background:var(--ui-accent-strong,#0056bd);color:#fff}.chat-material-button:disabled{cursor:wait;opacity:.58}.material-state-dot{width:6px;height:6px;flex:none;border-radius:50%;background:var(--ui-success,#21855b);box-shadow:0 0 0 2px var(--ui-success-soft,#e8f7f0)}
 .quiet-button,.chip-button { border:1px solid #dfe8d0; border-radius:10px; background:#f8fbf1; color:#61764b; padding:8px 11px; font-size:12px; font-weight:800; }.quiet-button.danger { border-color:#f0d5d5; background:#fff8f8; color:#ad5a5a; }
