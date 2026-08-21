@@ -12,5 +12,5 @@
 8. **技能库**：`find-skills`、`ai-image-generation`、`og-image-design`、`grill-me`、`github-project-blog` 已作为 `deploy/skill-seeds` 种子；持久卷中的已编辑 Skill 不会被重新部署覆盖。
 9. **调度边界**：周五 08:00 生产、09:00 建微信草稿；Scheduler 与人工流水线共享文件锁，生产只能单实例运行。当前本地与生产均保持 `VIDEO_SUBMIT_ENABLED=false`、`AUDIO_ENABLED=false`，仅运行文章、图片、排版和图文草稿链路。
 10. **上线修复**：`eba2f08` 为生产 Nginx 增加静态 `root /usr/share/nginx/html` 与 `index index.html`；服务器已通过标准 Git 拉取、重建 Web/Caddy，`career-web` 健康检查恢复正常。
-11. **当前生产版本**：2026-08-22 已部署提交 `6f8e20f`，PostgreSQL 迁移至 `20260821_16`；求职资料工作区、BOSS 职位库导入、简历助手、评测中心、主题系统、Skill Agent 与音视频关闭策略均已进入生产。求职助手历史对话已改为 72px 紧凑列表，并随视口高度展示 5/7/9 条。公网健康接口返回 200，API/Web/PostgreSQL/Scheduler 均正常。
+11. **当前生产版本**：2026-08-22 已部署提交 `bf30b3c`，PostgreSQL 迁移至 `20260821_16`；求职资料工作区、BOSS 职位库导入、简历助手、评测中心、主题系统、Skill Agent 与音视频关闭策略均已进入生产。求职助手历史对话使用 72px 紧凑列表和 Element Plus 分页，可选择每页 5/7/10/15 条并记住偏好。公网健康接口返回 200，API/Web/PostgreSQL/Scheduler 均正常。
 12. **当前边界**：登录页支持邮箱验证码、邮箱密码、显式注册和找回密码；生产保持 `PLATFORM_AUTH_REQUIRED=true`、`PLATFORM_CLOSED_OPERATOR_MODE=true`、`PLATFORM_PUBLIC_REGISTRATION_ENABLED=true`、`PLATFORM_CLI_BOOTSTRAP_ONLY=true` 与 `CAREER_REDACTION_ENABLED=true`。求职助手模型选择器只展示真实可用模型；前端仅维护电脑端与手机端。
