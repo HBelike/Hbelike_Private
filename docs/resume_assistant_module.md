@@ -1,9 +1,9 @@
 # 简历助手模块
 
-> 状态：本地开发已完成第一版，尚未投产  
+> 状态：第一版已于 2026-08-22 投产  
 > 路由：`/resume-assistant`  
 > 导航位置：主侧边栏“求职助手”下方，与其同层级  
-> 最后更新：2026-08-17
+> 最后更新：2026-08-22
 
 ## 1. 设计目标
 
@@ -68,6 +68,8 @@ POST /api/career/resume-optimizations/generate
   → ResumeOptimizationService.generate()
   → OpenAICompatibleChatClient.complete()
   → 清理 Markdown 围栏
+  → 校验生成结果是否保留原文事实锚点与文本骨架
+  → 首轮偏离时使用严格 Prompt 重试一次；再次偏离则拒绝返回
   → 返回完整优化简历（不落库）
 ```
 
@@ -152,11 +154,12 @@ data/resume-assistant/{organization_id}/{record_id}/
 
 ## 9. 验证结果
 
-- Alembic 已升级到 `20260817_10 (head)`。
-- 服务测试覆盖：分析不落库、生成不落库、显式保存落库、默认模型精确选择。
+- 生产 Alembic 已升级到 `20260821_16 (head)`。
+- 服务测试覆盖：分析不落库、生成不落库、显式保存落库、默认模型精确选择、偏离原文时单次重试、连续偏离时拒绝返回。
 - 简历助手仓储与服务已接入 `CareerAssistantServices`；`/api/career/model-profiles` 经后端直连和 Vite 代理访问均返回可用模型列表。
 - Python `compileall` 通过。
 - Vue 生产构建通过。
+- 2026-08-22 全量后端回归为 `116 passed`，生产 API 与 Web 健康检查通过。
 
 ## 10. 当前边界与后续
 
@@ -164,4 +167,4 @@ data/resume-assistant/{organization_id}/{record_id}/
 - 原始 PDF 只保证文本预览，不承诺像素级版式还原。
 - 当前优先完成 PC 端；手机端适配放到后续阶段，不设计 iPad 专属断点。
 - 不实现草稿保存、历史更新、删除、版本树和协作审核。
-- 本地开发完成前不投产。
+- 当前生产启用登录、闭合运营模式与求职资料脱敏；附件仍只进入 API tmpfs。
