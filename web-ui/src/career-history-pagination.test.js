@@ -2,11 +2,13 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   DEFAULT_HISTORY_PAGE_SIZE,
+  HISTORY_PAGE_SIZE_OPTIONS,
   historyPageRange,
   historyPageSizeForViewportHeight,
   normalizeHistoryPage,
   normalizeHistoryPageTarget,
-  pageRequestUrl
+  pageRequestUrl,
+  resolveHistoryPageSize
 } from './career-history-pagination.js'
 
 test('会话列表默认使用标准视口的七条容量', () => {
@@ -14,12 +16,19 @@ test('会话列表默认使用标准视口的七条容量', () => {
   assert.equal(pageRequestUrl(1, DEFAULT_HISTORY_PAGE_SIZE), '/api/career/conversations?page=1&page_size=7')
 })
 
-test('会话列表根据视口高度选择五、七、九条容量', () => {
+test('会话列表根据视口高度选择五、七、十条容量', () => {
   assert.equal(historyPageSizeForViewportHeight(720), 5)
   assert.equal(historyPageSizeForViewportHeight(900), 5)
   assert.equal(historyPageSizeForViewportHeight(1080), 7)
-  assert.equal(historyPageSizeForViewportHeight(1440), 9)
+  assert.equal(historyPageSizeForViewportHeight(1440), 10)
   assert.equal(historyPageSizeForViewportHeight('invalid'), 7)
+})
+
+test('用户分页偏好仅接受分页器提供的容量并优先于视口默认值', () => {
+  assert.deepEqual(HISTORY_PAGE_SIZE_OPTIONS, [5, 7, 10, 15])
+  assert.equal(resolveHistoryPageSize('15', 720), 15)
+  assert.equal(resolveHistoryPageSize('9', 1440), 10)
+  assert.equal(resolveHistoryPageSize('', 900), 5)
 })
 
 test('分页响应修正非法页码并计算区间', () => {

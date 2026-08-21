@@ -1,5 +1,9 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import ElConfigProvider from 'element-plus/es/components/config-provider/index.mjs'
+import ElPagination from 'element-plus/es/components/pagination/index.mjs'
+import zhCn from 'element-plus/es/locale/lang/zh-cn'
+import 'element-plus/es/components/pagination/style/css'
 import CareerContextRail from './CareerContextRail.vue'
 import CareerContextSetupDialog from './CareerContextSetupDialog.vue'
 import CareerJobSearchDialog from './CareerJobSearchDialog.vue'
@@ -8,11 +12,11 @@ import { toTargetRolePayload } from '../job-library-target-role.js'
 import { isAssessmentPending } from '../career-assessment-view.js'
 import {
   DEFAULT_HISTORY_PAGE_SIZE,
-  historyPageRange,
-  historyPageSizeForViewportHeight,
+  HISTORY_PAGE_SIZE_OPTIONS,
   normalizeHistoryPage,
   normalizeHistoryPageTarget,
-  pageRequestUrl
+  pageRequestUrl,
+  resolveHistoryPageSize
 } from '../career-history-pagination.js'
 
 const conversations = ref([])
@@ -80,20 +84,16 @@ const resizingContextRail = ref(false)
 const viewportWidth = ref(typeof window === 'undefined' ? 1600 : window.innerWidth)
 
 const HISTORY_COLLAPSED_STORAGE_KEY = 'career-assistant-history-collapsed'
+const HISTORY_PAGE_SIZE_STORAGE_KEY = 'career-assistant-history-page-size'
 const CONTEXT_RAIL_WIDTH_STORAGE_KEY = 'career-assistant-context-rail-width'
 const CONTEXT_RAIL_MIN_WIDTH = 360
 const CONTEXT_RAIL_MAX_WIDTH = 760
 const CONTEXT_RAIL_DEFAULT_WIDTH = 620
 const historyTotalPages = computed(() => Math.max(1, Math.ceil(historyTotal.value / historyPageSize.value)))
-const historyRange = computed(() => historyPageRange({
-  page: historyPage.value,
-  pageSize: historyPageSize.value,
-  total: historyTotal.value
-}))
 
 const visibleContextRailWidth = computed(() => {
   if (viewportWidth.value <= 640) return viewportWidth.value
-  const historyWidth = historyCollapsed.value ? 48 : (viewportWidth.value <= 1500 ? 220 : 252)
+  const historyWidth = historyCollapsed.value ? 48 : (viewportWidth.value <= 1500 ? 280 : 300)
   const minimumChatWidth = viewportWidth.value <= 1500 ? 480 : 560
   const availableWidth = viewportWidth.value - historyWidth - minimumChatWidth - 50
   return Math.min(contextRailWidth.value, Math.max(CONTEXT_RAIL_MIN_WIDTH, availableWidth))
@@ -137,7 +137,6 @@ let interviewMentionDebounceTimer = null
 let interviewMentionRequestId = 0
 let skillMentionDebounceTimer = null
 let skillMentionRequestId = 0
-let historyViewportResizeTimer = null
 
 function dismissError() {
   errorMessage.value = ''
@@ -161,7 +160,6 @@ onBeforeUnmount(() => {
   if (errorToastTimer) clearTimeout(errorToastTimer)
   if (interviewMentionDebounceTimer) clearTimeout(interviewMentionDebounceTimer)
   if (skillMentionDebounceTimer) clearTimeout(skillMentionDebounceTimer)
-  if (historyViewportResizeTimer) clearTimeout(historyViewportResizeTimer)
   document.removeEventListener('pointerdown', handleConversationActionPointerDown)
   window.removeEventListener('resize', updateCareerViewportWidth)
   stopContextRailResize()
@@ -218,6 +216,16 @@ function goToHistoryPage(page) {
   void loadConversationPage(target)
 }
 
+function changeHistoryPageSize(pageSize) {
+  const nextPageSize = resolveHistoryPageSize(pageSize, window.innerHeight)
+  if (nextPageSize === historyPageSize.value || historyLoading.value) return
+  const firstVisibleIndex = (historyPage.value - 1) * historyPageSize.value
+  historyPageSize.value = nextPageSize
+  historyPage.value = Math.floor(firstVisibleIndex / nextPageSize) + 1
+  window.localStorage.setItem(HISTORY_PAGE_SIZE_STORAGE_KEY, String(nextPageSize))
+  void loadConversationPage(historyPage.value)
+}
+
 function clampContextRailWidth(width) {
   return Math.min(CONTEXT_RAIL_MAX_WIDTH, Math.max(CONTEXT_RAIL_MIN_WIDTH, Math.round(width)))
 }
@@ -270,16 +278,6 @@ function resetContextRailWidth() {
 
 function updateCareerViewportWidth() {
   viewportWidth.value = window.innerWidth
-  if (historyViewportResizeTimer) clearTimeout(historyViewportResizeTimer)
-  historyViewportResizeTimer = window.setTimeout(() => {
-    historyViewportResizeTimer = null
-    const nextPageSize = historyPageSizeForViewportHeight(window.innerHeight)
-    if (nextPageSize === historyPageSize.value) return
-    const firstVisibleIndex = (historyPage.value - 1) * historyPageSize.value
-    const targetPage = Math.floor(firstVisibleIndex / nextPageSize) + 1
-    historyPageSize.value = nextPageSize
-    void loadConversationPage(targetPage)
-  }, 160)
 }
 
 function handleConversationActionPointerDown(event) {
@@ -1717,7 +1715,10 @@ async function testModelConnection() {
 
 onMounted(() => {
   historyCollapsed.value = window.localStorage.getItem(HISTORY_COLLAPSED_STORAGE_KEY) === '1'
-  historyPageSize.value = historyPageSizeForViewportHeight(window.innerHeight)
+  historyPageSize.value = resolveHistoryPageSize(
+    window.localStorage.getItem(HISTORY_PAGE_SIZE_STORAGE_KEY),
+    window.innerHeight
+  )
   const storedContextRailWidth = Number(window.localStorage.getItem(CONTEXT_RAIL_WIDTH_STORAGE_KEY))
   if (Number.isFinite(storedContextRailWidth) && storedContextRailWidth > 0) {
     contextRailWidth.value = clampContextRailWidth(storedContextRailWidth)
@@ -1817,13 +1818,23 @@ onMounted(() => {
           </div>
         </article>
         </div>
-        <nav v-if="historyTotal" class="history-pagination" aria-label="会话历史分页">
-          <span class="history-page-range">{{ historyRange.start }}–{{ historyRange.end }} / {{ historyTotal }}</span>
-          <div class="history-page-actions">
-            <span aria-live="polite" :aria-label="`第 ${historyPage} 页，共 ${historyTotalPages} 页`">{{ historyPage }} / {{ historyTotalPages }}</span>
-            <button type="button" :disabled="historyLoading || historyPage <= 1" aria-label="上一页" title="上一页" @click="goToHistoryPage(historyPage - 1)">‹</button>
-            <button type="button" :disabled="historyLoading || historyPage >= historyTotalPages" aria-label="下一页" title="下一页" @click="goToHistoryPage(historyPage + 1)">›</button>
-          </div>
+        <nav v-if="historyTotal" class="history-pagination-shell" aria-label="会话历史分页">
+          <ElConfigProvider :locale="zhCn">
+            <ElPagination
+              class="history-pagination"
+              background
+              small
+              :current-page="historyPage"
+              :page-size="historyPageSize"
+              :page-sizes="HISTORY_PAGE_SIZE_OPTIONS"
+              :pager-count="5"
+              :total="historyTotal"
+              :disabled="historyLoading"
+              layout="total, sizes, prev, pager, next"
+              @current-change="goToHistoryPage"
+              @size-change="changeHistoryPageSize"
+            />
+          </ElConfigProvider>
         </nav>
         <div class="privacy-note"><span aria-hidden="true">盾</span><p>简历原文件不入库，仅保留配置允许的历史文本</p></div>
       </template>
@@ -2109,8 +2120,8 @@ onMounted(() => {
 </template>
 
 <style scoped>
-.career-workspace { display:grid; height:100%; min-height:0; flex:1; grid-template-columns:252px minmax(0,1fr); gap:14px; overflow:hidden; }
-.career-workspace.has-context-rail { grid-template-columns:252px minmax(560px,1fr) var(--context-rail-width,620px); }
+.career-workspace { display:grid; height:100%; min-height:0; flex:1; grid-template-columns:300px minmax(0,1fr); gap:14px; overflow:hidden; }
+.career-workspace.has-context-rail { grid-template-columns:300px minmax(560px,1fr) var(--context-rail-width,620px); }
 .career-workspace.history-collapsed { grid-template-columns:52px minmax(0,1fr); }
 .career-workspace.has-context-rail.history-collapsed { grid-template-columns:52px minmax(560px,1fr) var(--context-rail-width,620px); }
 .career-history-panel,.career-chat-panel { border:1px solid #e0e6d8; border-radius:20px; background:#fff; box-shadow:none; }
@@ -2127,7 +2138,7 @@ onMounted(() => {
 .conversation-menu-button { align-self:center; border:0; border-radius:7px; background:transparent; color:var(--ui-text-muted); padding:5px 7px; font-size:15px; font-weight:900; line-height:1; opacity:0; cursor:pointer; transition:opacity .14s ease,background .14s ease,color .14s ease; }.conversation-item:hover .conversation-menu-button,.conversation-item.active .conversation-menu-button,.conversation-menu-button:focus-visible,.conversation-menu-button[aria-expanded="true"]{opacity:1}.conversation-menu-button:hover,.conversation-menu-button[aria-expanded="true"] { background:var(--ui-surface); color:var(--ui-accent-ink); }.conversation-menu-button:focus-visible{outline:3px solid var(--ui-focus);outline-offset:1px}.conversation-menu-button:disabled { cursor:not-allowed; opacity:.45; }
 .conversation-action-menu { display:grid; grid-column:1 / -1; gap:9px; border-top:1px solid var(--ui-line); background:var(--ui-surface); padding:10px; }.conversation-action-menu label { display:grid; gap:5px; color:var(--ui-text-secondary); font-size:11px; font-weight:800; }.conversation-action-menu input { width:100%; box-sizing:border-box; border:1px solid var(--ui-line); border-radius:8px; background:var(--ui-surface); color:var(--ui-text); padding:8px 9px; font:inherit; }.conversation-action-menu input:focus { border-color:var(--ui-accent); box-shadow:0 0 0 3px var(--ui-focus); outline:0; }.conversation-action-menu p { display:grid; gap:3px; margin:0; }.conversation-action-menu p strong { color:var(--ui-text); font-size:12px; }.conversation-action-menu p span { color:var(--ui-text-muted); font-size:11px; line-height:1.5; }
 .conversation-action-options,.conversation-action-buttons { display:flex; gap:7px; }.conversation-action-buttons { justify-content:flex-end; }.conversation-action-menu button { border:1px solid var(--ui-line); border-radius:7px; background:var(--ui-surface); color:var(--ui-text-secondary); padding:7px 9px; font-size:11px; font-weight:800; cursor:pointer; }.conversation-action-options button { flex:1; }.conversation-action-menu button:hover { background:var(--ui-surface-soft); }.conversation-action-menu button.primary { border-color:var(--ui-accent); background:var(--ui-accent); color:#fff; }.conversation-action-menu button.danger { border-color:#efcaca; background:#fff6f6; color:#b54747; }.conversation-action-menu button:disabled { cursor:wait; opacity:.6; }
-.history-pagination{display:flex;min-height:42px;flex:0 0 auto;align-items:center;justify-content:space-between;gap:8px;margin-top:10px;border-top:1px solid var(--ui-line);border-bottom:1px solid var(--ui-line);padding:5px 3px 5px 10px}.history-page-range{color:var(--ui-text-muted);font-size:10px;font-weight:850}.history-page-actions{display:flex;align-items:center;gap:5px}.history-page-actions>span{min-width:36px;color:var(--ui-text-muted);font-size:9px;text-align:center}.history-page-actions button{display:grid;width:30px;height:30px;place-items:center;border:1px solid var(--ui-line);border-radius:8px;background:var(--ui-surface);color:var(--ui-accent-ink);font-size:17px;font-weight:850;line-height:1;cursor:pointer}.history-page-actions button:hover:not(:disabled){border-color:var(--ui-accent);background:var(--ui-surface-active)}.history-page-actions button:focus-visible{outline:3px solid var(--ui-focus);outline-offset:1px}.history-page-actions button:disabled{cursor:not-allowed;opacity:.35}.privacy-note{display:flex;min-height:44px;flex:0 0 auto;align-items:center;gap:7px;padding:8px 7px 0;color:var(--ui-text-muted)}.privacy-note>span{display:grid;width:20px;height:20px;flex:0 0 auto;place-items:center;border-radius:6px;background:var(--ui-surface-active);color:var(--ui-accent-ink);font-size:9px;font-weight:850}.privacy-note p{margin:0;font-size:9px;line-height:1.45}.eyebrow { color:var(--ui-accent-ink); font-size:9px; font-weight:900; letter-spacing:.08em; }
+.history-pagination-shell{min-height:76px;flex:0 0 auto;margin-top:10px;border-top:1px solid var(--ui-line);border-bottom:1px solid var(--ui-line);padding:8px 4px}.history-pagination-shell :deep(.el-pagination){display:grid;width:100%;box-sizing:border-box;grid-template-columns:28px minmax(0,1fr) 28px;grid-template-rows:28px 28px;align-items:center;gap:6px 4px;--el-color-primary:var(--ui-accent);--el-pagination-button-width:28px;--el-pagination-button-height:28px;--el-pagination-button-bg-color:var(--ui-surface-soft);--el-pagination-hover-color:var(--ui-accent-ink);font-family:inherit}.history-pagination-shell :deep(.el-pagination__total){grid-column:1 / 3;grid-row:1;justify-self:start;margin:0;color:var(--ui-text-muted);font-size:11px;font-weight:750}.history-pagination-shell :deep(.el-pagination__sizes){grid-column:2 / 4;grid-row:1;justify-self:end;margin:0}.history-pagination-shell :deep(.el-pagination__sizes .el-select){width:94px}.history-pagination-shell :deep(.el-pagination__sizes .el-select__wrapper){min-height:28px;border-radius:6px;box-shadow:0 0 0 1px var(--ui-line) inset}.history-pagination-shell :deep(.btn-prev){grid-column:1;grid-row:2}.history-pagination-shell :deep(.el-pager){grid-column:2;grid-row:2;min-width:0;justify-self:center}.history-pagination-shell :deep(.btn-next){grid-column:3;grid-row:2}.history-pagination-shell :deep(.btn-prev),.history-pagination-shell :deep(.btn-next),.history-pagination-shell :deep(.el-pager li){border-radius:6px;font-weight:750}.history-pagination-shell :deep(.el-pager li.is-active){box-shadow:0 3px 8px rgba(8,103,217,.2)}.history-pagination-shell :deep(button:focus-visible),.history-pagination-shell :deep(.el-select__wrapper.is-focused){outline:3px solid var(--ui-focus);outline-offset:1px}.privacy-note{display:flex;min-height:44px;flex:0 0 auto;align-items:center;gap:7px;padding:8px 7px 0;color:var(--ui-text-muted)}.privacy-note>span{display:grid;width:20px;height:20px;flex:0 0 auto;place-items:center;border-radius:6px;background:var(--ui-surface-active);color:var(--ui-accent-ink);font-size:9px;font-weight:850}.privacy-note p{margin:0;font-size:9px;line-height:1.45}.eyebrow { color:var(--ui-accent-ink); font-size:9px; font-weight:900; letter-spacing:.08em; }
 .career-chat-panel { display:flex; height:100%; min-height:0; flex-direction:column; overflow:hidden; }.chat-header { display:flex; min-height:68px; align-items:center; border-bottom:1px solid #e3ebf5; padding:10px 14px 10px 20px; background:#fbfdff; }.chat-header>div:first-child{min-width:0}.chat-header h2,.model-settings h3,.empty-state h2 { margin:3px 0 0; color:#10294c; }.active-context-line{display:flex;align-items:center;gap:7px;margin:5px 0 0;color:#6d7f98;font-size:11px;font-weight:750}.active-context-line span{max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.active-context-line i{color:#0a67db;font-style:normal}.eyebrow { margin:0; }
 .chat-material-actions{display:flex;flex:none;align-items:center;gap:7px}.chat-material-button{position:relative;display:inline-flex;min-height:38px;align-items:center;justify-content:center;gap:7px;border:1px solid var(--ui-line-strong,#bfd2ea);border-radius:9px;background:var(--ui-surface,#fff);color:var(--ui-text-secondary,#526078);padding:8px 12px;font:800 12px/1 var(--ui-font-body,"Segoe UI",sans-serif);white-space:nowrap;cursor:pointer;transition:border-color .15s ease,background .15s ease,color .15s ease,box-shadow .15s ease}.chat-material-button svg{width:16px;height:16px;flex:none;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}.chat-material-button:hover:not(:disabled),.chat-material-button:focus-visible{border-color:var(--ui-accent,#0869d8);background:var(--ui-surface-active,#eaf3ff);color:var(--ui-accent-ink,#004aa8);box-shadow:0 0 0 3px var(--ui-focus,rgba(8,105,216,.14));outline:0}.chat-material-button.primary{border-color:var(--ui-accent,#0869d8);background:var(--ui-accent,#0869d8);color:#fff;padding-right:14px;padding-left:14px}.chat-material-button.primary:hover:not(:disabled),.chat-material-button.primary:focus-visible{background:var(--ui-accent-strong,#0056bd);color:#fff}.chat-material-button:disabled{cursor:wait;opacity:.58}.material-state-dot{width:6px;height:6px;flex:none;border-radius:50%;background:var(--ui-success,#21855b);box-shadow:0 0 0 2px var(--ui-success-soft,#e8f7f0)}
 .quiet-button,.chip-button { border:1px solid #dfe8d0; border-radius:10px; background:#f8fbf1; color:#61764b; padding:8px 11px; font-size:12px; font-weight:800; }.quiet-button.danger { border-color:#f0d5d5; background:#fff8f8; color:#ad5a5a; }
@@ -2176,7 +2187,7 @@ onMounted(() => {
 .free-provider-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; }.free-provider-card { display:flex; min-width:0; flex-direction:column; border:1px solid #dfe8d4; border-radius:18px; background:#fff; padding:16px; box-shadow:0 8px 24px rgba(65,82,50,.05); }.free-provider-card > header { display:grid; grid-template-columns:44px minmax(0,1fr) auto; align-items:center; gap:11px; }.free-provider-card > header strong,.free-provider-card > header small { display:block; }.free-provider-card > header strong { color:#31402e; font-size:14px; }.free-provider-card > header small { margin-top:3px; color:#839078; font-size:11px; }.catalog-readiness { border-radius:999px; background:#f4eee1; color:#9a7327; padding:5px 7px; font-size:10px; font-weight:850; }.catalog-readiness.ready { background:#eaf4d8; color:#5f8228; }.free-provider-card > p { min-height:44px; margin:13px 0 9px; color:#727f6c; font-size:12px; line-height:1.65; }.catalog-access-summary { margin-bottom:12px; border-left:3px solid #d9b86c; border-radius:0 9px 9px 0; background:#fff9eb; color:#866922; padding:8px 10px; font-size:11px; font-weight:800; line-height:1.5; }.catalog-access-summary.ready { border-left-color:#8dac4b; background:#f0f7e5; color:#5d7d28; }.free-model-template-list { display:grid; gap:8px; }.free-model-template { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:4px 10px; border:1px solid #e7ecdf; border-radius:12px; background:#fafcf7; padding:10px; }.free-model-template > div { min-width:0; }.free-model-template strong,.free-model-template code { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.free-model-template strong { color:#445340; font-size:12px; }.free-model-template code { margin-top:3px; color:#84917d; font-size:10px; }.free-model-template button { grid-row:1 / 3; grid-column:2; align-self:center; border:1px solid #b9cf8e; border-radius:9px; background:#f0f7e3; color:#5d7d28; padding:7px 9px; font-size:11px; font-weight:850; }.free-model-template > small { color:#96a08f; font-size:10px; }.free-provider-card > footer { display:flex; flex-wrap:wrap; gap:8px 14px; margin-top:auto; padding-top:14px; }.free-provider-card > footer a { color:#557825; font-size:11px; font-weight:850; text-decoration:none; }.free-provider-card > footer a:hover { text-decoration:underline; }
 .catalog-load-error { display:flex; align-items:center; justify-content:space-between; gap:14px; flex-wrap:wrap; }.catalog-load-error > div { min-width:0; flex:1 1 420px; }.catalog-load-error span { display:block; }.catalog-load-error button { flex:0 0 auto; background:#fff; }
 /* 只维护电脑与手机两档；手机端保留一个页面级滚动面。 */
-@media (max-width:1500px) and (min-width:641px){.career-workspace{grid-template-columns:220px minmax(0,1fr);gap:10px}.career-workspace.has-context-rail{grid-template-columns:220px minmax(480px,1fr) min(var(--context-rail-width,620px),calc(100vw - 750px))}.career-workspace.history-collapsed{grid-template-columns:48px minmax(0,1fr)}.career-workspace.has-context-rail.history-collapsed{grid-template-columns:48px minmax(480px,1fr) min(var(--context-rail-width,620px),calc(100vw - 578px))}.career-history-panel{padding:11px}.career-history-panel.collapsed{padding:8px 5px}.chat-header{padding-right:14px;padding-left:14px}.message-list{padding-right:14px;padding-left:14px}}
+@media (max-width:1500px) and (min-width:641px){.career-workspace{grid-template-columns:280px minmax(0,1fr);gap:10px}.career-workspace.has-context-rail{grid-template-columns:280px minmax(480px,1fr) min(var(--context-rail-width,620px),calc(100vw - 810px))}.career-workspace.history-collapsed{grid-template-columns:48px minmax(0,1fr)}.career-workspace.has-context-rail.history-collapsed{grid-template-columns:48px minmax(480px,1fr) min(var(--context-rail-width,620px),calc(100vw - 578px))}.career-history-panel{padding:11px}.career-history-panel.collapsed{padding:8px 5px}.chat-header{padding-right:14px;padding-left:14px}.message-list{padding-right:14px;padding-left:14px}}
 @media (max-width:640px) { .career-workspace,.career-workspace.history-collapsed,.career-workspace.has-context-rail.history-collapsed { height:auto; min-height:calc(100dvh - 92px); grid-template-columns:1fr; grid-template-rows:auto auto auto; align-content:start; gap:10px; overflow:visible; }.career-chat-panel { height:auto; min-height:520px; overflow:visible; }.chat-header { min-height:60px; align-items:flex-start; flex-direction:column; padding:12px 14px; }.chat-material-actions{width:100%}.chat-material-button{min-width:0;flex:1}.message-list { min-height:270px; flex:none; overflow:visible; padding:14px; }.composer { position:sticky; z-index:5; bottom:0; padding:10px 12px max(12px, env(safe-area-inset-bottom)); box-shadow:0 -10px 22px rgba(47,62,37,.08); }.composer-toolbar,.composer-footer { align-items:flex-start; flex-direction:column; }.session-tools { margin-left:0; }.career-history-panel { height:auto; max-height:none; overflow:visible; }.career-history-panel.collapsed{height:auto;flex-direction:row;justify-content:flex-start;padding:8px}.conversation-list { grid-template-columns:1fr; max-height:200px; flex:none; overflow:auto; }.model-settings,.model-form,.provider-picker-grid,.provider-picker-grid-expanded { grid-template-columns:1fr; }.message,.agent-message { max-width:94%; }.model-select { max-width:100%; }.send-button { align-self:stretch; min-height:44px; }.career-error-toast { width:calc(100vw - 28px); gap:12px; padding:17px; }.career-error-toast strong { font-size:16px; }.career-error-toast p { font-size:15px; }.model-dialog-backdrop { align-items:end; padding:0; }.model-dialog { max-height:90dvh; border-radius:22px 22px 0 0; }.model-dialog-header,.model-dialog-body,.model-dialog-footer { padding-right:18px; padding-left:18px; }.connection-toolbar,.connection-card { align-items:flex-start; }.connection-toolbar { flex-direction:column; }.connection-toolbar-actions { width:100%; justify-content:stretch; }.connection-toolbar-actions button { flex:1; }.connection-card { grid-template-columns:18px 38px minmax(0,1fr); }.connection-meta { grid-column:3; justify-items:start; }.connection-form-grid,.capability-fieldset { grid-template-columns:1fr; }.dialog-primary-button,.dialog-secondary-button { min-height:44px; }.free-directory-intro { align-items:flex-start; flex-direction:column; gap:10px; }.free-provider-grid { grid-template-columns:1fr; }.free-provider-card { padding:14px; }.free-provider-card > header { grid-template-columns:40px minmax(0,1fr); }.free-provider-card > header .catalog-readiness { grid-column:2; justify-self:start; }.free-provider-card > p { min-height:0; }.free-model-template { grid-template-columns:1fr; }.free-model-template button { grid-row:auto; grid-column:auto; min-height:42px; }.free-provider-card > footer a { min-height:36px; display:inline-flex; align-items:center; } }
 
 @media (max-width:640px) {
