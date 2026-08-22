@@ -2,6 +2,11 @@
 import { computed, nextTick, onMounted, ref } from 'vue'
 import { JobLibraryBridgeError, jobLibraryBridge } from '../job-library-bridge.js'
 import {
+  greetingJobKey,
+  normalizeGreetingLimit,
+  toggleGreetingJob
+} from '../career-greeting-preview.js'
+import {
   DEFAULT_JOB_CITY,
   mergeJobCityCatalog,
   normalizeHotJobCities
@@ -23,10 +28,12 @@ function readStoredCity() {
 }
 
 const props = defineProps({
-  selectionMode: { type: Boolean, default: false }
+  selectionMode: { type: Boolean, default: false },
+  multiSelectionMode: { type: Boolean, default: false },
+  selectionLimit: { type: Number, default: 10 }
 })
 
-const emit = defineEmits(['selection-change'])
+const emit = defineEmits(['selection-change', 'selection-list-change'])
 
 const query = ref('')
 const submittedQuery = ref('')
@@ -41,6 +48,8 @@ const loadingMore = ref(false)
 const detailLoading = ref(false)
 const searchError = ref('')
 const detailError = ref('')
+const selectedJobs = ref([])
+const multiSelectionError = ref('')
 const bridgeStatus = ref('checking')
 const searchInput = ref(null)
 const selectedCity = ref(readStoredCity())
@@ -71,6 +80,8 @@ const detailFetchedAt = computed(() => {
   if (Number.isNaN(date.getTime())) return ''
   return new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(date)
 })
+const normalizedSelectionLimit = computed(() => normalizeGreetingLimit(props.selectionLimit))
+const selectedJobCount = computed(() => selectedJobs.value.length)
 
 function readableBridgeError(error, fallback) {
   if (error instanceof JobLibraryBridgeError) return error.message
@@ -95,6 +106,27 @@ function markBridgeAttention(error) {
 
 function publishSelection(job) {
   if (props.selectionMode) emit('selection-change', job)
+}
+
+function publishSelectionList() {
+  if (props.multiSelectionMode) emit('selection-list-change', [...selectedJobs.value])
+}
+
+function isJobInSelection(job) {
+  const key = greetingJobKey(job)
+  return selectedJobs.value.some((item) => greetingJobKey(item) === key)
+}
+
+function toggleSelectedJob() {
+  if (!props.multiSelectionMode || !selectedJob.value?.description) return
+  const result = toggleGreetingJob(
+    selectedJobs.value,
+    selectedJob.value,
+    normalizedSelectionLimit.value
+  )
+  selectedJobs.value = result.jobs
+  multiSelectionError.value = result.error
+  publishSelectionList()
 }
 
 function resetJobResults() {
@@ -203,6 +235,12 @@ async function selectJob(job) {
     if (sequence !== detailSequence) return
     selectedJob.value = detail
     jobs.value = jobs.value.map((item) => item.id === detail.id ? { ...item, ...detail } : item)
+    if (isJobInSelection(detail)) {
+      selectedJobs.value = selectedJobs.value.map((item) => (
+        greetingJobKey(item) === greetingJobKey(detail) ? detail : item
+      ))
+      publishSelectionList()
+    }
     bridgeStatus.value = 'ready'
     publishSelection(detail)
   } catch (error) {
@@ -249,16 +287,21 @@ onMounted(() => {
         <h2>查找真实岗位</h2>
         <p>选择工作城市并输入岗位名称，职位库会通过已登录浏览器读取当前在招信息。</p>
       </div>
-      <button
-        type="button"
-        class="connection-badge"
-        :class="`is-${bridgeStatus}`"
-        :disabled="bridgeStatus === 'checking'"
-        @click="checkBridge"
-      >
-        <i aria-hidden="true"></i>
-        {{ bridgeStatusText }}
-      </button>
+      <div class="workspace-header-actions">
+        <span v-if="multiSelectionMode" class="selection-badge">
+          已选 <strong>{{ selectedJobCount }}</strong>/{{ normalizedSelectionLimit }}
+        </span>
+        <button
+          type="button"
+          class="connection-badge"
+          :class="`is-${bridgeStatus}`"
+          :disabled="bridgeStatus === 'checking'"
+          @click="checkBridge"
+        >
+          <i aria-hidden="true"></i>
+          {{ bridgeStatusText }}
+        </button>
+      </div>
     </header>
 
     <form class="search-rail" :class="{ searching }" @submit.prevent="submitSearch">
@@ -303,6 +346,10 @@ onMounted(() => {
       <button type="button" @click="checkBridge">重新检查</button>
     </section>
 
+    <p v-if="multiSelectionError" class="multi-selection-error" role="alert">
+      {{ multiSelectionError }}
+    </p>
+
     <div class="job-browser" :class="{ 'is-searching': searching }">
       <aside class="job-results" aria-label="岗位搜索结果">
         <header class="result-heading">
@@ -330,10 +377,11 @@ onMounted(() => {
             :key="job.id"
             type="button"
             class="job-card"
-            :class="{ active: selectedJobId === job.id }"
+            :class="{ active: selectedJobId === job.id, selected: isJobInSelection(job) }"
             @click="selectJob(job)"
           >
             <span class="card-track-node" aria-hidden="true"></span>
+            <span v-if="multiSelectionMode && isJobInSelection(job)" class="batch-selected-mark">已加入</span>
             <span class="job-card-topline">
               <strong>{{ job.title }}</strong>
               <em>{{ job.salary }}</em>
@@ -381,9 +429,22 @@ onMounted(() => {
               <span>{{ selectedJob.degree }}</span>
             </div>
           </div>
-          <div class="freshness">
-            <span><i aria-hidden="true"></i>详情已更新</span>
-            <small>{{ detailFetchedAt || '本次会话' }}</small>
+          <div class="detail-hero-actions">
+            <div class="freshness">
+              <span><i aria-hidden="true"></i>详情已更新</span>
+              <small>{{ detailFetchedAt || '本次会话' }}</small>
+            </div>
+            <button
+              v-if="multiSelectionMode"
+              type="button"
+              class="batch-toggle-button"
+              :class="{ selected: isJobInSelection(selectedJob) }"
+              :aria-pressed="isJobInSelection(selectedJob)"
+              :disabled="detailLoading || !selectedJob.description"
+              @click="toggleSelectedJob"
+            >
+              {{ isJobInSelection(selectedJob) ? '移出本批' : '加入本批' }}
+            </button>
           </div>
         </header>
 
@@ -471,6 +532,9 @@ onMounted(() => {
 .job-workspace-header { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 18px; }
 .workspace-intro h2 { margin: 0; color: var(--job-ink); font-family: var(--ui-font-display, "Segoe UI Variable Display", "PingFang SC", sans-serif); font-size: 20px; font-weight: 760; letter-spacing: -.025em; }
 .workspace-intro p { margin: 3px 0 0; color: var(--job-muted); font-size: 12px; }
+.workspace-header-actions { display: flex; align-items: center; gap: 9px; }
+.selection-badge { border: 1px solid var(--job-line); border-radius: 999px; background: var(--job-blue-soft); color: var(--job-blue-ink); padding: 6px 10px; font: 750 10px/1.2 var(--ui-font-utility, Consolas, monospace); }
+.selection-badge strong { font-size: 12px; }
 .connection-badge { display: inline-flex; align-items: center; gap: 7px; border: 1px solid color-mix(in srgb, var(--job-teal) 28%, transparent); border-radius: 999px; background: color-mix(in srgb, var(--job-teal) 8%, var(--job-paper)); color: #087d7d; padding: 6px 10px; cursor: pointer; font-family: var(--ui-font-utility, Consolas, monospace); font-size: 10px; font-weight: 700; }
 .connection-badge i,.recruiter-online i,.freshness i { width: 7px; height: 7px; flex: none; border-radius: 50%; background: var(--job-teal); box-shadow: 0 0 0 3px color-mix(in srgb, var(--job-teal) 14%, transparent); }
 .connection-badge.is-checking i { animation: status-pulse .8s ease-in-out infinite alternate; }
@@ -498,6 +562,7 @@ onMounted(() => {
 .job-alert p { margin: 3px 0 0; font-size: 11px; line-height: 1.55; }
 .job-alert .setup-path { color: #8b6b35; }
 .job-alert code { font-family: var(--ui-font-utility, Consolas, monospace); font-size: 10px; }
+.multi-selection-error { margin: -4px 0 0; border-left: 3px solid #c94955; border-radius: 0 8px 8px 0; background: #fff3f4; color: #a33b46; padding: 7px 10px; font-size: 11px; font-weight: 750; }
 .job-alert button,.detail-error button { flex: none; border: 1px solid #ddb96f; border-radius: 7px; background: #fff; color: #805d22; padding: 7px 10px; cursor: pointer; font-size: 11px; font-weight: 750; }
 
 .job-browser { position: relative; z-index: 1; display: grid; min-height: 0; flex: 1; grid-template-columns: 370px minmax(0, 1fr); overflow: hidden; border: 1px solid var(--job-line); border-radius: 14px; background: var(--job-paper); }
@@ -517,9 +582,13 @@ onMounted(() => {
 .job-card { position: relative; display: grid; gap: 12px; width: 100%; overflow: hidden; border: 1px solid transparent; border-radius: 12px; background: var(--job-paper); color: var(--job-ink); padding: 15px 14px 13px 17px; cursor: pointer; text-align: left; transition: border-color .16s ease, box-shadow .16s ease, transform .16s ease; }
 .job-card:hover { border-color: var(--job-line-strong); transform: translateY(-1px); }
 .job-card.active { border-color: var(--job-blue); box-shadow: 0 8px 22px color-mix(in srgb, var(--job-blue) 9%, transparent); }
+.job-card.selected { border-color: color-mix(in srgb, var(--job-teal) 55%, var(--job-line)); background: color-mix(in srgb, var(--job-teal) 5%, var(--job-paper)); }
 .card-track-node { position: absolute; top: 17px; bottom: 17px; left: 0; width: 3px; border-radius: 0 3px 3px 0; background: transparent; }
 .job-card.active .card-track-node { background: linear-gradient(var(--job-blue), var(--job-teal)); }
+.job-card.selected .card-track-node { background: var(--job-teal); }
+.batch-selected-mark { position: absolute; top: 8px; right: 8px; border-radius: 999px; background: #e6f7f5; color: #087d7d; padding: 3px 6px; font-size: 9px; font-weight: 850; }
 .job-card-topline { display: flex; min-width: 0; align-items: start; justify-content: space-between; gap: 12px; }
+.job-card.selected .job-card-topline { padding-right: 38px; }
 .job-card-topline strong { min-width: 0; overflow: hidden; font-size: 15px; font-weight: 750; letter-spacing: -.015em; text-overflow: ellipsis; white-space: nowrap; }
 .job-card-topline em { flex: none; color: var(--job-red); font-size: 15px; font-style: normal; font-weight: 800; }
 .job-tags { display: flex; flex-wrap: wrap; gap: 6px; }
@@ -536,6 +605,11 @@ onMounted(() => {
 
 .job-detail { position: relative; min-width: 0; overflow: hidden; background: var(--job-paper); transition: opacity .18s ease; }
 .job-detail.refreshing > :not(.detail-refreshing) { opacity: .66; }
+.detail-hero-actions { display: flex; flex: none; align-items: center; gap: 12px; }
+.batch-toggle-button { min-width: 98px; min-height: 36px; border: 1px solid var(--job-blue); border-radius: 9px; background: var(--job-blue); color: #fff; padding: 7px 12px; cursor: pointer; font-size: 11px; font-weight: 850; }
+.batch-toggle-button:hover:not(:disabled),.batch-toggle-button:focus-visible { background: var(--ui-accent-hover, #0058c7); outline: 0; box-shadow: 0 0 0 3px var(--ui-focus, rgba(8,105,216,.13)); }
+.batch-toggle-button.selected { border-color: color-mix(in srgb, var(--job-teal) 55%, var(--job-line)); background: #edf9f7; color: #087d7d; }
+.batch-toggle-button:disabled { cursor: not-allowed; opacity: .48; }
 .detail-refreshing { position: absolute; z-index: 5; top: 14px; right: 20px; display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--job-line); border-radius: 999px; background: var(--job-paper); color: var(--job-blue-ink); padding: 6px 10px; font-size: 10px; font-weight: 750; box-shadow: 0 8px 22px rgba(20, 33, 61, .08); }
 .detail-hero { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 24px; border-bottom: 1px solid var(--job-line); padding: 22px 28px 18px; }
 .detail-title-block { position: relative; min-width: 0; }
