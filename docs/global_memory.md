@@ -10,7 +10,7 @@
 6. **鉴权与管理员**：生产开启 API 登录强制、CLI 首管理员模式和公开邮箱注册；线上已存在首管理员，不应重复执行 bootstrap。登录页支持邮箱验证码、邮箱密码、注册和找回密码，注册用户默认获得基础访问权限。
 7. **模型凭据**：页面保存的 API Key 用 `CAREER_CREDENTIAL_MASTER_KEY` Fernet 加密后存 PostgreSQL；禁止记录或回显 Key，旧明文必须显式迁移。
 8. **技能库**：`find-skills`、`ai-image-generation`、`og-image-design`、`grill-me`、`github-project-blog` 已作为 `deploy/skill-seeds` 种子；持久卷中的已编辑 Skill 不会被重新部署覆盖。
-9. **调度边界**：周五 08:00 生产、09:00 建微信草稿；Scheduler 与人工流水线共享文件锁，生产只能单实例运行。当前本地与生产均保持 `VIDEO_SUBMIT_ENABLED=false`、`AUDIO_ENABLED=false`，仅运行文章、图片、排版和图文草稿链路。
+9. **调度边界**：周五 08:00 生产、09:00 建微信草稿；Scheduler 与人工流水线共享文件锁，生产只能单实例运行。本地默认保持音视频关闭；生产已显式设置 `VIDEO_SUBMIT_ENABLED=true`、`AUDIO_ENABLED=true`，会运行 Seedance、视觉质检、豆包 TTS 与最终视频装配并产生相应调用。
 10. **上线修复**：`eba2f08` 为生产 Nginx 增加静态 `root /usr/share/nginx/html` 与 `index index.html`；服务器已通过标准 Git 拉取、重建 Web/Caddy，`career-web` 健康检查恢复正常。
-11. **当前生产版本**：2026-08-22 已部署提交 `bf30b3c`，PostgreSQL 迁移至 `20260821_16`；求职资料工作区、BOSS 职位库导入、简历助手、评测中心、主题系统、Skill Agent 与音视频关闭策略均已进入生产。求职助手历史对话使用 72px 紧凑列表和 Element Plus 分页，可选择每页 5/7/10/15 条并记住偏好。公网健康接口返回 200，API/Web/PostgreSQL/Scheduler 均正常。
+11. **当前生产版本**：2026-08-22 已部署岗位绑定修复提交 `aecefd9`，PostgreSQL 迁移至 `20260821_16`；仅绑定目标岗位或仅绑定简历时会显式把可空参数转换为 UUID，不再触发 PostgreSQL `AmbiguousParameter`。公网健康接口返回 200，API/Web/PostgreSQL/Scheduler 均正常；媒体就绪检查显示 Seedance、豆包 TTS、存储和装配均无阻塞。
 12. **当前边界**：登录页支持邮箱验证码、邮箱密码、显式注册和找回密码；生产保持 `PLATFORM_AUTH_REQUIRED=true`、`PLATFORM_CLOSED_OPERATOR_MODE=true`、`PLATFORM_PUBLIC_REGISTRATION_ENABLED=true`、`PLATFORM_CLI_BOOTSTRAP_ONLY=true` 与 `CAREER_REDACTION_ENABLED=true`。求职助手模型选择器只展示真实可用模型；前端仅维护电脑端与手机端。

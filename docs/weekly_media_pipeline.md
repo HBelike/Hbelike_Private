@@ -96,14 +96,14 @@ Seedance 每段只生成教学风动态画面：提示词明确禁止旁白、�
 
 这样避免七段视频各自生成不同音色、语速或文案。当前 `VideoClipPlanTask` 会生成 7 段、每段 15 秒的计划，最终理论时长约 105 秒；这是此前采用“七段十五秒”方案的结果。配置中的 `video.duration_seconds: 60` 仍是旧版整体目标时长，不参与当前装配裁剪，后续应由产品决定统一为 60 秒或 105 秒后再收敛配置。
 
-当前为了控制成本，本地和生产均关闭音视频生成：`VIDEO_SUBMIT_ENABLED=false`、`AUDIO_ENABLED=false`。一次性任务与 Scheduler 不再进入视频蓝图、分镜、Seedance、视觉质检、旁白、TTS 和装配阶段；`AudioTask` 与 `SegmentedAudioTask` 在真实调用入口还会再次检查音频开关。历史音视频仅保留用于只读预览，不再上传到对象存储或微信公众号。
+本地开发继续默认关闭音视频生成，避免调试时产生费用。2026-08-22 起生产环境已显式设置 `VIDEO_SUBMIT_ENABLED=true`、`AUDIO_ENABLED=true`，Scheduler 会进入视频蓝图、分镜、Seedance、视觉质检、旁白、TTS 和装配阶段；`AudioTask` 与 `SegmentedAudioTask` 在真实调用入口仍会再次检查音频开关。
 
 ## 本地开发与上线配置
 
 | 场景 | 推荐配置 | 行为 |
 | --- | --- | --- |
 | 本地开发 | `video.submit_enabled=false`、`audio.enabled=false` | 只生成文章、图片、排版和图文草稿，不生成或上传音视频。 |
-| 生产云端 | `VIDEO_SUBMIT_ENABLED=false`、`AUDIO_ENABLED=false` | API 与 Scheduler 均跳过完整音视频链路，不产生 Seedance、视频质检或 TTS 费用。 |
+| 生产云端 | `VIDEO_SUBMIT_ENABLED=true`、`AUDIO_ENABLED=true` | API 与 Scheduler 运行完整音视频链路，会产生 Seedance、视频质检和 TTS 调用。 |
 
 生产环境最小必需变量：
 
@@ -158,4 +158,4 @@ CLOUDFLARE_R2_PUBLIC_BASE_URL=
 .\.venv\Scripts\python.exe scripts\verify_doubao_tts_v3_contract.py
 ```
 
-部署后需确认 `.env.production` 保持 `VIDEO_SUBMIT_ENABLED=false`、`AUDIO_ENABLED=false`，重建 `career-api` 与 `pipeline-scheduler`，并通过 `scripts/check_media_production_readiness.py` 验证关闭状态。后续如需恢复音视频，必须由管理员显式调整开关并重新进行付费链路验收。
+生产开启音视频前必须先以环境覆盖方式运行 `scripts/check_media_production_readiness.py`，确认 Seedance、豆包 TTS、存储与视频装配没有阻塞项；随后设置 `.env.production` 的两个开关为 `true` 并重建 `career-api` 与 `pipeline-scheduler`。2026-08-22 验收结果为 `ready_for_real_seedance_submission=true`，未主动触发付费生成任务。
