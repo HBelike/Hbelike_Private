@@ -7,9 +7,9 @@ const PREVIEW_EVIDENCE = [
 ]
 
 const GREETING_ENDINGS = [
-  '如果方便，期待进一步沟通。',
-  '想进一步了解团队和工作内容，期待沟通。',
-  '希望有机会进一步交流。'
+  '如方便，期待进一步沟通。',
+  '想进一步了解岗位，期待沟通。',
+  '希望有机会和您进一步交流。'
 ]
 
 export function normalizeGreetingLimit(value) {
@@ -45,11 +45,13 @@ export function needsGreetingRiskWarning(count) {
 }
 
 function previewGreeting(job, revision) {
-  const company = String(job?.company || job?.companyShort || '贵司').trim()
   const role = String(job?.title || '当前').trim()
   const ending = GREETING_ENDINGS[(Math.max(1, revision) - 1) % GREETING_ENDINGS.length]
   const salutation = job?.recruiter ? `${String(job.recruiter).split('·')[0].trim()}您好` : '您好'
-  return `${salutation}，我是211本科，有3年平安银行全栈开发经验，做过微服务和分布式项目，也有从0到1完整投产上线经历。个人项目 xingxingtech.cn 已上线，包含技术热点抓取 workflow 和求职简历分析 Agent。对${company}的${role}岗位很感兴趣。${ending}`
+  const focus = Array.isArray(job?.skills) && job.skills.length
+    ? `，岗位关注${job.skills.slice(0, 2).join('、')}`
+    : ''
+  return `${salutation}，我是211本科，3年平安银行全栈开发经验，做过微服务、分布式项目及0到1投产。xingxingtech.cn 已上线，含技术热点抓取 workflow 和求职简历分析 Agent${focus}。我对${role}很感兴趣。${ending}`
 }
 
 export function createGreetingItems(jobs) {

@@ -6,6 +6,7 @@ import zhCn from 'element-plus/es/locale/lang/zh-cn'
 import 'element-plus/es/components/pagination/style/css'
 import CareerContextRail from './CareerContextRail.vue'
 import CareerContextSetupDialog from './CareerContextSetupDialog.vue'
+import CareerGreetingDialog from './CareerGreetingDialog.vue'
 import CareerJobSearchDialog from './CareerJobSearchDialog.vue'
 import CareerMessageContent from './CareerMessageContent.vue'
 import { toTargetRolePayload } from '../job-library-target-role.js'
@@ -70,10 +71,12 @@ const conversationActionLoadingId = ref('')
 const showContextSetup = ref(false)
 const contextSetupInitial = ref(null)
 const showJobSearch = ref(false)
+const showGreetingDialog = ref(false)
 const savingJobSearch = ref(false)
 const jobSearchError = ref('')
 const pendingJobLibraryTarget = ref(null)
 const jobSearchButton = ref(null)
+const greetingButton = ref(null)
 const historyCollapsed = ref(false)
 const historyPage = ref(1)
 const historyPageSize = ref(DEFAULT_HISTORY_PAGE_SIZE)
@@ -1033,6 +1036,25 @@ function closeContextSetup() {
   contextSetupInitial.value = null
 }
 
+function openGreetingDialog() {
+  if (!selectedConversation.value) {
+    errorMessage.value = '请先开启一个对话。'
+    return
+  }
+  if (!conversationContext.value?.candidate_profile) {
+    errorMessage.value = '请先添加简历资料，再生成岗位招呼语。'
+    return
+  }
+  closeContextSetup()
+  resetJobSearch()
+  showGreetingDialog.value = true
+}
+
+function closeGreetingDialog() {
+  showGreetingDialog.value = false
+  nextTick(() => greetingButton.value?.focus())
+}
+
 function resetJobSearch({ restoreFocus = false } = {}) {
   showJobSearch.value = false
   jobSearchError.value = ''
@@ -1852,6 +1874,17 @@ onMounted(() => {
         </div>
         <div v-if="selectedConversation" class="chat-material-actions" aria-label="求职资料快捷操作">
           <button
+            ref="greetingButton"
+            type="button"
+            class="chat-material-button greeting"
+            title="从职位库批量生成并预览岗位招呼语"
+            :disabled="savingJobSearch"
+            @click="openGreetingDialog"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5h16v10H9l-5 4z"/><path d="M8 9.5h8M8 12.5h5"/></svg>
+            <span>一键打招呼</span>
+          </button>
+          <button
             type="button"
             class="chat-material-button"
             :aria-label="hasCandidateContext ? '简历资料，已添加' : '简历资料，尚未添加'"
@@ -2005,6 +2038,12 @@ onMounted(() => {
     @confirm="confirmJobFromLibrary"
   />
 
+  <CareerGreetingDialog
+    :open="showGreetingDialog"
+    :candidate-profile="conversationContext?.candidate_profile ?? null"
+    @cancel="closeGreetingDialog"
+  />
+
   <Teleport to="body">
     <section v-if="errorMessage" class="career-error-toast" role="alert" aria-live="assertive">
       <div><strong>操作未完成</strong><p>{{ errorMessage }}</p></div>
@@ -2141,6 +2180,7 @@ onMounted(() => {
 .history-pagination-shell{min-height:76px;flex:0 0 auto;margin-top:10px;border-top:1px solid var(--ui-line);border-bottom:1px solid var(--ui-line);padding:8px 4px}.history-pagination-shell :deep(.el-pagination){display:grid;width:100%;box-sizing:border-box;grid-template-columns:28px minmax(0,1fr) 28px;grid-template-rows:28px 28px;align-items:center;gap:6px 4px;--el-color-primary:var(--ui-accent);--el-pagination-button-width:28px;--el-pagination-button-height:28px;--el-pagination-button-bg-color:var(--ui-surface-soft);--el-pagination-hover-color:var(--ui-accent-ink);font-family:inherit}.history-pagination-shell :deep(.el-pagination__total){grid-column:1 / 3;grid-row:1;justify-self:start;margin:0;color:var(--ui-text-muted);font-size:11px;font-weight:750}.history-pagination-shell :deep(.el-pagination__sizes){grid-column:2 / 4;grid-row:1;justify-self:end;margin:0}.history-pagination-shell :deep(.el-pagination__sizes .el-select){width:94px}.history-pagination-shell :deep(.el-pagination__sizes .el-select__wrapper){min-height:28px;border-radius:6px;box-shadow:0 0 0 1px var(--ui-line) inset}.history-pagination-shell :deep(.btn-prev){grid-column:1;grid-row:2}.history-pagination-shell :deep(.el-pager){grid-column:2;grid-row:2;min-width:0;justify-self:center}.history-pagination-shell :deep(.btn-next){grid-column:3;grid-row:2}.history-pagination-shell :deep(.btn-prev),.history-pagination-shell :deep(.btn-next),.history-pagination-shell :deep(.el-pager li){border-radius:6px;font-weight:750}.history-pagination-shell :deep(.el-pager li.is-active){box-shadow:0 3px 8px rgba(8,103,217,.2)}.history-pagination-shell :deep(button:focus-visible),.history-pagination-shell :deep(.el-select__wrapper.is-focused){outline:3px solid var(--ui-focus);outline-offset:1px}.privacy-note{display:flex;min-height:44px;flex:0 0 auto;align-items:center;gap:7px;padding:8px 7px 0;color:var(--ui-text-muted)}.privacy-note>span{display:grid;width:20px;height:20px;flex:0 0 auto;place-items:center;border-radius:6px;background:var(--ui-surface-active);color:var(--ui-accent-ink);font-size:9px;font-weight:850}.privacy-note p{margin:0;font-size:9px;line-height:1.45}.eyebrow { color:var(--ui-accent-ink); font-size:9px; font-weight:900; letter-spacing:.08em; }
 .career-chat-panel { display:flex; height:100%; min-height:0; flex-direction:column; overflow:hidden; }.chat-header { display:flex; min-height:68px; align-items:center; border-bottom:1px solid #e3ebf5; padding:10px 14px 10px 20px; background:#fbfdff; }.chat-header>div:first-child{min-width:0}.chat-header h2,.model-settings h3,.empty-state h2 { margin:3px 0 0; color:#10294c; }.active-context-line{display:flex;align-items:center;gap:7px;margin:5px 0 0;color:#6d7f98;font-size:11px;font-weight:750}.active-context-line span{max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.active-context-line i{color:#0a67db;font-style:normal}.eyebrow { margin:0; }
 .chat-material-actions{display:flex;flex:none;align-items:center;gap:7px}.chat-material-button{position:relative;display:inline-flex;min-height:38px;align-items:center;justify-content:center;gap:7px;border:1px solid var(--ui-line-strong,#bfd2ea);border-radius:9px;background:var(--ui-surface,#fff);color:var(--ui-text-secondary,#526078);padding:8px 12px;font:800 12px/1 var(--ui-font-body,"Segoe UI",sans-serif);white-space:nowrap;cursor:pointer;transition:border-color .15s ease,background .15s ease,color .15s ease,box-shadow .15s ease}.chat-material-button svg{width:16px;height:16px;flex:none;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}.chat-material-button:hover:not(:disabled),.chat-material-button:focus-visible{border-color:var(--ui-accent,#0869d8);background:var(--ui-surface-active,#eaf3ff);color:var(--ui-accent-ink,#004aa8);box-shadow:0 0 0 3px var(--ui-focus,rgba(8,105,216,.14));outline:0}.chat-material-button.primary{border-color:var(--ui-accent,#0869d8);background:var(--ui-accent,#0869d8);color:#fff;padding-right:14px;padding-left:14px}.chat-material-button.primary:hover:not(:disabled),.chat-material-button.primary:focus-visible{background:var(--ui-accent-strong,#0056bd);color:#fff}.chat-material-button:disabled{cursor:wait;opacity:.58}.material-state-dot{width:6px;height:6px;flex:none;border-radius:50%;background:var(--ui-success,#21855b);box-shadow:0 0 0 2px var(--ui-success-soft,#e8f7f0)}
+.chat-material-button.greeting{border-color:var(--ui-accent,#0869d8);background:var(--ui-surface-active,#eaf3ff);color:var(--ui-accent-ink,#004aa8)}
 .quiet-button,.chip-button { border:1px solid #dfe8d0; border-radius:10px; background:#f8fbf1; color:#61764b; padding:8px 11px; font-size:12px; font-weight:800; }.quiet-button.danger { border-color:#f0d5d5; background:#fff8f8; color:#ad5a5a; }
 .notice { margin:14px 22px 0; border-radius:12px; padding:10px 13px; font-size:13px; }.notice.success { border:1px solid #d7eabe; background:#f5faec; color:#5c7a2c; }
 .model-settings { display:grid; grid-template-columns:minmax(220px,.75fr) minmax(360px,1.25fr); gap:18px; border-bottom:1px solid #edf0e7; background:#fbfcf8; padding:18px 22px; }.model-settings p:not(.eyebrow) { color:#7b8574; font-size:13px; line-height:1.6; }

@@ -1,0 +1,622 @@
+<script setup>
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import JobSearchWorkspace from './JobSearchWorkspace.vue'
+import {
+  createGreetingItems,
+  needsGreetingRiskWarning,
+  normalizeGreetingLimit,
+  queueGreetingItems,
+  regenerateGreetingItem,
+  stopGreetingItems
+} from '../career-greeting-preview.js'
+
+const props = defineProps({
+  open: { type: Boolean, default: false },
+  candidateProfile: { type: Object, default: null },
+  previewJobs: { type: Array, default: () => [] },
+  initialStage: { type: String, default: 'select' }
+})
+
+const emit = defineEmits(['cancel'])
+const stage = ref('select')
+const selectionLimit = ref(5)
+const selectedJobs = ref([])
+const items = ref([])
+const activeItemId = ref('')
+const riskOpen = ref(false)
+const riskAcknowledged = ref(false)
+const sending = ref(false)
+const stopped = ref(false)
+const regeneratingItemId = ref('')
+const dialogRef = ref(null)
+let sendTimer = null
+let regenerationTimer = null
+
+const steps = [
+  { key: 'select', label: '选择岗位' },
+  { key: 'review', label: '审核招呼语' },
+  { key: 'sending', label: '发送进度' }
+]
+
+const stageIndex = computed(() => Math.max(0, steps.findIndex((item) => item.key === stage.value)))
+const includedItems = computed(() => items.value.filter((item) => item.included))
+const activeItem = computed(() => items.value.find((item) => item.id === activeItemId.value) ?? items.value[0] ?? null)
+const sentCount = computed(() => items.value.filter((item) => item.status === 'sent').length)
+const waitingCount = computed(() => items.value.filter((item) => ['queued', 'sending'].includes(item.status)).length)
+const sendComplete = computed(() => stage.value === 'sending' && !sending.value && waitingCount.value === 0 && sentCount.value > 0)
+
+watch(() => props.open, (open) => {
+  clearTimers()
+  if (!open) return
+  const previewJobs = props.previewJobs.slice(0, 10)
+  const startsInReview = props.initialStage === 'review' && previewJobs.length > 0
+  stage.value = startsInReview ? 'review' : 'select'
+  selectionLimit.value = Math.max(5, previewJobs.length)
+  selectedJobs.value = previewJobs
+  items.value = startsInReview ? createGreetingItems(previewJobs) : []
+  activeItemId.value = items.value[0]?.id ?? ''
+  riskOpen.value = false
+  riskAcknowledged.value = false
+  sending.value = false
+  stopped.value = false
+  regeneratingItemId.value = ''
+  nextTick(() => dialogRef.value?.focus())
+}, { immediate: true })
+
+onBeforeUnmount(clearTimers)
+
+function clearTimers() {
+  if (sendTimer) window.clearTimeout(sendTimer)
+  if (regenerationTimer) window.clearTimeout(regenerationTimer)
+  sendTimer = null
+  regenerationTimer = null
+}
+
+function close() {
+  if (sending.value) stopSending()
+  clearTimers()
+  emit('cancel')
+}
+
+function handleSelectionList(jobs) {
+  selectedJobs.value = jobs
+  if (selectionLimit.value < jobs.length) selectionLimit.value = jobs.length
+}
+
+function updateSelectionLimit(event) {
+  const nextLimit = normalizeGreetingLimit(event.target.value)
+  selectionLimit.value = Math.max(selectedJobs.value.length, nextLimit)
+}
+
+function startReview() {
+  if (!selectedJobs.value.length) return
+  items.value = createGreetingItems(selectedJobs.value)
+  activeItemId.value = items.value[0]?.id ?? ''
+  stage.value = 'review'
+}
+
+function returnToSelection() {
+  if (sending.value) return
+  stage.value = 'select'
+}
+
+function selectItem(item) {
+  activeItemId.value = item.id
+}
+
+function updateActiveMessage(event) {
+  const message = event.target.value
+  items.value = items.value.map((item) => item.id === activeItem.value?.id
+    ? { ...item, message }
+    : item)
+}
+
+function updateActiveIncluded(event) {
+  const included = event.target.checked
+  items.value = items.value.map((item) => item.id === activeItem.value?.id
+    ? { ...item, included, status: included ? 'ready' : 'excluded' }
+    : item)
+}
+
+function regenerateActive() {
+  const item = activeItem.value
+  if (!item || regeneratingItemId.value) return
+  regeneratingItemId.value = item.id
+  items.value = items.value.map((entry) => entry.id === item.id
+    ? { ...entry, status: 'generating' }
+    : entry)
+  regenerationTimer = window.setTimeout(() => {
+    items.value = items.value.map((entry) => entry.id === item.id
+      ? regenerateGreetingItem({ ...entry, status: 'ready' })
+      : entry)
+    regeneratingItemId.value = ''
+    regenerationTimer = null
+  }, 520)
+}
+
+function requestLocalSend() {
+  if (!includedItems.value.length) return
+  if (needsGreetingRiskWarning(includedItems.value.length)) {
+    riskAcknowledged.value = false
+    riskOpen.value = true
+    return
+  }
+  startLocalSend()
+}
+
+function startLocalSend() {
+  riskOpen.value = false
+  items.value = queueGreetingItems(items.value)
+  stage.value = 'sending'
+  sending.value = true
+  stopped.value = false
+  scheduleNextItem()
+}
+
+function scheduleNextItem() {
+  if (!sending.value) return
+  const nextItem = items.value.find((item) => item.status === 'queued')
+  if (!nextItem) {
+    sending.value = false
+    sendTimer = null
+    return
+  }
+  items.value = items.value.map((item) => item.id === nextItem.id
+    ? { ...item, status: 'sending' }
+    : item)
+  activeItemId.value = nextItem.id
+  sendTimer = window.setTimeout(() => {
+    items.value = items.value.map((item) => item.id === nextItem.id
+      ? { ...item, status: 'sent' }
+      : item)
+    sendTimer = null
+    scheduleNextItem()
+  }, 780)
+}
+
+function stopSending() {
+  if (sendTimer) window.clearTimeout(sendTimer)
+  sendTimer = null
+  const activeSendingId = items.value.find((item) => item.status === 'sending')?.id
+  items.value = stopGreetingItems(items.value.map((item) => item.id === activeSendingId
+    ? { ...item, status: 'stopped' }
+    : item))
+  sending.value = false
+  stopped.value = true
+}
+
+function statusLabel(status) {
+  return {
+    ready: '待审核',
+    generating: '重新生成中',
+    excluded: '已取消',
+    queued: '等待发送',
+    sending: '正在发送',
+    sent: '已发送',
+    stopped: '已停止'
+  }[status] ?? '等待处理'
+}
+</script>
+
+<template>
+  <Teleport to="body">
+    <div v-if="open" class="greeting-backdrop" @mousedown.self="close" @keydown.esc="close">
+      <section
+        ref="dialogRef"
+        class="greeting-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="greeting-dialog-title"
+        tabindex="-1"
+      >
+        <header class="greeting-header">
+          <div class="greeting-title-block">
+            <div class="greeting-title-row">
+              <h2 id="greeting-dialog-title">一键打招呼</h2>
+              <span class="preview-badge"><i aria-hidden="true"></i>本地预览</span>
+            </div>
+            <p>从职位库选岗，逐条确认招呼语，再按顺序发送。</p>
+          </div>
+          <div class="greeting-header-meta">
+            <span class="resume-version">简历 v{{ candidateProfile?.version ?? 1 }}</span>
+            <button type="button" class="close-button" aria-label="关闭一键打招呼" @click="close">×</button>
+          </div>
+        </header>
+
+        <nav class="greeting-steps" aria-label="一键打招呼步骤">
+          <template v-for="(item, index) in steps" :key="item.key">
+            <span class="step-item" :class="{ active: index === stageIndex, complete: index < stageIndex }">
+              <i>{{ index < stageIndex ? '✓' : index + 1 }}</i>{{ item.label }}
+            </span>
+            <span v-if="index < steps.length - 1" class="step-line" :class="{ complete: index < stageIndex }" aria-hidden="true"></span>
+          </template>
+        </nav>
+
+        <main class="greeting-body" :class="`stage-${stage}`">
+          <section v-show="stage === 'select'" class="selection-stage">
+            <JobSearchWorkspace
+              multi-selection-mode
+              :selection-limit="selectionLimit"
+              @selection-list-change="handleSelectionList"
+            />
+          </section>
+
+          <section v-if="stage === 'review'" class="review-stage">
+            <aside class="delivery-track" aria-label="本批岗位顺序">
+              <header>
+                <span>投递轨道</span>
+                <strong>{{ includedItems.length }}/{{ items.length }}</strong>
+              </header>
+              <div class="track-list">
+                <button
+                  v-for="item in items"
+                  :key="item.id"
+                  type="button"
+                  class="track-item"
+                  :class="[item.status, { active: activeItem?.id === item.id }]"
+                  @click="selectItem(item)"
+                >
+                  <span class="track-node" aria-hidden="true"><i></i></span>
+                  <span class="track-copy">
+                    <strong>{{ item.job.title }}</strong>
+                    <small>{{ item.job.company || item.job.companyShort }}</small>
+                  </span>
+                  <em>{{ statusLabel(item.status) }}</em>
+                </button>
+              </div>
+              <p>顺序就是发送顺序。取消的岗位会留在轨道上，但不会进入发送队列。</p>
+            </aside>
+
+            <article v-if="activeItem" class="message-editor">
+              <header class="editor-heading">
+                <div>
+                  <span>{{ activeItem.job.company || activeItem.job.companyShort }}</span>
+                  <h3>{{ activeItem.job.title }}</h3>
+                </div>
+                <label class="include-switch">
+                  <input type="checkbox" :checked="activeItem.included" @change="updateActiveIncluded" />
+                  <span>本批发送</span>
+                </label>
+              </header>
+
+              <div class="message-paper" :class="{ disabled: !activeItem.included }">
+                <label for="greeting-message">招呼语</label>
+                <textarea
+                  id="greeting-message"
+                  :value="activeItem.message"
+                  :disabled="!activeItem.included || activeItem.status === 'generating'"
+                  @input="updateActiveMessage"
+                ></textarea>
+                <div class="message-meta">
+                  <span>建议 150 字以内，不做机械截断</span>
+                  <strong>{{ activeItem.message.length }} 字</strong>
+                </div>
+              </div>
+
+              <div class="editor-actions">
+                <button type="button" class="regenerate-button" :disabled="!activeItem.included || regeneratingItemId === activeItem.id" @click="regenerateActive">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 5v6h-6"/></svg>
+                  {{ regeneratingItemId === activeItem.id ? '正在重新生成' : '重新生成这一条' }}
+                </button>
+                <span>第 {{ activeItem.revision }} 版 · humanizer 已检查</span>
+              </div>
+
+              <section class="quality-note">
+                <i aria-hidden="true">✓</i>
+                <div><strong>事实约束已通过</strong><p>数字、公司、项目和经历均来自当前简历版本。</p></div>
+              </section>
+            </article>
+
+            <aside v-if="activeItem" class="evidence-panel">
+              <header><span>写作依据</span><small>不补写经历</small></header>
+              <section>
+                <h4>简历证据</h4>
+                <ul><li v-for="evidence in activeItem.evidence" :key="evidence">{{ evidence }}</li></ul>
+              </section>
+              <section>
+                <h4>岗位关注点</h4>
+                <div class="highlight-list"><span v-for="highlight in activeItem.jdHighlights" :key="highlight">{{ highlight }}</span></div>
+              </section>
+              <footer><strong>humanizer</strong><span>删除套话与夸张表述，不改变事实。</span></footer>
+            </aside>
+          </section>
+
+          <section v-if="stage === 'sending'" class="sending-stage">
+            <aside class="delivery-track sending-track" aria-label="本地模拟发送顺序">
+              <header><span>投递轨道</span><strong>{{ sentCount }}/{{ includedItems.length }}</strong></header>
+              <div class="track-list">
+                <button
+                  v-for="item in items"
+                  :key="item.id"
+                  type="button"
+                  class="track-item"
+                  :class="[item.status, { active: activeItem?.id === item.id }]"
+                  @click="selectItem(item)"
+                >
+                  <span class="track-node" aria-hidden="true"><i></i></span>
+                  <span class="track-copy"><strong>{{ item.job.title }}</strong><small>{{ item.job.company || item.job.companyShort }}</small></span>
+                  <em>{{ statusLabel(item.status) }}</em>
+                </button>
+              </div>
+            </aside>
+
+            <section class="progress-board">
+              <div class="progress-kicker">本地发送演示</div>
+              <h3 v-if="sending">正在按顺序处理第 {{ sentCount + 1 }} 条</h3>
+              <h3 v-else-if="stopped">已停止剩余发送</h3>
+              <h3 v-else>本批模拟发送完成</h3>
+              <p v-if="sending">当前页面只展示未来的状态变化，不会连接或操作 BOSS。</p>
+              <p v-else-if="stopped">已完成的记录保留，未开始的岗位已标记为停止。</p>
+              <p v-else>所有已纳入本批的岗位均已完成本地状态演示。</p>
+
+              <div class="progress-rail" role="progressbar" :aria-valuenow="sentCount" :aria-valuemax="includedItems.length">
+                <i :style="{ width: `${includedItems.length ? (sentCount / includedItems.length) * 100 : 0}%` }"></i>
+              </div>
+              <div class="progress-numbers"><strong>{{ sentCount }}</strong><span>已完成</span><b>{{ waitingCount }}</b><span>待处理</span></div>
+
+              <article v-if="activeItem" class="current-send-card">
+                <span class="company-avatar">{{ (activeItem.job.companyShort || activeItem.job.company || '职').slice(0, 1) }}</span>
+                <div><small>当前岗位</small><strong>{{ activeItem.job.company || activeItem.job.companyShort }} · {{ activeItem.job.title }}</strong><p>{{ activeItem.message }}</p></div>
+              </article>
+            </section>
+
+            <aside class="simulation-boundary">
+              <span class="boundary-mark">本地</span>
+              <h4>不会执行真实发送</h4>
+              <p>本页未调用浏览器扩展的发送动作，也不会向 BOSS 提交消息。</p>
+              <ul><li>登录与验证码状态未检查</li><li>账号额度未读取</li><li>所有结果仅保存在当前页面</li></ul>
+            </aside>
+          </section>
+        </main>
+
+        <footer class="greeting-footer">
+          <div v-if="stage === 'select'" class="batch-limit-control">
+            <label for="greeting-limit">本批上限</label>
+            <input id="greeting-limit" :value="selectionLimit" type="number" min="1" max="10" @change="updateSelectionLimit" />
+            <span>最多 10 个，当前已选 <strong>{{ selectedJobs.length }}</strong> 个</span>
+          </div>
+          <div v-else class="local-boundary"><i aria-hidden="true"></i><span>本地预览，不会发送到 BOSS</span></div>
+
+          <div class="footer-actions">
+            <button v-if="stage === 'review'" type="button" class="secondary-button" @click="returnToSelection">返回选岗</button>
+            <button v-if="stage === 'sending' && sending" type="button" class="danger-button" @click="stopSending">停止剩余发送</button>
+            <button type="button" class="secondary-button" @click="close">{{ sendComplete || stopped ? '关闭' : '取消' }}</button>
+            <button v-if="stage === 'select'" type="button" class="primary-button" :disabled="!selectedJobs.length" @click="startReview">生成 {{ selectedJobs.length || '' }} 条招呼语</button>
+            <button v-else-if="stage === 'review'" type="button" class="primary-button" :disabled="!includedItems.length" @click="requestLocalSend">确认并模拟发送 {{ includedItems.length }} 条</button>
+          </div>
+        </footer>
+
+        <div v-if="riskOpen" class="risk-layer" @mousedown.self="riskOpen = false">
+          <section class="risk-dialog" role="alertdialog" aria-modal="true" aria-labelledby="greeting-risk-title">
+            <span class="risk-mark" aria-hidden="true">!</span>
+            <div><small>发送前确认</small><h3 id="greeting-risk-title">本批包含 {{ includedItems.length }} 个岗位</h3></div>
+            <p>连续向多个岗位发起沟通可能触发 BOSS 限流、安全验证、沟通额度限制或账号封禁。正式功能遇到任何异常会立即停止，不会尝试绕过平台限制。</p>
+            <label><input v-model="riskAcknowledged" type="checkbox" /><span>我已了解批量发送可能带来的账号风险</span></label>
+            <footer><button type="button" class="secondary-button" @click="riskOpen = false">返回检查</button><button type="button" class="risk-confirm-button" :disabled="!riskAcknowledged" @click="startLocalSend">了解风险，开始模拟</button></footer>
+          </section>
+        </div>
+      </section>
+    </div>
+  </Teleport>
+</template>
+
+<style scoped>
+.greeting-backdrop {
+  position: fixed;
+  z-index: 1580;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  box-sizing: border-box;
+  background: rgba(8, 28, 58, .58);
+  padding: 24px;
+  backdrop-filter: blur(8px);
+}
+
+.greeting-dialog {
+  --greeting-canvas: var(--ui-canvas, #f3f7fc);
+  --greeting-paper: var(--ui-surface, #fff);
+  --greeting-ink: var(--ui-text, #14213d);
+  --greeting-copy: var(--ui-text-secondary, #526078);
+  --greeting-muted: var(--ui-text-muted, #7b879c);
+  --greeting-line: var(--ui-line, #d7e4f6);
+  --greeting-line-strong: var(--ui-line-strong, #b9cfed);
+  --greeting-blue: var(--ui-accent, #0869d8);
+  --greeting-blue-ink: var(--ui-accent-ink, #004aa8);
+  --greeting-blue-soft: var(--ui-surface-active, #eaf3ff);
+  --greeting-teal: #04a6a6;
+  --greeting-risk: #c94955;
+  position: relative;
+  display: grid;
+  width: min(1560px, calc(100vw - 48px));
+  height: calc(100dvh - 48px);
+  min-height: 680px;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  overflow: hidden;
+  border: 1px solid var(--greeting-line-strong);
+  border-radius: 22px;
+  outline: none;
+  background: var(--greeting-paper);
+  box-shadow: 0 32px 100px rgba(5, 35, 78, .34);
+  color: var(--greeting-ink);
+  font-family: var(--ui-font-body, "Segoe UI Variable Text", "PingFang SC", sans-serif);
+  animation: greeting-dialog-in .18s ease-out;
+}
+
+.greeting-header { display: flex; min-height: 76px; align-items: center; justify-content: space-between; gap: 24px; border-bottom: 1px solid var(--greeting-line); background: linear-gradient(135deg, #fff 56%, var(--greeting-blue-soft)); padding: 14px 20px 13px 24px; }
+.greeting-title-row,.greeting-header-meta,.preview-badge,.resume-version,.step-item,.local-boundary { display: flex; align-items: center; }
+.greeting-title-row { gap: 10px; }
+.greeting-title-block h2 { margin: 0; font: 850 23px/1.15 var(--ui-font-display, "Segoe UI Variable Display", sans-serif); letter-spacing: -.035em; }
+.greeting-title-block p { margin: 5px 0 0; color: var(--greeting-muted); font-size: 11px; }
+.preview-badge { gap: 6px; border: 1px solid rgba(4,166,166,.25); border-radius: 999px; background: #edf9f7; color: #087d7d; padding: 4px 8px; font: 800 9px/1 var(--ui-font-utility, Consolas, monospace); }
+.preview-badge i,.local-boundary i { width: 6px; height: 6px; border-radius: 50%; background: var(--greeting-teal); box-shadow: 0 0 0 3px rgba(4,166,166,.13); }
+.greeting-header-meta { gap: 10px; }
+.resume-version { min-height: 32px; border: 1px solid var(--greeting-line); border-radius: 9px; background: #fff; color: var(--greeting-copy); padding: 0 10px; font: 800 10px/1 var(--ui-font-utility, Consolas, monospace); }
+.close-button { display: grid; width: 36px; height: 36px; place-items: center; border: 1px solid var(--greeting-line); border-radius: 10px; background: #fff; color: var(--greeting-copy); cursor: pointer; font-size: 24px; line-height: 1; }
+.close-button:hover,.close-button:focus-visible { border-color: var(--greeting-blue); color: var(--greeting-blue-ink); outline: 0; box-shadow: 0 0 0 3px var(--ui-focus, rgba(8,105,216,.14)); }
+
+.greeting-steps { display: flex; min-height: 46px; align-items: center; justify-content: center; border-bottom: 1px solid var(--greeting-line); background: #fbfdff; padding: 0 24px; }
+.step-item { gap: 7px; color: var(--greeting-muted); font-size: 11px; font-weight: 800; white-space: nowrap; }
+.step-item i { display: grid; width: 22px; height: 22px; place-items: center; border: 1px solid var(--greeting-line-strong); border-radius: 50%; background: #fff; color: var(--greeting-muted); font: 800 9px/1 var(--ui-font-utility, Consolas, monospace); }
+.step-item.active { color: var(--greeting-blue-ink); }
+.step-item.active i { border-color: var(--greeting-blue); background: var(--greeting-blue); color: #fff; box-shadow: 0 0 0 4px rgba(8,105,216,.09); }
+.step-item.complete { color: #087d7d; }
+.step-item.complete i { border-color: var(--greeting-teal); background: #edf9f7; color: #087d7d; }
+.step-line { width: clamp(64px, 8vw, 140px); height: 1px; margin: 0 13px; background: var(--greeting-line); }
+.step-line.complete { background: color-mix(in srgb, var(--greeting-teal) 55%, var(--greeting-line)); }
+
+.greeting-body { min-height: 0; overflow: hidden; background: var(--greeting-canvas); }
+.selection-stage { display: flex; height: 100%; min-height: 0; box-sizing: border-box; padding: 14px 16px; }
+.selection-stage :deep(.job-workspace) { width: 100%; }
+.selection-stage :deep(.job-browser) { border-radius: 12px; }
+
+.review-stage,.sending-stage { display: grid; height: 100%; min-height: 0; grid-template-columns: 300px minmax(520px, 1fr) 280px; overflow: hidden; background: var(--greeting-paper); }
+.delivery-track { min-width: 0; overflow: hidden; border-right: 1px solid var(--greeting-line); background: color-mix(in srgb, var(--greeting-canvas) 64%, #fff); }
+.delivery-track > header { display: flex; min-height: 54px; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--greeting-line); padding: 0 16px 0 19px; }
+.delivery-track > header span { font-size: 12px; font-weight: 850; }
+.delivery-track > header strong { border-radius: 999px; background: var(--greeting-blue-soft); color: var(--greeting-blue-ink); padding: 5px 8px; font: 850 10px/1 var(--ui-font-utility, Consolas, monospace); }
+.delivery-track > p { margin: 0; border-top: 1px solid var(--greeting-line); color: var(--greeting-muted); padding: 12px 16px; font-size: 10px; line-height: 1.55; }
+.track-list { height: calc(100% - 116px); overflow-y: auto; padding: 10px 10px 12px 15px; }
+.track-item { position: relative; display: grid; width: 100%; grid-template-columns: 22px minmax(0, 1fr) auto; align-items: center; gap: 9px; border: 1px solid transparent; border-radius: 11px; background: transparent; color: var(--greeting-ink); padding: 10px 8px 10px 4px; cursor: pointer; text-align: left; }
+.track-item::before { position: absolute; top: -10px; bottom: calc(50% + 10px); left: 14px; width: 1px; background: var(--greeting-line-strong); content: ""; }
+.track-item:first-child::before { display: none; }
+.track-item:hover,.track-item:focus-visible,.track-item.active { border-color: var(--greeting-line-strong); outline: 0; background: #fff; }
+.track-item.active { box-shadow: 0 7px 18px rgba(8,75,157,.08); }
+.track-node { position: relative; z-index: 1; display: grid; width: 20px; height: 20px; place-items: center; }
+.track-node i { width: 8px; height: 8px; border: 3px solid var(--greeting-canvas); border-radius: 50%; background: var(--greeting-line-strong); box-shadow: 0 0 0 1px var(--greeting-line-strong); }
+.track-item.active .track-node i,.track-item.ready .track-node i { background: var(--greeting-blue); box-shadow: 0 0 0 1px var(--greeting-blue); }
+.track-item.sent .track-node i { background: var(--greeting-teal); box-shadow: 0 0 0 1px var(--greeting-teal); }
+.track-item.sending .track-node i { background: var(--greeting-blue); box-shadow: 0 0 0 4px rgba(8,105,216,.15); animation: track-pulse .75s ease-in-out infinite alternate; }
+.track-item.excluded .track-node i,.track-item.stopped .track-node i { background: #aeb9c8; box-shadow: 0 0 0 1px #aeb9c8; }
+.track-copy { min-width: 0; }
+.track-copy strong,.track-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.track-copy strong { font-size: 12px; }
+.track-copy small { margin-top: 3px; color: var(--greeting-muted); font-size: 10px; }
+.track-item em { color: var(--greeting-muted); font-size: 9px; font-style: normal; font-weight: 750; white-space: nowrap; }
+.track-item.sent em { color: #087d7d; }
+.track-item.sending em { color: var(--greeting-blue-ink); }
+
+.message-editor { min-width: 0; overflow-y: auto; background: #fff; padding: 26px 30px; }
+.editor-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
+.editor-heading span { color: var(--greeting-blue-ink); font-size: 10px; font-weight: 850; }
+.editor-heading h3 { margin: 5px 0 0; font: 850 24px/1.2 var(--ui-font-display, "Segoe UI Variable Display", sans-serif); letter-spacing: -.03em; }
+.include-switch { display: flex; align-items: center; gap: 7px; border: 1px solid var(--greeting-line); border-radius: 999px; background: var(--greeting-blue-soft); color: var(--greeting-blue-ink); padding: 7px 10px; font-size: 10px; font-weight: 850; }
+.include-switch input { margin: 0; accent-color: var(--greeting-blue); }
+.message-paper { margin-top: 22px; border: 1px solid var(--greeting-line-strong); border-radius: 16px; background: linear-gradient(#fff,#fbfdff); padding: 16px 17px 12px; box-shadow: 0 14px 34px rgba(8,65,133,.07); transition: opacity .16s ease; }
+.message-paper.disabled { opacity: .5; }
+.message-paper > label { color: var(--greeting-copy); font-size: 10px; font-weight: 850; }
+.message-paper textarea { display: block; width: 100%; min-height: 178px; box-sizing: border-box; margin-top: 9px; resize: vertical; border: 0; outline: 0; background: transparent; color: var(--greeting-ink); padding: 0; font: 520 15px/1.9 var(--ui-font-body, "Segoe UI Variable Text", sans-serif); }
+.message-paper:focus-within { border-color: var(--greeting-blue); box-shadow: 0 0 0 3px var(--ui-focus, rgba(8,105,216,.12)),0 14px 34px rgba(8,65,133,.07); }
+.message-meta { display: flex; align-items: center; justify-content: space-between; gap: 12px; border-top: 1px dashed var(--greeting-line); color: var(--greeting-muted); padding-top: 9px; font-size: 9px; }
+.message-meta strong { color: var(--greeting-copy); font: 800 10px/1 var(--ui-font-utility, Consolas, monospace); }
+.editor-actions { display: flex; min-height: 48px; align-items: center; justify-content: space-between; gap: 14px; border-bottom: 1px solid var(--greeting-line); }
+.regenerate-button { display: inline-flex; align-items: center; gap: 7px; border: 0; background: transparent; color: var(--greeting-blue-ink); padding: 7px 0; cursor: pointer; font-size: 11px; font-weight: 850; }
+.regenerate-button svg { width: 15px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; }
+.regenerate-button:hover:not(:disabled),.regenerate-button:focus-visible { color: var(--greeting-blue); outline: 0; text-decoration: underline; }
+.regenerate-button:disabled { cursor: wait; opacity: .5; }
+.editor-actions > span { color: var(--greeting-muted); font: 700 9px/1 var(--ui-font-utility, Consolas, monospace); }
+.quality-note { display: grid; grid-template-columns: 30px minmax(0,1fr); align-items: center; gap: 10px; margin-top: 18px; border-left: 3px solid var(--greeting-teal); border-radius: 0 12px 12px 0; background: #f0faf8; padding: 12px 13px; }
+.quality-note > i { display: grid; width: 28px; height: 28px; place-items: center; border-radius: 50%; background: #dff5f1; color: #087d7d; font-size: 12px; font-style: normal; font-weight: 900; }
+.quality-note strong,.quality-note p { display: block; }
+.quality-note strong { color: #146f70; font-size: 11px; }
+.quality-note p { margin: 3px 0 0; color: #5b7e7d; font-size: 10px; }
+
+.evidence-panel { min-width: 0; overflow-y: auto; border-left: 1px solid var(--greeting-line); background: #fbfdff; padding: 18px 17px; }
+.evidence-panel > header { display: flex; align-items: center; justify-content: space-between; gap: 10px; border-bottom: 1px solid var(--greeting-line); padding-bottom: 12px; }
+.evidence-panel > header span { font-size: 12px; font-weight: 850; }
+.evidence-panel > header small { color: var(--greeting-muted); font-size: 9px; }
+.evidence-panel section { margin-top: 17px; }
+.evidence-panel h4 { margin: 0 0 9px; color: var(--greeting-copy); font-size: 10px; }
+.evidence-panel ul { display: grid; gap: 7px; margin: 0; padding: 0; list-style: none; }
+.evidence-panel li { position: relative; border: 1px solid var(--greeting-line); border-radius: 9px; background: #fff; color: var(--greeting-copy); padding: 8px 8px 8px 23px; font-size: 10px; line-height: 1.45; }
+.evidence-panel li::before { position: absolute; top: 11px; left: 9px; width: 6px; height: 6px; border-radius: 50%; background: var(--greeting-teal); content: ""; }
+.highlight-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.highlight-list span { border-radius: 999px; background: var(--greeting-blue-soft); color: var(--greeting-blue-ink); padding: 5px 7px; font-size: 9px; font-weight: 800; }
+.evidence-panel > footer { margin-top: 22px; border-top: 1px solid var(--greeting-line); padding-top: 13px; }
+.evidence-panel > footer strong,.evidence-panel > footer span { display: block; }
+.evidence-panel > footer strong { color: var(--greeting-blue-ink); font: 850 10px/1 var(--ui-font-utility, Consolas, monospace); }
+.evidence-panel > footer span { margin-top: 5px; color: var(--greeting-muted); font-size: 9px; line-height: 1.55; }
+
+.progress-board { min-width: 0; overflow-y: auto; background: #fff; padding: 46px 52px; }
+.progress-kicker { color: var(--greeting-blue-ink); font: 850 10px/1 var(--ui-font-utility, Consolas, monospace); }
+.progress-board h3 { margin: 12px 0 0; font: 880 28px/1.2 var(--ui-font-display, "Segoe UI Variable Display", sans-serif); letter-spacing: -.035em; }
+.progress-board > p { margin: 9px 0 0; color: var(--greeting-muted); font-size: 12px; }
+.progress-rail { height: 8px; overflow: hidden; margin-top: 34px; border-radius: 999px; background: var(--greeting-blue-soft); }
+.progress-rail i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg,var(--greeting-blue),var(--greeting-teal)); transition: width .35s ease; }
+.progress-numbers { display: grid; grid-template-columns: auto auto auto auto 1fr; align-items: baseline; gap: 7px; margin-top: 12px; }
+.progress-numbers strong,.progress-numbers b { font: 900 20px/1 var(--ui-font-display, sans-serif); }
+.progress-numbers strong { color: var(--greeting-blue-ink); }
+.progress-numbers b { margin-left: 18px; color: var(--greeting-muted); }
+.progress-numbers span { color: var(--greeting-muted); font-size: 9px; }
+.current-send-card { display: grid; grid-template-columns: 48px minmax(0,1fr); gap: 13px; margin-top: 36px; border: 1px solid var(--greeting-line); border-radius: 16px; background: #fbfdff; padding: 17px; box-shadow: 0 12px 30px rgba(8,65,133,.06); }
+.company-avatar { display: grid; width: 46px; height: 46px; place-items: center; border-radius: 14px; background: var(--greeting-blue); color: #fff; font-size: 17px; font-weight: 900; }
+.current-send-card small,.current-send-card strong { display: block; }
+.current-send-card small { color: var(--greeting-muted); font-size: 9px; }
+.current-send-card strong { margin-top: 3px; font-size: 13px; }
+.current-send-card p { margin: 10px 0 0; color: var(--greeting-copy); font-size: 11px; line-height: 1.65; }
+.simulation-boundary { border-left: 1px solid var(--greeting-line); background: #fbfdff; padding: 28px 22px; }
+.boundary-mark { display: grid; width: 48px; height: 48px; place-items: center; border: 1px solid rgba(4,166,166,.25); border-radius: 15px; background: #edf9f7; color: #087d7d; font-size: 12px; font-weight: 900; }
+.simulation-boundary h4 { margin: 17px 0 0; font-size: 14px; }
+.simulation-boundary p { margin: 8px 0 0; color: var(--greeting-muted); font-size: 10px; line-height: 1.65; }
+.simulation-boundary ul { display: grid; gap: 9px; margin: 19px 0 0; padding: 0; list-style: none; }
+.simulation-boundary li { border-top: 1px solid var(--greeting-line); color: var(--greeting-copy); padding-top: 9px; font-size: 10px; }
+
+.greeting-footer { display: flex; min-height: 68px; align-items: center; justify-content: space-between; gap: 18px; border-top: 1px solid var(--greeting-line); background: #fff; padding: 10px 16px 10px 20px; }
+.batch-limit-control { display: flex; align-items: center; gap: 8px; color: var(--greeting-copy); font-size: 10px; }
+.batch-limit-control label { font-weight: 850; }
+.batch-limit-control input { width: 52px; height: 34px; box-sizing: border-box; border: 1px solid var(--greeting-line-strong); border-radius: 8px; outline: 0; color: var(--greeting-ink); padding: 0 8px; font: 850 12px/1 var(--ui-font-utility, Consolas, monospace); }
+.batch-limit-control input:focus { border-color: var(--greeting-blue); box-shadow: 0 0 0 3px var(--ui-focus, rgba(8,105,216,.12)); }
+.batch-limit-control > span { color: var(--greeting-muted); }
+.batch-limit-control strong { color: var(--greeting-blue-ink); }
+.local-boundary { gap: 8px; color: #087d7d; font-size: 10px; font-weight: 800; }
+.footer-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.primary-button,.secondary-button,.danger-button,.risk-confirm-button { min-height: 40px; border-radius: 10px; padding: 8px 14px; cursor: pointer; font-size: 11px; font-weight: 850; }
+.primary-button { min-width: 148px; border: 1px solid var(--greeting-blue); background: var(--greeting-blue); color: #fff; box-shadow: 0 8px 20px rgba(8,105,216,.17); }
+.secondary-button { border: 1px solid var(--greeting-line-strong); background: #fff; color: var(--greeting-copy); }
+.danger-button { border: 1px solid #e4aab0; background: #fff3f4; color: #a93c47; }
+.primary-button:hover:not(:disabled),.primary-button:focus-visible { background: var(--ui-accent-hover,#0058c7); outline: 0; box-shadow: 0 0 0 3px var(--ui-focus,rgba(8,105,216,.14)); }
+.secondary-button:hover,.secondary-button:focus-visible { border-color: var(--greeting-blue); color: var(--greeting-blue-ink); outline: 0; }
+.danger-button:hover,.danger-button:focus-visible { border-color: var(--greeting-risk); outline: 0; }
+.primary-button:disabled,.risk-confirm-button:disabled { cursor: not-allowed; opacity: .45; }
+
+.risk-layer { position: absolute; z-index: 3; inset: 0; display: grid; place-items: center; background: rgba(12,31,59,.42); padding: 24px; backdrop-filter: blur(4px); }
+.risk-dialog { display: grid; width: min(520px,100%); grid-template-columns: 50px minmax(0,1fr); gap: 12px 15px; border: 1px solid #e4aab0; border-radius: 18px; background: #fff; padding: 22px; box-shadow: 0 24px 70px rgba(69,15,23,.24); }
+.risk-mark { display: grid; width: 48px; height: 48px; grid-row: 1; place-items: center; border-radius: 15px; background: #fff0f1; color: var(--greeting-risk); font: 900 22px/1 var(--ui-font-display,sans-serif); }
+.risk-dialog small { color: var(--greeting-risk); font-size: 9px; font-weight: 850; }
+.risk-dialog h3 { margin: 4px 0 0; font: 850 20px/1.2 var(--ui-font-display,sans-serif); }
+.risk-dialog > p,.risk-dialog > label,.risk-dialog > footer { grid-column: 1 / -1; }
+.risk-dialog > p { margin: 5px 0 0; color: var(--greeting-copy); font-size: 11px; line-height: 1.75; }
+.risk-dialog > label { display: flex; align-items: flex-start; gap: 8px; border: 1px solid #f0d2d5; border-radius: 10px; background: #fff8f8; color: #8f4249; padding: 10px; font-size: 10px; font-weight: 750; }
+.risk-dialog > label input { margin-top: 1px; accent-color: var(--greeting-risk); }
+.risk-dialog > footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 3px; }
+.risk-confirm-button { border: 1px solid var(--greeting-risk); background: var(--greeting-risk); color: #fff; }
+.risk-confirm-button:hover:not(:disabled),.risk-confirm-button:focus-visible { background: #ad3844; outline: 0; }
+
+@keyframes greeting-dialog-in { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }
+@keyframes track-pulse { from { transform: scale(.86); } to { transform: scale(1.08); } }
+
+@media (max-width: 1120px) {
+  .review-stage,.sending-stage { grid-template-columns: 270px minmax(480px,1fr); }
+  .evidence-panel,.simulation-boundary { display: none; }
+}
+
+@media (max-width: 760px) {
+  .greeting-backdrop { align-items: end; padding: 0; }
+  .greeting-dialog { width: 100%; height: 96dvh; min-height: 0; border-radius: 20px 20px 0 0; }
+  .greeting-header { min-height: 64px; padding: 11px 14px; }
+  .greeting-title-block p,.resume-version { display: none; }
+  .greeting-steps { padding: 0 12px; }
+  .step-line { width: 24px; margin: 0 6px; }
+  .review-stage,.sending-stage { grid-template-columns: 1fr; }
+  .delivery-track { display: none; }
+  .message-editor,.progress-board { padding: 20px 16px; }
+  .greeting-footer { align-items: stretch; flex-direction: column; padding: 10px 12px; }
+  .batch-limit-control,.footer-actions { width: 100%; }
+  .footer-actions button { flex: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .greeting-dialog,.track-item.sending .track-node i { animation: none; }
+  .progress-rail i,.message-paper { transition: none; }
+}
+</style>
