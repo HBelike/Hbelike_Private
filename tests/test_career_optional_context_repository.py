@@ -43,7 +43,17 @@ class FakeConnection:
                     "target_role_profile_id": self.current_target_id,
                 },
             )
-        if sql.startswith("SELECT (:candidate_id IS NULL"):
+        if "AS owns_candidate" in sql and "AS owns_target" in sql:
+            if (
+                parameters["candidate_id"] is None
+                and "CAST(:candidate_id AS UUID) IS NULL" not in sql
+            ):
+                raise RuntimeError("PostgreSQL 无法推断 candidate_id 的 NULL 参数类型")
+            if (
+                parameters["target_id"] is None
+                and "CAST(:target_id AS UUID) IS NULL" not in sql
+            ):
+                raise RuntimeError("PostgreSQL 无法推断 target_id 的 NULL 参数类型")
             return FakeResult(row={"owns_candidate": True, "owns_target": True})
         if sql.startswith("SELECT COALESCE(MAX(binding_version)"):
             return FakeResult(scalar=2)
@@ -126,6 +136,22 @@ class CareerOptionalContextRepositoryTests(unittest.TestCase):
         self.assertEqual(context.candidate.id, candidate_id)
         self.assertEqual(context.target_role.id, target_id)
         self.assertEqual(connection.insert_parameters["candidate_id"], candidate_id)
+        self.assertEqual(connection.insert_parameters["target_id"], target_id)
+
+    def test_target_role_can_be_bound_without_candidate(self) -> None:
+        target_id = uuid4()
+        connection = FakeConnection()
+        repository = CareerContextRepository(FakeDatabase(connection))
+
+        context = repository.bind_conversation(
+            uuid4(),
+            uuid4(),
+            target_role_profile_id=target_id,
+        )
+
+        self.assertIsNone(context.candidate)
+        self.assertEqual(context.target_role.id, target_id)
+        self.assertIsNone(connection.insert_parameters["candidate_id"])
         self.assertEqual(connection.insert_parameters["target_id"], target_id)
 
 

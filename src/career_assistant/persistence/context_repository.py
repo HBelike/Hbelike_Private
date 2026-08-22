@@ -211,13 +211,13 @@ class CareerContextRepository:
                 text(
                     """
                     SELECT
-                        (:candidate_id IS NULL OR EXISTS(
+                        (CAST(:candidate_id AS UUID) IS NULL OR EXISTS(
                             SELECT 1 FROM career_assistant.candidate_profiles
-                            WHERE id = :candidate_id AND actor_id = :actor_id
+                            WHERE id = CAST(:candidate_id AS UUID) AND actor_id = :actor_id
                         )) AS owns_candidate,
-                        (:target_id IS NULL OR EXISTS(
+                        (CAST(:target_id AS UUID) IS NULL OR EXISTS(
                             SELECT 1 FROM career_assistant.target_role_profiles
-                            WHERE id = :target_id AND actor_id = :actor_id
+                            WHERE id = CAST(:target_id AS UUID) AND actor_id = :actor_id
                         )) AS owns_target
                     """
                 ),
