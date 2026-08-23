@@ -1,0 +1,97 @@
+# Windows 实时面试助手
+
+## 设计目标
+
+该模块为 Windows 10/11 视频或语音通话提供本地桌面伴侣：分别采集 Windows 系统输出和麦克风，把前者固定标记为面试官、后者固定标记为应试者；实时转写中文、英文及中英混合对话，检测面试官的问题，并向应试者流式输出统一中文的回答建议。
+
+模块只用于模拟面试或参与者明确允许使用 AI 的场景。不实现隐藏进程、规避屏幕共享、绕过监考、未经授权录音、自动代替用户发言、视频采集或 macOS 适配。
+
+## 技术取舍
+
+- 桌面端使用 Electron + Vue 3 + TypeScript。Electron 官方的 `setDisplayMediaRequestHandler` 支持在 Windows 使用 `audio: "loopback"` 捕获系统音频；麦克风继续使用独立 `getUserMedia`，因此不需要让 LLM 猜双方角色。
+- 音频由 `AudioWorklet` 读取，重采样为 24 kHz 单声道 PCM16，并以 100 ms 帧发送。系统音频和麦克风分别维护 `sequence`。
+- 转文字不是由普通聊天 LLM 完成。首个 Provider 使用专门的 OpenAI Realtime transcription 语音识别模型；`AsrProvider` 接口允许以后增加 FunASR 等本地工具。普通 LLM 只负责问题理解扩展和中文回答生成。
+- ASR 保留原始语言，不自动翻译；回答 Prompt 强制使用中文，并要求各行业专有名词保留原文。
+- 当前问题识别先使用低延迟确定性规则，Provider/Detector 均保留替换接口。个人经历和数字只能来自已确认简历、岗位资料与所选面经证据；材料不足时必须提示“请替换为真实经历”。
+- 服务端只保存 session、final utterance 和 answer。PCM、WAV、partial 转写、API Key 和 Provider 原始错误正文都不进入业务表。
+
+## 调用链
+
+```text
+Windows loopback ─┐
+                  ├─ AudioWorklet → PCM16/24kHz → Electron 主进程 WebSocket
+麦克风 ───────────┘                                  │
+                                                    ▼
+FastAPI /api/career/live-interviews/{id}/stream
+  → organization_id + actor_id 会话所有权
+  → 两个 AsrSession（interviewer / candidate）
+  → TranscriptAssembler → TerminologyCorrector
+  → RuleBasedQuestionDetector → question_version
+  → 简历 + JD + 最近对话 + 所选面经 RAG
+  → ModelGateway → 中文回答流
+  → final utterance / answer 写入 PostgreSQL
+```
+
+新问题会递增 `question_version` 并取消旧回答；桌面端忽略旧版本迟到增量。用户也可以手动立即生成、停止和重新生成。WebSocket 断开、用户结束或窗口退出时，桌面端停止所有 MediaStream Track 并关闭 AudioContext，服务端关闭两个 ASR 会话并取消回答任务。
+
+## 页面
+
+- `/live-interview/setup`：登录、服务地址、简历、目标岗位、面经、ASR/回答模型和麦克风预检。
+- `/live-interview/session/:id`：双声轨状态、双方转写、当前问题、中文回答流和手动控制。
+- `/live-interview/history/:id`：final 对话时间线和各问题的回答尝试。
+
+## 依赖与配置
+
+后端新增 `websockets>=15,<16`，数据库迁移 head 为 `20260823_18`。桌面端依赖锁定在 `desktop-interview-assistant/package-lock.json`，当前 `npm audit` 为 0 个已知漏洞。
+
+后端最低配置：
+
+```text
+CAREER_DATABASE_URL=postgresql+psycopg://...
+OPENAI_API_KEY=...
+OPENAI_TRANSCRIPTION_MODEL=gpt-4o-transcribe  # 可选
+```
+
+也可以在现有模型档案中创建 `provider_key=openai`、能力包含 `transcription` 的 ASR 档案，并在桌面准备页选择。回答继续使用能力包含 `text` 的现有模型档案。`LIVE_INTERVIEW_FAKE_ASR=1` 只用于本地协议联调，不能作为真实转写验收结果。
+
+首次安装与运行：
+
+```powershell
+cd desktop-interview-assistant
+npm ci
+npm run build
+npm start
+```
+
+首次下载 Electron 若访问 GitHub 较慢，可仅在本机安装阶段设置 `ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/` 后重新执行 Electron 安装脚本；该变量不进入产品运行配置。
+
+## 验证结果
+
+截至 2026-08-23 已完成：
+
+- Python 核心、服务、WebSocket、Actor 隔离及相关 Career 回归：24 项通过。
+- 双通道映射、乱序 partial、final 限制、混合语言、术语纠错、追问、手动生成和版本过滤均有自动测试。
+- Electron：5 项 Vitest 通过，`vue-tsc` 与 Electron TypeScript 检查通过，Vite 和 Electron 主/预加载脚本生产构建通过。
+- 依赖审计：0 个已知漏洞。
+- 本地视觉验收：准备页、1280×720 实时双栏页和历史页无横向溢出，界面控制台无错误。
+- Electron 43.4.1 本机启动成功，主进程确认 renderer 已加载生产 `index.html`。
+- Alembic 只有一个 head：`20260823_18`。
+- 数据库迁移及仓储没有 PCM、WAV 或 partial 持久化字段。
+
+一键自动验收：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/verify-live-interview.ps1
+```
+
+## 后续边界
+
+以下项目需要真实外部条件，当前没有伪报通过：
+
+- 使用 OpenAI 有效凭据完成中文、英文、中英混合和非 IT 专有名词的真实流式 ASR。
+- 在 Zoom、Teams、腾讯会议或 Google Meet 中至少选择两个进行双端通话，分别验证耳机和扬声器。
+- 验证真实问题结束到首个回答骨架的 P95 是否不超过 2 秒，并校准规则检测 Precision。
+- 连续运行 60 分钟，验证网络波动、切换默认播放设备和重复追问。当前断线会立即安全停止采集；ASR 自动重连与最多 10 秒音频缓冲尚未实现。
+- 当前自动问题检测使用确定性规则；轻量 LLM JSON 二次分类接口是后续精度增强项，不影响手动“立即生成”兜底。
+
+真实验收前还应确认所有参与者知道并允许录音与 AI 辅助。macOS、Linux、移动端、多面试官声纹识别、离线 ASR、自动发言和综合会后复盘不在本模块范围内。

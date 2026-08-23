@@ -12,6 +12,11 @@ const previewBridge: Bridge = {
         answer_models: [{ id: 'preview-answer', display_name: '中文回答模型', readiness: 'ready' }],
       } as T
     }
+    if (path.endsWith('/interview-library/tree')) {
+      return {
+        items: [{ id: 'company:preview', label: '示例企业', children: [{ id: 'preview-experience', label: '高级产品经理一面', role_name: '产品经理' }] }],
+      } as T
+    }
     if (path.endsWith('/history')) {
       return {
         session: { status: 'completed' },

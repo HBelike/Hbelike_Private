@@ -10,6 +10,8 @@
 
 **Spec:** `docs/superpowers/specs/2026-08-23-windows-live-interview-assistant-design.md`
 
+**Execution Status (2026-08-23):** Task 1～8 的 Windows MVP 已实施并完成自动测试、构建、依赖审计和三页视觉验收。Task 9 的真实双端会议、P95、双会议软件和 60 分钟稳定性验证需要有效 OpenAI 凭据与第二通话端，未伪报通过；ASR 自动重连/10 秒缓冲和轻量 LLM JSON 二次分类记录为下一阶段边界。
+
 ## Global Constraints
 
 - 仅支持 Windows 10/11 x64，不实现 macOS、Linux、iPad 或手机端。

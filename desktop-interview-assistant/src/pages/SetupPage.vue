@@ -22,6 +22,8 @@ const targetId = ref('')
 const asrModelId = ref('')
 const answerModelId = ref('')
 const microphoneId = ref('')
+const interviewMaterials = ref<Array<{ id: string; label: string; company: string }>>([])
+const selectedInterviewIds = ref<string[]>([])
 const loading = ref(false)
 const error = ref('')
 const readyAsr = computed(() => options.value?.asr_models.filter((item) => item.readiness === 'ready') ?? [])
@@ -32,6 +34,15 @@ async function loadOptions() {
   error.value = ''
   try {
     options.value = await bridge.apiRequest<SetupOptions>(apiBaseUrl.value, '/api/career/live-interviews/setup-options')
+    try {
+      const library = await bridge.apiRequest<{ items: Array<{ label: string; children?: Array<{ id: string; label: string }> }> }>(apiBaseUrl.value, '/api/career/interview-library/tree')
+      interviewMaterials.value = library.items.flatMap((company) =>
+        (company.children ?? []).map((item) => ({ id: item.id, label: item.label, company: company.label })),
+      ).slice(0, 12)
+    } catch {
+      // 面经是可选上下文，加载失败不应阻断核心面试流程。
+      interviewMaterials.value = []
+    }
     microphones.value = isElectronBridge
       ? await listMicrophones()
       : [{ deviceId: 'preview-microphone', label: '默认麦克风（预览）' }]
@@ -71,7 +82,7 @@ async function start() {
           target_role_profile_id: targetId.value || null,
           asr_model_profile_id: asrModelId.value || null,
           answer_model_profile_id: answerModelId.value || null,
-          interview_experience_ids: [],
+          interview_experience_ids: selectedInterviewIds.value,
         },
       },
     )
@@ -109,6 +120,10 @@ onMounted(loadOptions)
         <label>回答模型<select v-model="answerModelId"><option value="">免费模型自动选择</option><option v-for="item in readyAnswers" :key="item.id" :value="item.id">{{ item.display_name }}</option></select></label>
       </div>
       <label>麦克风<select v-model="microphoneId"><option v-for="item in microphones" :key="item.deviceId" :value="item.deviceId">{{ item.label || '麦克风' }}</option></select></label>
+      <fieldset v-if="interviewMaterials.length" class="material-picker">
+        <legend>面经资料（最多 5 份）</legend>
+        <label v-for="item in interviewMaterials" :key="item.id" class="material-option"><input v-model="selectedInterviewIds" type="checkbox" :value="item.id" :disabled="!selectedInterviewIds.includes(item.id) && selectedInterviewIds.length >= 5" /><span><strong>{{ item.label }}</strong><small>{{ item.company }}</small></span></label>
+      </fieldset>
       <div class="output-row"><span>系统输出</span><strong>Windows 当前默认播放设备</strong><small>开始时由系统授权窗口确认</small></div>
       <p v-if="error" class="error-message">{{ error }}</p>
       <button class="primary-button" type="button" :disabled="loading" @click="start">{{ loading ? '正在检查…' : '开始面试' }}</button>
