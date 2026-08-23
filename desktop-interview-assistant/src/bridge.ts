@@ -8,6 +8,7 @@ const previewBridge: Bridge = {
       return {
         asr_models: [{ id: 'preview-asr', display_name: 'OpenAI 双语实时转写', readiness: 'ready' }],
         answer_models: [{ id: 'preview-answer', display_name: '中文回答模型', readiness: 'ready' }],
+        environment_asr: { readiness: 'blocked', blocked_reason: '预览环境未配置服务端 ASR' },
       } as T
     }
     if (path.endsWith('/interview-library/tree')) {
@@ -35,9 +36,11 @@ const previewBridge: Bridge = {
   onSocketClosed() { return () => undefined },
 }
 
-if (!window.interviewBridge && !import.meta.env.DEV) {
+const electronBridge = typeof window === 'undefined' ? undefined : window.interviewBridge
+
+if (!electronBridge && !import.meta.env.DEV) {
   throw new Error('桌面桥接未加载，请从 Windows 客户端启动实时面试助手')
 }
 
-export const isElectronBridge = Boolean(window.interviewBridge)
-export const bridge: Bridge = window.interviewBridge ?? previewBridge
+export const isElectronBridge = Boolean(electronBridge)
+export const bridge: Bridge = electronBridge ?? previewBridge

@@ -123,29 +123,47 @@ ipcMain.handle('socket:open', async (event, apiBaseUrl: string, sessionId: strin
   const cookies = await session.defaultSession.cookies.get({ url: base.toString() })
   const cookieHeader = cookies.map((item) => `${item.name}=${item.value}`).join('; ')
   currentSocket?.close()
-  currentSocket = new WebSocket(socketUrl, { headers: cookieHeader ? { Cookie: cookieHeader } : undefined })
-  await new Promise<void>((resolve, reject) => {
-    const handleOpen = () => resolve()
-    const handleError = (error: Error) => reject(error)
-    currentSocket?.once('open', handleOpen)
-    currentSocket?.once('error', handleError)
-  })
+  const socket = new WebSocket(socketUrl, { headers: cookieHeader ? { Cookie: cookieHeader } : undefined })
+  currentSocket = socket
   const sender = event.sender
-  currentSocket.on('message', (data) => {
+  // 必须在等待 open 之前监听消息，避免服务端紧接握手发送的 session.ready 丢失。
+  socket.on('message', (data) => {
     try {
       sender.send('socket:event', JSON.parse(data.toString()))
     } catch {
       sender.send('socket:event', { type: 'error', code: 'invalid_server_event', message: '服务端事件格式无效' })
     }
   })
-  currentSocket.on('close', (code, reason) => {
+  socket.on('close', (code, reason) => {
+    if (currentSocket === socket) currentSocket = null
     sender.send('socket:closed', { code, reason: reason.toString() })
+  })
+  await new Promise<void>((resolve, reject) => {
+    const handleOpen = () => resolve()
+    const handleError = (error: Error) => reject(error)
+    socket.once('open', handleOpen)
+    socket.once('error', handleError)
   })
 })
 
-ipcMain.on('socket:send', (_event, payload: unknown) => {
-  if (currentSocket?.readyState !== WebSocket.OPEN) throw new Error('实时连接尚未建立')
-  currentSocket.send(JSON.stringify(payload))
+ipcMain.on('socket:send', (event, payload: unknown) => {
+  if (currentSocket?.readyState !== WebSocket.OPEN) {
+    event.sender.send('socket:event', {
+      type: 'error',
+      code: 'socket_not_ready',
+      message: '实时连接已断开，请检查转写模型配置后重新开始',
+    })
+    return
+  }
+  try {
+    currentSocket.send(JSON.stringify(payload))
+  } catch {
+    event.sender.send('socket:event', {
+      type: 'error',
+      code: 'socket_send_failed',
+      message: '实时音频发送失败，请重新开始面试',
+    })
+  }
 })
 
 ipcMain.on('socket:close', () => {

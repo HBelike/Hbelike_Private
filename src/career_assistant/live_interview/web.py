@@ -89,6 +89,14 @@ def setup_options(request: Request, actor=Depends(get_live_actor)) -> dict[str, 
     services = get_live_read_services(request)
     models = services.model_gateway.list_availability(actor.organization_id)
     return {
+        "environment_asr": {
+            "readiness": "ready" if os.getenv("OPENAI_API_KEY", "").strip() else "blocked",
+            "blocked_reason": (
+                None
+                if os.getenv("OPENAI_API_KEY", "").strip()
+                else "尚未配置实时转写模型。DeepSeek 只能生成文本答案，不能把微信通话音频转成文字；请配置带 transcription 能力的 OpenAI 模型档案或 OPENAI_API_KEY。"
+            ),
+        },
         "asr_models": [
             _model_payload(item)
             for item in models
@@ -113,6 +121,11 @@ def create_session(
     request: Request,
     actor=Depends(get_live_actor),
 ) -> dict[str, object]:
+    if payload.asr_model_profile_id is None and not os.getenv("OPENAI_API_KEY", "").strip():
+        raise HTTPException(
+            status_code=422,
+            detail="尚未配置实时转写模型。请先配置带 transcription 能力的 OpenAI 模型档案或 OPENAI_API_KEY。",
+        )
     repository = get_live_repository(request)
     try:
         record = repository.create_session(

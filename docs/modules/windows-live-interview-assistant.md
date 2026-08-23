@@ -14,6 +14,7 @@
 - 不对接腾讯会议、Teams、Zoom 等会议软件 API。系统中任何正在播放的对方声音都由 Windows loopback 捕获，用户麦克风作为另一条独立音轨。
 - 音频由 `AudioWorklet` 读取，重采样为 24 kHz 单声道 PCM16，并以 100 ms 帧发送。系统音频和麦克风分别维护 `sequence`。
 - 转文字不是由普通聊天 LLM 完成。首个 Provider 使用专门的 OpenAI Realtime transcription 语音识别模型；`AsrProvider` 接口允许以后增加 FunASR 等本地工具。普通 LLM 只负责问题理解扩展和中文回答生成。
+- `DeepSeek` 等仅声明 `text` 能力的模型不能承担语音转写。准备页只有在发现可用的 transcription 模型档案或 `OPENAI_API_KEY` 时才允许开始；否则直接显示配置说明，不创建必然失败的会话。
 - ASR 保留原始语言，不自动翻译；回答 Prompt 强制使用中文，并要求各行业专有名词保留原文。
 - 当前问题识别先使用低延迟确定性规则，Provider/Detector 均保留替换接口。回答 Prompt 只包含当前面试官问题和输出规则，不读取简历、目标岗位、面经或历史对话；遇到个人经历和数字类问题时只给可替换的回答结构，不编造事实。
 - 服务端只保存 session、final utterance 和 answer。PCM、WAV、partial 转写、API Key 和 Provider 原始错误正文都不进入业务表。
@@ -83,15 +84,16 @@ npm start
 
 截至 2026-08-23 已完成：
 
-- Python 核心、服务、桌面启动、WebSocket、Actor 隔离及相关 Career 回归：32 项通过。
+- Python 核心、服务、桌面启动、WebSocket、Actor 隔离及相关 Career 回归：33 项通过。
 - 原求职助手前端：39 项测试通过，Vite 生产构建通过；“面试大师”位于用户指定的会话顶部工具区。
 - 双通道映射、乱序 partial、final 限制、混合语言、术语纠错、追问、手动生成和版本过滤均有自动测试。
-- Electron：6 项 Vitest 通过，`vue-tsc` 与 Electron TypeScript 检查通过，Vite 和 Electron 主/预加载脚本生产构建通过。
+- Electron：8 项 Vitest 通过，`vue-tsc` 与 Electron TypeScript 检查通过，Vite 和 Electron 主/预加载脚本生产构建通过。
 - 依赖审计：0 个已知漏洞。
 - 本地视觉验收：准备页、1280×720 实时双栏页和历史页无横向溢出，界面控制台无错误。
 - Electron 43.4.1 本机启动成功，主进程确认 renderer 已加载生产 `index.html`。
 - 已在 Windows 桌面实机验收入口链路：点击/调用入口不会打开 PowerShell，Electron 能渲染准备界面，自动使用当前 `http://127.0.0.1:18080` 服务并加载可用转写模型、回答模型和麦克风。
 - 纯问题模式已移除准备页的简历、岗位和面经选择；会话创建只提交 ASR/回答模型 ID，避免 Vue 响应式资料数组跨 IPC 时触发 `An object could not be cloned`。
+- 实时连接现在等待服务端发送 `session.ready` 后才开始系统音频与麦克风采集；连接提前关闭或发送失败只在界面内显示可操作错误，不再从 `ipcMain` 抛出 JavaScript 主进程崩溃弹窗。
 - Alembic 只有一个 head：`20260823_18`。
 - 数据库迁移及仓储没有 PCM、WAV 或 partial 持久化字段。
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -112,6 +113,23 @@ def test_session_can_start_without_reference_materials() -> None:
     assert response.status_code == 201
     assert response.json()["session"]["candidate_profile_id"] is None
     assert response.json()["session"]["target_role_profile_id"] is None
+
+
+def test_session_rejects_missing_transcription_configuration() -> None:
+    app = FastAPI()
+    app.include_router(live_web.router)
+
+    with (
+        patch.dict(os.environ, {"OPENAI_API_KEY": ""}),
+        TestClient(app) as client,
+    ):
+        response = client.post(
+            "/api/career/live-interviews/sessions",
+            json={"answer_model_profile_id": str(uuid4())},
+        )
+
+    assert response.status_code == 422
+    assert "实时转写模型" in response.json()["detail"]
 
 
 def test_desktop_launch_endpoint_starts_windows_capture_tool() -> None:
