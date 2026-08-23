@@ -52,6 +52,74 @@ class CareerRuntimeSettings:
 
 
 @dataclass(frozen=True)
+class CareerTurnWorkerSettings:
+    """PostgreSQL Agent Worker 的进程内并发与租约配置。"""
+
+    worker_id: str
+    global_concurrency: int
+    worker_concurrency: int
+    lease_seconds: float
+    heartbeat_seconds: float
+    poll_seconds: float
+
+    def validate(self) -> None:
+        if not self.worker_id.strip():
+            raise ValueError("Worker ID 不能为空")
+        if not 1 <= self.global_concurrency <= 64:
+            raise ValueError("全局 Agent 并发必须在 1 到 64 之间")
+        if not 1 <= self.worker_concurrency <= self.global_concurrency:
+            raise ValueError("单 Worker 并发必须在 1 到全局并发之间")
+        if self.heartbeat_seconds <= 0:
+            raise ValueError("Worker 心跳间隔必须大于零")
+        if self.lease_seconds < self.heartbeat_seconds * 3:
+            raise ValueError("Worker 租约至少应为心跳间隔的三倍")
+        if self.poll_seconds <= 0:
+            raise ValueError("Worker 轮询间隔必须大于零")
+
+
+def load_career_turn_worker_settings() -> CareerTurnWorkerSettings:
+    """从环境变量读取跨进程 Agent 队列设置。"""
+
+    import socket
+
+    settings = CareerTurnWorkerSettings(
+        worker_id=os.getenv("CAREER_AGENT_WORKER_ID", "").strip()
+        or f"{socket.gethostname()}-{os.getpid()}",
+        global_concurrency=_read_env_int("CAREER_AGENT_GLOBAL_CONCURRENCY", 8),
+        worker_concurrency=_read_env_int("CAREER_AGENT_WORKER_CONCURRENCY", 4),
+        lease_seconds=_read_env_float("CAREER_AGENT_LEASE_SECONDS", 90.0),
+        heartbeat_seconds=_read_env_float("CAREER_AGENT_HEARTBEAT_SECONDS", 20.0),
+        poll_seconds=(
+            _read_env_float("CAREER_AGENT_EVENT_POLL_MILLISECONDS", 300.0) / 1000
+        ),
+    )
+    settings.validate()
+    return settings
+
+
+def _read_env_int(name: str, default: int) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} 必须是整数") from exc
+    return value
+
+
+def _read_env_float(name: str, default: float) -> float:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} 必须是数字") from exc
+    return value
+
+
+@dataclass(frozen=True)
 class AttachmentProcessingSettings:
     """临时材料处理的隐私边界配置。"""
 

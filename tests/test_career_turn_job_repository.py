@@ -303,6 +303,36 @@ class CareerTurnJobRepositoryTests(unittest.TestCase):
             self.assertEqual(parameters["turn_id"], turn_id)
             self.assertEqual(parameters["worker_id"], "worker-a")
 
+    def test_finish_claim_writes_terminal_event_and_releases_slot_atomically(self) -> None:
+        from src.career_assistant.persistence.turn_job_repository import (
+            CareerTurnJobRepository,
+        )
+
+        database = FakeDatabase(
+            [
+                FakeResult(row={"status": "succeeded"}),
+                FakeResult(),
+                FakeResult(rowcount=1),
+            ],
+        )
+        repository = CareerTurnJobRepository(database)
+        turn_id = uuid4()
+
+        finished = repository.finish_claim(
+            turn_id,
+            "worker-a",
+            status=AgentTurnStatus.SUCCEEDED,
+            event_type="done",
+            event_payload={"state": "succeeded"},
+        )
+
+        self.assertTrue(finished)
+        self.assertEqual(database.transaction_count, 1)
+        executed_sql = "\n".join(call[0] for call in database.connection.calls)
+        self.assertIn("UPDATE career_assistant.agent_turns", executed_sql)
+        self.assertIn("INSERT INTO career_assistant.agent_turn_events", executed_sql)
+        self.assertIn("UPDATE career_assistant.agent_execution_slots", executed_sql)
+
 
 if __name__ == "__main__":
     unittest.main()

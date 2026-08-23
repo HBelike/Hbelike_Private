@@ -394,6 +394,90 @@ class CareerTurnJobRepository:
             )
         return turn_result.rowcount == 1
 
+    def finish_claim(
+        self,
+        turn_id: UUID,
+        worker_id: str,
+        *,
+        status: AgentTurnStatus,
+        event_type: str,
+        event_payload: dict[str, object],
+        error_code: str | None = None,
+        error_message: str | None = None,
+    ) -> bool:
+        """原子收口 Worker 租约、写最终事件并归还执行槽位。"""
+
+        if status not in {
+            AgentTurnStatus.SUCCEEDED,
+            AgentTurnStatus.FAILED,
+            AgentTurnStatus.CANCELLED,
+        }:
+            raise ValueError("Worker 只能把 Turn 收口为终态")
+        normalized_worker_id = worker_id.strip()
+        normalized_event_type = event_type.strip()
+        if not normalized_worker_id or not normalized_event_type:
+            raise ValueError("Worker ID 和最终事件类型不能为空")
+        with self._database.transaction() as connection:
+            row = connection.execute(
+                text(
+                    """
+                    UPDATE career_assistant.agent_turns
+                    SET status = CASE
+                            WHEN status = 'running' THEN :status
+                            ELSE status
+                        END,
+                        error_code = CASE
+                            WHEN status = 'running' THEN :error_code
+                            ELSE error_code
+                        END,
+                        error_message = CASE
+                            WHEN status = 'running' THEN :error_message
+                            ELSE error_message
+                        END,
+                        completed_at = COALESCE(completed_at, NOW()),
+                        lease_owner = NULL,
+                        lease_expires_at = NULL,
+                        heartbeat_at = NULL,
+                        updated_at = NOW()
+                    WHERE id = :turn_id
+                      AND lease_owner = :worker_id
+                    RETURNING status
+                    """,
+                ),
+                {
+                    "turn_id": turn_id,
+                    "worker_id": normalized_worker_id,
+                    "status": status.value,
+                    "error_code": error_code if status is AgentTurnStatus.FAILED else None,
+                    "error_message": (
+                        error_message if status is AgentTurnStatus.FAILED else None
+                    ),
+                },
+            ).mappings().one_or_none()
+            if row is None:
+                return False
+            self._insert_event(
+                connection,
+                turn_id,
+                normalized_event_type,
+                event_payload,
+            )
+            connection.execute(
+                text(
+                    """
+                    UPDATE career_assistant.agent_execution_slots
+                    SET turn_id = NULL,
+                        lease_owner = NULL,
+                        lease_expires_at = NULL,
+                        updated_at = NOW()
+                    WHERE turn_id = :turn_id
+                      AND lease_owner = :worker_id
+                    """,
+                ),
+                {"turn_id": turn_id, "worker_id": normalized_worker_id},
+            )
+        return True
+
     def recover_expired(self, *, global_limit: int) -> int:
         """回收过期租约；已进入非幂等 Tool 的 Turn 失败，其余重新排队。"""
 
