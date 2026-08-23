@@ -177,9 +177,51 @@ class CareerIntakeGraph:
             raise RuntimeError("输入处理图未返回最终结果")
         return result
 
+    def run_prepared(
+        self,
+        inbound_message: CareerInboundMessage,
+        active_turn: ActiveAgentTurn,
+        parsed_attachments: tuple[ParsedAttachment, ...],
+    ) -> IntakeGraphResult:
+        """执行 Worker 已领取的 Turn，直接复用 API 预先解析的完整附件内容。"""
+
+        result: IntakeGraphResult | None = None
+        for event in self.stream_prepared(
+            inbound_message,
+            active_turn,
+            parsed_attachments,
+        ):
+            if event.result is not None:
+                result = event.result
+        if result is None:
+            raise RuntimeError("输入处理图未返回最终结果")
+        return result
+
+    def stream_prepared(
+        self,
+        inbound_message: CareerInboundMessage,
+        active_turn: ActiveAgentTurn,
+        parsed_attachments: tuple[ParsedAttachment, ...],
+    ) -> Iterator[IntakeGraphStreamEvent]:
+        """流式执行已持久化输入，不再次创建 Turn 或读取临时附件。"""
+
+        if active_turn.turn.id != inbound_message.turn_id:
+            raise ValueError("Active Turn 与输入 Turn ID 不一致")
+        restored_kinds = tuple(item.kind for item in parsed_attachments)
+        if restored_kinds != inbound_message.prepared_attachment_kinds:
+            raise ValueError("已解析附件类型与持久化输入不一致")
+        yield from self.stream(
+            inbound_message,
+            active_turn=active_turn,
+            parsed_attachments=parsed_attachments,
+        )
+
     def stream(
         self,
         inbound_message: CareerInboundMessage,
+        *,
+        active_turn: ActiveAgentTurn | None = None,
+        parsed_attachments: tuple[ParsedAttachment, ...] = (),
     ) -> Iterator[IntakeGraphStreamEvent]:
         """逐节点运行 LangGraph，并输出可供 SSE 展示的真实处理进展。
 
@@ -188,7 +230,7 @@ class CareerIntakeGraph:
         临时消息安全替换为正式历史消息。
         """
 
-        active_turn = self._agent_loop.start_turn(inbound_message)
+        active_turn = active_turn or self._agent_loop.start_turn(inbound_message)
         final_state: CareerIntakeGraphState | None = None
         try:
             # LangGraph 会自动建立图与节点层级；先启用全局输入/输出隐藏，避免简历、
@@ -198,6 +240,7 @@ class CareerIntakeGraph:
                 {
                     "inbound_message": inbound_message,
                     "active_turn": active_turn,
+                    "parsed_attachments": parsed_attachments,
                     "completed_steps": (),
                 },
                 config={
@@ -314,6 +357,9 @@ class CareerIntakeGraph:
         """构造仅内存可见的原始输入上下文，不向数据库写入 URL 或附件路径。"""
 
         inbound_message = state["inbound_message"]
+        prepared_kinds = tuple(
+            item.kind.value for item in state.get("parsed_attachments", ())
+        )
         context = TurnRuntimeContext(
             original_text=inbound_message.text.strip(),
             model_text=(
@@ -323,7 +369,12 @@ class CareerIntakeGraph:
             ),
             has_job_url=bool((inbound_message.job_url or "").strip()),
             attachment_kind_codes=tuple(
-                sorted(attachment.kind.value for attachment in inbound_message.attachments),
+                sorted(
+                    {
+                        *(attachment.kind.value for attachment in inbound_message.attachments),
+                        *prepared_kinds,
+                    },
+                ),
             ),
         )
         return {
@@ -338,7 +389,9 @@ class CareerIntakeGraph:
         """在当前 Turn 内解析临时材料，解析产物不会直接进入持久化层。"""
 
         inbound_message = state["inbound_message"]
-        if not inbound_message.attachments:
+        if state.get("parsed_attachments"):
+            parsed_attachments = state["parsed_attachments"]
+        elif not inbound_message.attachments:
             parsed_attachments: tuple[ParsedAttachment, ...] = ()
         elif self._attachment_parser is None:
             raise RuntimeError("附件解析器尚未初始化")

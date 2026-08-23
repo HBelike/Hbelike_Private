@@ -186,6 +186,7 @@ class CareerInboundMessage:
     model_selection: ModelSelectionRequest = field(default_factory=ModelSelectionRequest)
     job_url: str | None = None
     attachments: tuple[AttachmentDescriptor, ...] = ()
+    prepared_attachment_kinds: tuple[AttachmentKind, ...] = ()
     interview_evidence: tuple[InterviewEvidence, ...] = ()
     activated_skills: tuple[ActivatedSkill, ...] = ()
     effective_text: str | None = None
@@ -198,12 +199,19 @@ class CareerInboundMessage:
 
         has_text = bool(self.text.strip())
         has_job_url = bool((self.job_url or "").strip())
-        if not has_text and not has_job_url and not self.attachments:
+        if (
+            not has_text
+            and not has_job_url
+            and not self.attachments
+            and not self.prepared_attachment_kinds
+        ):
             raise ValueError("至少需要提供文本、职位链接或附件中的一种输入")
 
         self.model_selection.validate()
         for attachment in self.attachments:
             attachment.validate()
+        if len(set(self.prepared_attachment_kinds)) != len(self.prepared_attachment_kinds):
+            raise ValueError("已解析附件类型不能重复")
         if len(self.interview_evidence) > 6:
             raise ValueError("单轮最多引用 6 条面经证据")
         for evidence in self.interview_evidence:

@@ -88,6 +88,17 @@ class CareerAgentLoop:
         )
         return ActiveAgentTurn(conversation=conversation, turn=running_turn)
 
+    def activate_turn(self, actor_id: UUID, turn_id: UUID) -> ActiveAgentTurn:
+        """装载已经由 PostgreSQL Worker 领取并切换到 running 的 Turn。"""
+
+        turn = self._repository.get_agent_turn(actor_id, turn_id)
+        if turn is None:
+            raise LookupError("Agent Turn 不存在或无访问权限")
+        if turn.status is not AgentTurnStatus.RUNNING:
+            raise LookupError("Agent Turn 尚未由 Worker 领取或已经结束")
+        conversation = self.resume_conversation(actor_id, turn.conversation_id)
+        return ActiveAgentTurn(conversation=conversation, turn=turn)
+
     def mark_turn_succeeded(self, actor_id: UUID, turn_id: UUID) -> AgentTurnRecord:
         """由 AgentRunner 在完整工作流成功后调用，收口 Turn 状态。"""
 
@@ -124,4 +135,5 @@ class CareerAgentLoop:
         if (inbound_message.job_url or "").strip():
             kinds.add("job_url")
         kinds.update(attachment.kind.value for attachment in inbound_message.attachments)
+        kinds.update(kind.value for kind in inbound_message.prepared_attachment_kinds)
         return frozenset(kinds)
