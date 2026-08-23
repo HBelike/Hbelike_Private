@@ -284,6 +284,11 @@ class CareerTurnJobRepositoryTests(unittest.TestCase):
         self.assertIn("worker_lease_expired_after_side_effect", turn_sql)
         self.assertIn("THEN 'failed'", turn_sql)
         self.assertIn("ELSE 'queued'", turn_sql)
+        self.assertEqual(
+            turn_sql.count("FALSE ) ) THEN"),
+            4,
+            "每个 WHEN EXISTS 子查询都必须在 THEN 前闭合 EXISTS 括号",
+        )
         self.assertIn("lease_expires_at < NOW()", slot_sql)
 
     def test_release_claim_clears_turn_and_slot_ownership(self) -> None:

@@ -509,6 +509,7 @@ class CareerTurnJobRepository:
                                       (event.payload_json ->> 'non_idempotent')::boolean,
                                       FALSE
                                   )
+                            )
                             THEN 'failed'
                             ELSE 'queued'
                         END,
@@ -522,6 +523,7 @@ class CareerTurnJobRepository:
                                       (event.payload_json ->> 'non_idempotent')::boolean,
                                       FALSE
                                   )
+                            )
                             THEN 'worker_lease_expired_after_side_effect'
                             ELSE NULL
                         END,
@@ -535,6 +537,7 @@ class CareerTurnJobRepository:
                                       (event.payload_json ->> 'non_idempotent')::boolean,
                                       FALSE
                                   )
+                            )
                             THEN 'Worker 异常退出；为避免重复执行外部操作，本轮未自动重试。'
                             ELSE NULL
                         END,
@@ -552,6 +555,7 @@ class CareerTurnJobRepository:
                                       (event.payload_json ->> 'non_idempotent')::boolean,
                                       FALSE
                                   )
+                            )
                             THEN NOW()
                             ELSE NULL
                         END,
