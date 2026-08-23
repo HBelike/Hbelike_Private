@@ -30,8 +30,27 @@ def test_prompt_requires_chinese_and_forbids_personal_fabrication() -> None:
 
     assert "统一使用中文" in prompt
     assert "不得编造" in prompt
-    assert "替换为真实经历" in prompt
+    assert "可替换占位提示" in prompt
     assert "专有名词保留原文" in prompt
+
+
+def test_prompt_only_uses_transcribed_interviewer_question() -> None:
+    prompt = build_answer_prompt(
+        "请解释 Kafka consumer group？",
+        QuestionIntent.KNOWLEDGE,
+        LiveAnswerContext(
+            candidate_facts="不应进入提示词的简历内容",
+            target_role="不应进入提示词的岗位内容",
+            recent_conversation=("不应进入提示词的历史对话",),
+            interview_evidence=("不应进入提示词的面经",),
+        ),
+    )
+
+    assert "请解释 Kafka consumer group？" in prompt
+    assert "不应进入提示词" not in prompt
+    assert "最近对话：" not in prompt
+    assert "已确认个人材料：" not in prompt
+    assert "面经检索证据" not in prompt
 
 
 def test_repository_rejects_partial_before_opening_database_transaction() -> None:

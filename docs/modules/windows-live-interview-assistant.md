@@ -2,7 +2,7 @@
 
 ## 设计目标
 
-该模块作为现有“求职助手”中的“面试大师”工具运行，为 Windows 10/11 视频或语音通话提供本地桌面采集能力：分别采集 Windows 系统输出和麦克风，把前者固定标记为面试官、后者固定标记为应试者；实时转写中文、英文及中英混合对话，检测面试官的问题，并向应试者流式输出统一中文的回答建议。
+该模块作为现有“求职助手”中的“面试大师”工具运行，为 Windows 10/11 视频或语音通话提供本地桌面采集能力：分别采集 Windows 系统输出和麦克风，把前者固定标记为面试官、后者固定标记为应试者；实时转写中文、英文及中英混合对话，检测面试官的问题，并把当前问题文本直接交给所选回答模型，向应试者流式输出统一中文的回答建议。
 
 模块只用于模拟面试或参与者明确允许使用 AI 的场景。不实现隐藏进程、规避屏幕共享、绕过监考、未经授权录音、自动代替用户发言、视频采集或 macOS 适配。
 
@@ -15,7 +15,7 @@
 - 音频由 `AudioWorklet` 读取，重采样为 24 kHz 单声道 PCM16，并以 100 ms 帧发送。系统音频和麦克风分别维护 `sequence`。
 - 转文字不是由普通聊天 LLM 完成。首个 Provider 使用专门的 OpenAI Realtime transcription 语音识别模型；`AsrProvider` 接口允许以后增加 FunASR 等本地工具。普通 LLM 只负责问题理解扩展和中文回答生成。
 - ASR 保留原始语言，不自动翻译；回答 Prompt 强制使用中文，并要求各行业专有名词保留原文。
-- 当前问题识别先使用低延迟确定性规则，Provider/Detector 均保留替换接口。个人经历和数字只能来自已确认简历、岗位资料与所选面经证据；材料不足时必须提示“请替换为真实经历”。
+- 当前问题识别先使用低延迟确定性规则，Provider/Detector 均保留替换接口。回答 Prompt 只包含当前面试官问题和输出规则，不读取简历、目标岗位、面经或历史对话；遇到个人经历和数字类问题时只给可替换的回答结构，不编造事实。
 - 服务端只保存 session、final utterance 和 answer。PCM、WAV、partial 转写、API Key 和 Provider 原始错误正文都不进入业务表。
 
 ## 调用链
@@ -30,7 +30,7 @@ FastAPI /api/career/live-interviews/{id}/stream
   → 两个 AsrSession（interviewer / candidate）
   → TranscriptAssembler → TerminologyCorrector
   → RuleBasedQuestionDetector → question_version
-  → 简历 + JD + 最近对话 + 所选面经 RAG
+  → 当前面试官问题文本（无资料检索、无历史对话注入）
   → ModelGateway → 中文回答流
   → final utterance / answer 写入 PostgreSQL
 ```
@@ -50,7 +50,7 @@ FastAPI /api/career/live-interviews/{id}/stream
 ## 页面
 
 - 求职助手会话顶部“面试大师”：统一产品入口，点击后启动或聚焦 Windows 采集器。
-- `/live-interview/setup`：采集器内的简历、目标岗位、面经、ASR/回答模型和麦克风预检。
+- `/live-interview/setup`：只选择 ASR 模型、回答模型和麦克风；不展示或提交简历、岗位及面经资料。
 - `/live-interview/session/:id`：双声轨状态、双方转写、当前问题、中文回答流和手动控制。
 - `/live-interview/history/:id`：final 对话时间线和各问题的回答尝试。
 
@@ -83,14 +83,15 @@ npm start
 
 截至 2026-08-23 已完成：
 
-- Python 核心、服务、桌面启动、WebSocket、Actor 隔离及相关 Career 回归：30 项通过。
+- Python 核心、服务、桌面启动、WebSocket、Actor 隔离及相关 Career 回归：32 项通过。
 - 原求职助手前端：39 项测试通过，Vite 生产构建通过；“面试大师”位于用户指定的会话顶部工具区。
 - 双通道映射、乱序 partial、final 限制、混合语言、术语纠错、追问、手动生成和版本过滤均有自动测试。
-- Electron：5 项 Vitest 通过，`vue-tsc` 与 Electron TypeScript 检查通过，Vite 和 Electron 主/预加载脚本生产构建通过。
+- Electron：6 项 Vitest 通过，`vue-tsc` 与 Electron TypeScript 检查通过，Vite 和 Electron 主/预加载脚本生产构建通过。
 - 依赖审计：0 个已知漏洞。
 - 本地视觉验收：准备页、1280×720 实时双栏页和历史页无横向溢出，界面控制台无错误。
 - Electron 43.4.1 本机启动成功，主进程确认 renderer 已加载生产 `index.html`。
-- 已在 Windows 桌面实机验收入口链路：点击/调用入口不会打开 PowerShell，Electron 能渲染准备界面，自动使用当前 `http://127.0.0.1:18080` 服务并加载真实简历、岗位、回答模型、麦克风和面经资料。
+- 已在 Windows 桌面实机验收入口链路：点击/调用入口不会打开 PowerShell，Electron 能渲染准备界面，自动使用当前 `http://127.0.0.1:18080` 服务并加载可用转写模型、回答模型和麦克风。
+- 纯问题模式已移除准备页的简历、岗位和面经选择；会话创建只提交 ASR/回答模型 ID，避免 Vue 响应式资料数组跨 IPC 时触发 `An object could not be cloned`。
 - Alembic 只有一个 head：`20260823_18`。
 - 数据库迁移及仓储没有 PCM、WAV 或 partial 持久化字段。
 

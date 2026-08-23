@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from starlette.concurrency import iterate_in_threadpool
 
 from src.career_assistant.contracts import ModelCapability, ModelSelectionMode, ModelSelectionRequest
@@ -33,7 +33,7 @@ from src.career_assistant.live_interview.persistence import (
     session_payload,
 )
 from src.career_assistant.live_interview.session_manager import LiveSessionManager
-from src.career_assistant.live_interview.terminology import TerminologyCorrector, extract_terms
+from src.career_assistant.live_interview.terminology import TerminologyCorrector
 from src.career_assistant.model_clients import ChatMessage
 from src.career_assistant.model_gateway import ModelReadiness
 from src.career_assistant.persistence.conversation_repository import (
@@ -51,9 +51,6 @@ router = APIRouter(prefix="/api/career/live-interviews", tags=["live-interview"]
 
 
 class CreateLiveInterviewRequest(BaseModel):
-    candidate_profile_id: UUID | None = None
-    target_role_profile_id: UUID | None = None
-    interview_experience_ids: list[UUID] = Field(default_factory=list, max_length=5)
     asr_model_profile_id: UUID | None = None
     answer_model_profile_id: UUID | None = None
 
@@ -90,28 +87,8 @@ def get_live_repository(request: Request) -> LiveInterviewRepository:
 @router.get("/setup-options")
 def setup_options(request: Request, actor=Depends(get_live_actor)) -> dict[str, object]:
     services = get_live_read_services(request)
-    candidates = services.context_repository.list_candidate_profiles(actor.actor_id)
-    targets = services.context_repository.list_target_roles(actor.actor_id)
     models = services.model_gateway.list_availability(actor.organization_id)
     return {
-        "candidate_profiles": [
-            {
-                "id": str(item.id),
-                "display_name": item.display_name,
-                "source_filename": item.source_filename,
-                "version": item.version,
-            }
-            for item in candidates
-        ],
-        "target_roles": [
-            {
-                "id": str(item.id),
-                "company_name": item.company_name,
-                "role_name": item.role_name,
-                "version": item.version,
-            }
-            for item in targets
-        ],
         "asr_models": [
             _model_payload(item)
             for item in models
@@ -141,9 +118,9 @@ def create_session(
         record = repository.create_session(
             actor.organization_id,
             actor.actor_id,
-            candidate_profile_id=payload.candidate_profile_id,
-            target_role_profile_id=payload.target_role_profile_id,
-            interview_experience_ids=tuple(payload.interview_experience_ids),
+            candidate_profile_id=None,
+            target_role_profile_id=None,
+            interview_experience_ids=(),
             asr_provider=(
                 "fake"
                 if os.getenv("LIVE_INTERVIEW_FAKE_ASR", "").strip() == "1"
@@ -300,30 +277,8 @@ async def _build_live_manager(
     from src.career_assistant.web.router import get_career_services
 
     services = get_career_services(websocket)
-    candidate = (
-        services.context_repository.get_candidate_profile(record.actor_id, record.candidate_profile_id)
-        if record.candidate_profile_id
-        else None
-    )
-    target = (
-        services.context_repository.get_target_role(record.actor_id, record.target_role_profile_id)
-        if record.target_role_profile_id
-        else None
-    )
-    candidate_facts = candidate.resume_outline if candidate else ""
-    target_role = target.job_text if target else ""
-    terms = extract_terms(candidate_facts, target_role)
+    terms: tuple[str, ...] = ()
     corrector = TerminologyCorrector(terms)
-    evidence: tuple[str, ...] = ()
-    if record.interview_experience_ids:
-        result = await asyncio.to_thread(
-            services.interview_retrieval_service.retrieve,
-            record.organization_id,
-            target_role or candidate_facts[:500] or "面试",
-            limit=5,
-            experience_ids=record.interview_experience_ids,
-        )
-        evidence = tuple(item.chunk.contextual_content for item in result.candidates)
 
     asr_provider = _resolve_asr_provider(services, record)
     sessions = {}
@@ -388,12 +343,7 @@ async def _build_live_manager(
     return LiveSessionManager(
         asr_sessions=sessions,
         answer_service=LiveAnswerService(prompt_streamer),
-        answer_context=LiveAnswerContext(
-            candidate_facts=candidate_facts,
-            target_role=target_role,
-            interview_evidence=evidence,
-            terminology=terms,
-        ),
+        answer_context=LiveAnswerContext(),
         transcript_hook=save_transcript,
         answer_hook=save_answer,
     )

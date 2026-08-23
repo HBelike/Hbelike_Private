@@ -55,8 +55,6 @@ class LiveInterviewRepository:
         asr_model_profile_id: UUID | None = None,
         answer_model_profile_id: UUID | None = None,
     ) -> LiveInterviewSessionRecord:
-        if candidate_profile_id is None and target_role_profile_id is None:
-            raise ValueError("开始面试前至少选择一份简历或目标岗位")
         session_id = uuid4()
         params = {
             "id": session_id,

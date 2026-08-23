@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
@@ -79,6 +80,38 @@ def test_session_payload_never_contains_audio() -> None:
     payload = session_payload(_record())
     assert "pcm" not in str(payload).lower()
     assert "audio" not in str(payload).lower()
+
+
+def test_session_can_start_without_reference_materials() -> None:
+    app = FastAPI()
+    app.include_router(live_web.router)
+    repository = SimpleNamespace()
+    repository.create_session = lambda *args, **kwargs: replace(
+        _record(),
+        candidate_profile_id=None,
+        target_role_profile_id=None,
+        interview_experience_ids=(),
+        asr_model_profile_id=kwargs["asr_model_profile_id"],
+        answer_model_profile_id=kwargs["answer_model_profile_id"],
+    )
+    asr_model_id = uuid4()
+    answer_model_id = uuid4()
+
+    with (
+        patch.object(live_web, "get_live_repository", return_value=repository),
+        TestClient(app) as client,
+    ):
+        response = client.post(
+            "/api/career/live-interviews/sessions",
+            json={
+                "asr_model_profile_id": str(asr_model_id),
+                "answer_model_profile_id": str(answer_model_id),
+            },
+        )
+
+    assert response.status_code == 201
+    assert response.json()["session"]["candidate_profile_id"] is None
+    assert response.json()["session"]["target_role_profile_id"] is None
 
 
 def test_desktop_launch_endpoint_starts_windows_capture_tool() -> None:

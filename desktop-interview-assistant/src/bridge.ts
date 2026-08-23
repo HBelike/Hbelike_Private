@@ -6,8 +6,6 @@ const previewBridge: Bridge = {
   async apiRequest<T>(_apiBaseUrl: string, path: string, init?: { method?: string; body?: unknown }): Promise<T> {
     if (path.endsWith('/setup-options')) {
       return {
-        candidate_profiles: [{ id: 'preview-candidate', display_name: '中文产品与技术简历', source_filename: 'resume.pdf' }],
-        target_roles: [{ id: 'preview-role', company_name: '示例企业', role_name: '高级产品经理' }],
         asr_models: [{ id: 'preview-asr', display_name: 'OpenAI 双语实时转写', readiness: 'ready' }],
         answer_models: [{ id: 'preview-answer', display_name: '中文回答模型', readiness: 'ready' }],
       } as T
