@@ -26,6 +26,7 @@ class ModelCapability(StrEnum):
     STRUCTURED_OUTPUT = "structured_output"
     EMBEDDING = "embedding"
     TOOLS = "tools"
+    TRANSCRIPTION = "transcription"
 
 
 class SkillExecutionMode(StrEnum):

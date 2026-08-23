@@ -28,6 +28,7 @@ class LiveInterviewSessionRecord:
     target_role_profile_id: UUID | None
     interview_experience_ids: tuple[UUID, ...]
     asr_provider: str
+    asr_model_profile_id: UUID | None
     answer_model_profile_id: UUID | None
     status: LiveInterviewStatus
     started_at: datetime | None
@@ -51,6 +52,7 @@ class LiveInterviewRepository:
         target_role_profile_id: UUID | None,
         interview_experience_ids: tuple[UUID, ...] = (),
         asr_provider: str = "openai",
+        asr_model_profile_id: UUID | None = None,
         answer_model_profile_id: UUID | None = None,
     ) -> LiveInterviewSessionRecord:
         if candidate_profile_id is None and target_role_profile_id is None:
@@ -64,6 +66,7 @@ class LiveInterviewRepository:
             "target_role_profile_id": target_role_profile_id,
             "experience_ids": json.dumps([str(item) for item in interview_experience_ids]),
             "asr_provider": asr_provider.strip() or "openai",
+            "asr_model_profile_id": asr_model_profile_id,
             "answer_model_profile_id": answer_model_profile_id,
         }
         with self._database.transaction() as connection:
@@ -73,11 +76,11 @@ class LiveInterviewRepository:
                     INSERT INTO career_assistant.live_interview_sessions
                         (id, organization_id, actor_id, candidate_profile_id,
                          target_role_profile_id, interview_experience_ids,
-                         asr_provider, answer_model_profile_id)
+                         asr_provider, asr_model_profile_id, answer_model_profile_id)
                     SELECT
                         :id, :organization_id, :actor_id, :candidate_profile_id,
                         :target_role_profile_id, CAST(:experience_ids AS JSONB),
-                        :asr_provider, :answer_model_profile_id
+                        :asr_provider, :asr_model_profile_id, :answer_model_profile_id
                     WHERE
                         (CAST(:candidate_profile_id AS UUID) IS NULL OR EXISTS(
                             SELECT 1 FROM career_assistant.candidate_profiles
@@ -339,6 +342,7 @@ def _session(row: RowMapping) -> LiveInterviewSessionRecord:
         target_role_profile_id=UUID(str(row["target_role_profile_id"])) if row["target_role_profile_id"] else None,
         interview_experience_ids=tuple(UUID(str(item)) for item in row["interview_experience_ids"]),
         asr_provider=str(row["asr_provider"]),
+        asr_model_profile_id=UUID(str(row["asr_model_profile_id"])) if row["asr_model_profile_id"] else None,
         answer_model_profile_id=UUID(str(row["answer_model_profile_id"])) if row["answer_model_profile_id"] else None,
         status=LiveInterviewStatus(str(row["status"])),
         started_at=row["started_at"],
@@ -356,6 +360,7 @@ def _session_payload(record: LiveInterviewSessionRecord) -> dict[str, object]:
         "target_role_profile_id": str(record.target_role_profile_id) if record.target_role_profile_id else None,
         "interview_experience_ids": [str(item) for item in record.interview_experience_ids],
         "asr_provider": record.asr_provider,
+        "asr_model_profile_id": str(record.asr_model_profile_id) if record.asr_model_profile_id else None,
         "answer_model_profile_id": str(record.answer_model_profile_id) if record.answer_model_profile_id else None,
         "started_at": record.started_at,
         "ended_at": record.ended_at,

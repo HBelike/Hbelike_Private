@@ -24,6 +24,8 @@ def upgrade() -> None:
                 REFERENCES career_assistant.target_role_profiles(id) ON DELETE SET NULL,
             interview_experience_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
             asr_provider TEXT NOT NULL,
+            asr_model_profile_id UUID
+                REFERENCES career_assistant.model_profiles(id) ON DELETE SET NULL,
             answer_model_profile_id UUID
                 REFERENCES career_assistant.model_profiles(id) ON DELETE SET NULL,
             status TEXT NOT NULL DEFAULT 'preparing'

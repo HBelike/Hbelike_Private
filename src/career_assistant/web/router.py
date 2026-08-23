@@ -411,6 +411,9 @@ def install_career_assistant_api(
     from src.career_assistant.web.turn_router import router as turn_router
 
     app.include_router(turn_router)
+    from src.career_assistant.live_interview.web import router as live_interview_router
+
+    app.include_router(live_interview_router)
     app.state.career_assistant_project_root = project_root
     app.state.career_skill_runtime = CareerSkillRuntime(skill_library_service)
     app.state.career_skill_tool_registry = SkillToolRegistry(skill_library_service)
@@ -421,6 +424,7 @@ def install_career_assistant_api(
     app.state.career_assistant_repository_lock = Lock()
     app.state.career_assistant_services = None
     app.state.career_assistant_services_lock = Lock()
+    app.state.live_interview_connections = set()
 
     @app.on_event("shutdown")
     def close_career_assistant_services() -> None:

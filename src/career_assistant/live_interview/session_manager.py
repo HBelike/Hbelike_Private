@@ -27,14 +27,21 @@ from src.career_assistant.live_interview.transcript_assembler import TranscriptA
 
 
 TranscriptHook = Callable[[TranscriptEvent], Awaitable[None]]
-AnswerHook = Callable[[int, int, str, str], Awaitable[None]]
+AnswerHook = Callable[[int, int, str, QuestionIntent, str, str], Awaitable[None]]
 
 
 async def _noop_transcript(event: TranscriptEvent) -> None:
     return None
 
 
-async def _noop_answer(version: int, attempt: int, status: str, text: str) -> None:
+async def _noop_answer(
+    version: int,
+    attempt: int,
+    question: str,
+    intent: QuestionIntent,
+    status: str,
+    text: str,
+) -> None:
     return None
 
 
@@ -197,6 +204,7 @@ class LiveSessionManager:
     ) -> None:
         text = ""
         try:
+            await self._answer_hook(version, attempt, question, intent, "generating", text)
             await self._emit("answer.started", question_version=version, attempt=attempt)
             context = LiveAnswerContext(
                 candidate_facts=self._answer_context.candidate_facts,
@@ -215,7 +223,7 @@ class LiveSessionManager:
                     attempt=attempt,
                     delta=chunk,
                 )
-            await self._answer_hook(version, attempt, "completed", text)
+            await self._answer_hook(version, attempt, question, intent, "completed", text)
             await self._emit(
                 "answer.completed",
                 question_version=version,
@@ -223,10 +231,10 @@ class LiveSessionManager:
                 answer_text=text,
             )
         except asyncio.CancelledError:
-            await self._answer_hook(version, attempt, "cancelled", text)
+            await self._answer_hook(version, attempt, question, intent, "cancelled", text)
             raise
         except Exception:
-            await self._answer_hook(version, attempt, "failed", text)
+            await self._answer_hook(version, attempt, question, intent, "failed", text)
             await self._emit(
                 "error",
                 code="answer_failed",
