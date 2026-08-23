@@ -1,4 +1,4 @@
-import { resampleToPcm16, TARGET_SAMPLE_RATE } from './pcm-framer.js'
+import { PcmFrameAccumulator, resampleToPcm16, TARGET_SAMPLE_RATE } from './pcm-framer.js'
 
 const PROCESSOR_NAME = 'interview-pcm-processor'
 
@@ -37,6 +37,10 @@ export class BrowserAudioCapture {
     this.resources = []
     this.streams = []
     this.sequences = { interviewer: 0, candidate: 0 }
+    this.framers = {
+      interviewer: new PcmFrameAccumulator(),
+      candidate: new PcmFrameAccumulator()
+    }
     this.stoppedTracks = new WeakSet()
     this.onFrame = null
     this.onEnded = null
@@ -58,6 +62,8 @@ export class BrowserAudioCapture {
     this.onFrame = onFrame
     this.onEnded = onEnded
     this.sequences = { interviewer: 0, candidate: 0 }
+    this.framers.interviewer.clear()
+    this.framers.candidate.clear()
 
     const displayStream = await displayRequest
     this.streams.push(displayStream)
@@ -111,9 +117,11 @@ export class BrowserAudioCapture {
       if (this.stopping || !data?.samples) return
       const pcm = resampleToPcm16(new Float32Array(data.samples), context.sampleRate, TARGET_SAMPLE_RATE)
       if (!pcm.length) return
-      const sequence = this.sequences[channel]
-      this.sequences[channel] += 1
-      this.onFrame?.({ channel, sequence, pcm })
+      for (const frame of this.framers[channel].append(pcm)) {
+        const sequence = this.sequences[channel]
+        this.sequences[channel] += 1
+        this.onFrame?.({ channel, sequence, pcm: frame })
+      }
     }
     const ended = () => {
       if (!this.stopping) this.onEnded?.({ channel, reason: 'track_ended' })

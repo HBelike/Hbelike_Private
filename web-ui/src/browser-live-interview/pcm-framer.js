@@ -1,4 +1,5 @@
 const TARGET_SAMPLE_RATE = 24_000
+const DEFAULT_FRAME_SAMPLES = 2_400
 
 export function floatToPcm16(samples) {
   const pcm = new Int16Array(samples.length)
@@ -55,4 +56,34 @@ export function pcm16ToBase64(pcm) {
   return globalThis.Buffer.from(bytes).toString('base64')
 }
 
-export { TARGET_SAMPLE_RATE }
+export class PcmFrameAccumulator {
+  constructor(frameSamples = DEFAULT_FRAME_SAMPLES) {
+    if (!Number.isInteger(frameSamples) || frameSamples <= 0) {
+      throw new TypeError('PCM 分帧长度必须是正整数')
+    }
+    this.frameSamples = frameSamples
+    this.pending = new Int16Array()
+  }
+
+  append(pcm) {
+    if (!(pcm instanceof Int16Array)) pcm = new Int16Array(pcm)
+    if (!pcm.length) return []
+    const combined = new Int16Array(this.pending.length + pcm.length)
+    combined.set(this.pending)
+    combined.set(pcm, this.pending.length)
+    const frames = []
+    let offset = 0
+    while (combined.length - offset >= this.frameSamples) {
+      frames.push(combined.slice(offset, offset + this.frameSamples))
+      offset += this.frameSamples
+    }
+    this.pending = combined.slice(offset)
+    return frames
+  }
+
+  clear() {
+    this.pending = new Int16Array()
+  }
+}
+
+export { DEFAULT_FRAME_SAMPLES, TARGET_SAMPLE_RATE }

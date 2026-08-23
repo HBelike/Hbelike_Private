@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 
 import {
   floatToPcm16,
+  PcmFrameAccumulator,
   pcm16ToBase64,
   resampleToPcm16
 } from './browser-live-interview/pcm-framer.js'
@@ -20,6 +21,14 @@ test('browser live interview converts and resamples PCM safely', () => {
   assert.deepEqual([...pcm], [-32768, -32768, 0, 32767, 32767])
   assert.equal(resampleToPcm16(new Float32Array(480), 48_000, 24_000).length, 240)
   assert.equal(pcm16ToBase64(new Int16Array([1, -1])), 'AQD//w==')
+})
+
+test('browser live interview batches worklet chunks into 100ms frames', () => {
+  const accumulator = new PcmFrameAccumulator(4)
+  assert.deepEqual(accumulator.append(new Int16Array([1, 2, 3])), [])
+  const frames = accumulator.append(new Int16Array([4, 5, 6, 7, 8, 9]))
+  assert.deepEqual(frames.map((frame) => [...frame]), [[1, 2, 3, 4], [5, 6, 7, 8]])
+  assert.deepEqual([...accumulator.pending], [9])
 })
 
 test('browser live interview ignores late and duplicate answer deltas', () => {
