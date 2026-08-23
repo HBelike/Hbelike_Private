@@ -32,6 +32,7 @@ from src.career_assistant.persistence.turn_job_repository import (
     ClaimedTurnRecord,
     TurnEventRecord,
     TurnPayloadRecord,
+    TurnQueueStatusRecord,
 )
 
 __all__ = [
@@ -52,4 +53,5 @@ __all__ = [
     "ClaimedTurnRecord",
     "TurnEventRecord",
     "TurnPayloadRecord",
+    "TurnQueueStatusRecord",
 ]

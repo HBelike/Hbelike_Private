@@ -51,6 +51,17 @@ class ClaimedTurnRecord:
     cancel_requested_at: datetime | None
 
 
+@dataclass(frozen=True)
+class TurnQueueStatusRecord:
+    """API 展示 Turn 状态和会话内准确等待位置所需的读取模型。"""
+
+    turn: AgentTurnRecord
+    queue_sequence: int
+    attempt_count: int
+    cancel_requested_at: datetime | None
+    conversation_position: int
+
+
 class CareerTurnJobRepository:
     """原子管理 Turn 入队、领取、租约、事件和取消请求。"""
 
@@ -671,6 +682,79 @@ class CareerTurnJobRepository:
             ).mappings().one_or_none()
         return AgentTurnStatus(row["status"]) if row is not None else None
 
+    def get_turn_status(
+        self,
+        actor_id: UUID,
+        turn_id: UUID,
+    ) -> TurnQueueStatusRecord | None:
+        """按所有者读取单个 Turn 及它在当前会话内的等待位置。"""
+
+        with self._database.transaction() as connection:
+            row = connection.execute(
+                text(
+                    """
+                    SELECT turn.id, turn.conversation_id, turn.actor_id,
+                           turn.requested_selection_mode,
+                           turn.requested_model_profile_id,
+                           turn.input_kind_codes, turn.status, turn.error_code,
+                           turn.error_message, turn.started_at, turn.completed_at,
+                           turn.created_at, turn.updated_at, turn.queue_sequence,
+                           turn.attempt_count, turn.cancel_requested_at,
+                           (
+                               SELECT COUNT(*)
+                               FROM career_assistant.agent_turns AS older
+                               WHERE older.conversation_id = turn.conversation_id
+                                 AND older.queue_sequence < turn.queue_sequence
+                                 AND older.status IN ('queued', 'running')
+                           ) AS conversation_position
+                    FROM career_assistant.agent_turns AS turn
+                    INNER JOIN career_assistant.conversations AS conversation
+                        ON conversation.id = turn.conversation_id
+                    WHERE turn.id = :turn_id
+                      AND turn.actor_id = :actor_id
+                      AND conversation.actor_id = :actor_id
+                      AND conversation.status <> 'deleted'
+                    """,
+                ),
+                {"turn_id": turn_id, "actor_id": actor_id},
+            ).mappings().one_or_none()
+        return self._to_queue_status(row) if row is not None else None
+
+    def list_active_turns(
+        self,
+        actor_id: UUID,
+        conversation_id: UUID,
+    ) -> tuple[TurnQueueStatusRecord, ...]:
+        """恢复页面刷新前已经提交但尚未进入终态的 Turn 列表。"""
+
+        with self._database.transaction() as connection:
+            rows = connection.execute(
+                text(
+                    """
+                    SELECT turn.id, turn.conversation_id, turn.actor_id,
+                           turn.requested_selection_mode,
+                           turn.requested_model_profile_id,
+                           turn.input_kind_codes, turn.status, turn.error_code,
+                           turn.error_message, turn.started_at, turn.completed_at,
+                           turn.created_at, turn.updated_at, turn.queue_sequence,
+                           turn.attempt_count, turn.cancel_requested_at,
+                           ROW_NUMBER() OVER (ORDER BY turn.queue_sequence) - 1
+                               AS conversation_position
+                    FROM career_assistant.agent_turns AS turn
+                    INNER JOIN career_assistant.conversations AS conversation
+                        ON conversation.id = turn.conversation_id
+                    WHERE turn.conversation_id = :conversation_id
+                      AND turn.actor_id = :actor_id
+                      AND conversation.actor_id = :actor_id
+                      AND conversation.status <> 'deleted'
+                      AND turn.status IN ('queued', 'running')
+                    ORDER BY turn.queue_sequence
+                    """,
+                ),
+                {"conversation_id": conversation_id, "actor_id": actor_id},
+            ).mappings().all()
+        return tuple(self._to_queue_status(row) for row in rows)
+
     @staticmethod
     def _insert_event(connection, turn_id: UUID, event_type: str, payload: dict[str, object]) -> None:
         connection.execute(
@@ -734,4 +818,14 @@ class CareerTurnJobRepository:
             completed_at=row["completed_at"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
+        )
+
+    @staticmethod
+    def _to_queue_status(row: RowMapping) -> TurnQueueStatusRecord:
+        return TurnQueueStatusRecord(
+            turn=CareerTurnJobRepository._to_turn_record(row),
+            queue_sequence=int(row["queue_sequence"]),
+            attempt_count=int(row["attempt_count"]),
+            cancel_requested_at=row["cancel_requested_at"],
+            conversation_position=int(row["conversation_position"]),
         )

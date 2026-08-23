@@ -7,12 +7,11 @@ import json
 import logging
 import os
 from contextvars import ContextVar, Token
-from collections.abc import Callable, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
-from queue import Empty, Queue
-from threading import BoundedSemaphore, Event, Lock, Thread
+from threading import Event, Lock, Thread
 from time import monotonic
 from uuid import UUID, uuid4
 
@@ -100,6 +99,7 @@ from src.career_assistant.resume_assistant import (
 from src.career_assistant.resume_assistant.models import ResumeSuggestion
 from src.career_assistant.skill_runtime import CareerSkillRuntime
 from src.career_assistant.skill_tools import SkillToolRegistry
+from src.career_assistant.turn_queue import AsyncTurnCoordinator
 from src.config.config_manager import ConfigManager
 from src.observability.langsmith_runtime import trace_operation, trace_stream
 from src.platform_access.contracts import PlatformRole, PlatformUser
@@ -111,6 +111,7 @@ from src.career_assistant.persistence import (
     CareerDatabase,
     CareerJobAssessmentRepository,
     CareerModelProfileRepository,
+    CareerTurnJobRepository,
     MessageRole,
     ModelCostTier,
     ModelProfileDraft,
@@ -176,6 +177,7 @@ class CareerAssistantServices:
 
     database: CareerDatabase
     conversation_repository: CareerConversationRepository
+    turn_job_repository: CareerTurnJobRepository
     context_repository: CareerContextRepository
     job_assessment_repository: CareerJobAssessmentRepository
     job_assessment_service: CareerJobAssessmentService
@@ -198,7 +200,7 @@ class CareerAssistantServices:
     document_understanding_client: DoclingServiceDocumentParser | None
     legacy_office_converter: GotenbergOfficeConverter | None
     cloud_vision_client: CloudVisionRouter | None
-    stream_turn_slots: BoundedSemaphore
+    turn_coordinator: AsyncTurnCoordinator
     stream_heartbeat_seconds: float
     turn_expected_seconds: float
 
@@ -406,6 +408,9 @@ def install_career_assistant_api(
         )
 
     app.include_router(router)
+    from src.career_assistant.web.turn_router import router as turn_router
+
+    app.include_router(turn_router)
     app.state.career_assistant_project_root = project_root
     app.state.career_skill_runtime = CareerSkillRuntime(skill_library_service)
     app.state.career_skill_tool_registry = SkillToolRegistry(skill_library_service)
@@ -588,6 +593,7 @@ def get_career_services(request: Request) -> CareerAssistantServices:
             services = CareerAssistantServices(
                 database=database,
                 conversation_repository=conversation_repository,
+                turn_job_repository=CareerTurnJobRepository(database),
                 context_repository=context_repository,
                 job_assessment_repository=job_assessment_repository,
                 job_assessment_service=job_assessment_service,
@@ -627,8 +633,8 @@ def get_career_services(request: Request) -> CareerAssistantServices:
                 document_understanding_client=document_understanding_client,
                 legacy_office_converter=legacy_office_converter,
                 cloud_vision_client=cloud_vision_client,
-                stream_turn_slots=BoundedSemaphore(
-                    value=runtime_settings.max_concurrent_turns,
+                turn_coordinator=AsyncTurnCoordinator(
+                    max_concurrent_turns=runtime_settings.max_concurrent_turns,
                 ),
                 stream_heartbeat_seconds=runtime_settings.stream_heartbeat_seconds,
                 turn_expected_seconds=runtime_settings.turn_timeout_seconds,
@@ -1174,7 +1180,7 @@ def archive_conversation(conversation_id: UUID, request: Request) -> dict[str, o
 
 
 @router.post("/conversations/{conversation_id}/intake", status_code=status.HTTP_202_ACCEPTED)
-def submit_intake(
+async def submit_intake(
     conversation_id: UUID,
     request_body: SubmitIntakeRequest,
     request: Request,
@@ -1188,14 +1194,16 @@ def submit_intake(
         profile_id=request_body.model_profile_id,
     )
     try:
-        interview_evidence = _build_interview_evidence(
+        interview_evidence = await asyncio.to_thread(
+            _build_interview_evidence,
             services,
             actor,
             request_body.interview_experience_ids,
             request_body.text,
             conversation_id=conversation_id,
         )
-        skill_activation = _resolve_conversation_skill_activation(
+        skill_activation = await asyncio.to_thread(
+            _resolve_conversation_skill_activation,
             services,
             actor.actor_id,
             conversation_id,
@@ -1213,7 +1221,7 @@ def submit_intake(
             interview_evidence=interview_evidence,
             activated_skills=skill_activation.skills,
         )
-        result, response_result = _run_career_turn(
+        result, response_result = await _run_queued_career_turn(
             services,
             inbound_message,
         )
@@ -1232,7 +1240,7 @@ def submit_intake(
 
 
 @router.post("/conversations/{conversation_id}/intake-stream")
-def stream_intake(
+async def stream_intake(
     conversation_id: UUID,
     request_body: SubmitIntakeRequest,
     request: Request,
@@ -1242,14 +1250,16 @@ def stream_intake(
     actor = get_request_actor()
     services = get_career_services(request)
     try:
-        interview_evidence = _build_interview_evidence(
+        interview_evidence = await asyncio.to_thread(
+            _build_interview_evidence,
             services,
             actor,
             request_body.interview_experience_ids,
             request_body.text,
             conversation_id=conversation_id,
         )
-        skill_activation = _resolve_conversation_skill_activation(
+        skill_activation = await asyncio.to_thread(
+            _resolve_conversation_skill_activation,
             services,
             actor.actor_id,
             conversation_id,
@@ -1309,14 +1319,16 @@ async def submit_intake_with_materials(
     services = get_career_services(request)
     attachments = []
     try:
-        interview_evidence = _build_interview_evidence(
+        interview_evidence = await asyncio.to_thread(
+            _build_interview_evidence,
             services,
             actor,
             interview_experience_ids,
             text,
             conversation_id=conversation_id,
         )
-        skill_activation = _resolve_conversation_skill_activation(
+        skill_activation = await asyncio.to_thread(
+            _resolve_conversation_skill_activation,
             services,
             actor.actor_id,
             conversation_id,
@@ -1353,7 +1365,7 @@ async def submit_intake_with_materials(
             interview_evidence=interview_evidence,
             activated_skills=skill_activation.skills,
         )
-        result, response_result = _run_career_turn(
+        result, response_result = await _run_queued_career_turn(
             services,
             inbound_message,
             attachment_count=len(attachments),
@@ -1424,14 +1436,16 @@ async def stream_intake_with_materials(
     services = get_career_services(request)
     attachments = []
     try:
-        interview_evidence = _build_interview_evidence(
+        interview_evidence = await asyncio.to_thread(
+            _build_interview_evidence,
             services,
             actor,
             interview_experience_ids,
             text,
             conversation_id=conversation_id,
         )
-        skill_activation = _resolve_conversation_skill_activation(
+        skill_activation = await asyncio.to_thread(
+            _resolve_conversation_skill_activation,
             services,
             actor.actor_id,
             conversation_id,
@@ -2297,24 +2311,85 @@ def _verify_model_connection(
         raise HTTPException(status_code=422, detail=f"模型连接测试未通过：{exc}") from exc
 
 
-def _stream_career_response(
+async def _stream_career_response(
     services: CareerAssistantServices,
     inbound_message: CareerInboundMessage,
     *,
     attachment_count: int = 0,
-) -> Iterator[str]:
-    """为真实处理流补充 SSE 心跳，Turn 完成后才归还并发名额。"""
+) -> AsyncIterator[str]:
+    """排队取得执行权，再为真实处理流补充 SSE 心跳。"""
 
-    inbound_message = _attach_conversation_context(services, inbound_message)
-    yield from _stream_events_with_heartbeats(
-        _stream_career_response_events(
+    reservation = await services.turn_coordinator.reserve(
+        inbound_message.conversation_id,
+    )
+    lease = None
+    processing_handed_off = False
+    try:
+        if reservation.is_queued:
+            if reservation.queue_scope == "conversation":
+                waiting_label = (
+                    f"当前会话已有任务，前方还有 {reservation.queue_position} 个 Turn，"
+                    "正在排队等待"
+                )
+            else:
+                waiting_label = "当前求职任务较多，已进入全局队列等待"
+            yield _sse_event("status", {"message": waiting_label})
+            yield _sse_event(
+                "progress",
+                {
+                    "key": "turn_queued",
+                    "label": waiting_label,
+                    "state": "running",
+                },
+            )
+
+        lease = await reservation.acquire()
+        if reservation.is_queued:
+            yield _sse_event(
+                "progress",
+                {
+                    "key": "turn_queued",
+                    "label": "排队结束，开始处理本轮任务",
+                    "state": "completed",
+                },
+            )
+
+        processing_handed_off = True
+        async for event in _stream_events_with_heartbeats(
+            _stream_career_response_events(
+                services,
+                inbound_message,
+                attachment_count=attachment_count,
+            ),
+            heartbeat_seconds=services.stream_heartbeat_seconds,
+            expected_turn_seconds=services.turn_expected_seconds,
+            on_processing_complete=lease.release,
+        ):
+            yield event
+    finally:
+        if not processing_handed_off:
+            if lease is not None:
+                lease.release()
+            else:
+                await reservation.cancel()
+            services.temporary_attachment_store.cleanup(inbound_message.attachments)
+
+
+async def _run_queued_career_turn(
+    services: CareerAssistantServices,
+    inbound_message: CareerInboundMessage,
+    *,
+    attachment_count: int = 0,
+):
+    """让非流式入口与 SSE 入口共用同一套会话和全局排队规则。"""
+
+    return await services.turn_coordinator.run_sync(
+        inbound_message.conversation_id,
+        lambda: _run_career_turn(
             services,
             inbound_message,
             attachment_count=attachment_count,
         ),
-        heartbeat_seconds=services.stream_heartbeat_seconds,
-        expected_turn_seconds=services.turn_expected_seconds,
-        on_processing_complete=services.stream_turn_slots.release,
     )
 
 
@@ -2396,6 +2471,9 @@ def _stream_career_response_events(
 ) -> Iterator[str]:
     """建立一次求职对话的根 Trace，并原样透传浏览器 SSE 事件。"""
 
+    # 该生成器由 SSE 事件泵线程推进；把 PostgreSQL 上下文读取留在这里，避免阻塞
+    # FastAPI asyncio 事件循环。
+    inbound_message = _attach_conversation_context(services, inbound_message)
     yield from trace_stream(
         run_name="career.turn",
         run_type="chain",
@@ -2541,14 +2619,7 @@ def _create_career_streaming_response(
     *,
     attachment_count: int = 0,
 ) -> StreamingResponse:
-    """在 HTTP 响应建立前占用一个 Turn 名额，满载时返回可理解的 429。"""
-
-    if not services.stream_turn_slots.acquire(blocking=False):
-        services.temporary_attachment_store.cleanup(inbound_message.attachments)
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="当前正在处理的求职任务较多，请稍后再试。",
-        )
+    """立即建立 SSE，由异步生成器发送排队状态并等待执行权。"""
 
     return StreamingResponse(
         _stream_career_response(
@@ -2567,39 +2638,56 @@ def _create_career_streaming_response(
 _SSE_STREAM_END = object()
 
 
-def _stream_events_with_heartbeats(
+async def _stream_events_with_heartbeats(
     events: Iterator[str],
     *,
     heartbeat_seconds: float,
     expected_turn_seconds: float,
     on_processing_complete: Callable[[], None] | None = None,
-) -> Iterator[str]:
-    """将阻塞式处理流桥接为可保活的 SSE 流。
+) -> AsyncIterator[str]:
+    """用 asyncio.Queue 将阻塞式处理流桥接为可保活的 SSE 流。
 
     Docling、OCR 或上游模型在开始产出前可能长时间无数据。这里用一个守护线程
-    消费业务事件，主线程按固定周期输出 SSE 注释帧，浏览器与代理会据此保持连接。
+    消费尚未异步化的业务事件，FastAPI 事件循环按固定周期输出 SSE 注释帧，浏览器与
+    代理会据此保持连接。
     注释帧不包含业务数据，前端无需也不会展示它。超过预期耗时仅给出一次安全进度
     提示，绝不伪造模型思考过程，也不从线程外强制中断外部请求。
     """
 
-    output_queue: Queue[object] = Queue()
+    output_queue: asyncio.Queue[object] = asyncio.Queue()
     client_disconnected = Event()
+    loop = asyncio.get_running_loop()
+
+    def publish_from_thread(item: object) -> None:
+        """只把仍有浏览器消费者的事件安全投递回 FastAPI 事件循环。"""
+
+        if client_disconnected.is_set():
+            return
+        try:
+            loop.call_soon_threadsafe(output_queue.put_nowait, item)
+        except RuntimeError:
+            # 应用已经关闭事件循环时不再投递；底层外部调用会按自身超时退出。
+            return
+
+    def finish_processing_from_thread() -> None:
+        if on_processing_complete is None:
+            return
+        try:
+            loop.call_soon_threadsafe(on_processing_complete)
+        except RuntimeError:
+            return
 
     def pump_events() -> None:
         try:
             for event in events:
                 # 浏览器断开时，仍让 Graph / 模型流完整走到持久化收口；只丢弃
                 # 已无人消费的 SSE 帧，避免未完成 Turn 在刷新页面后永久停在 running。
-                if not client_disconnected.is_set():
-                    output_queue.put(event)
+                publish_from_thread(event)
         except BaseException as exc:  # 保证 SSE 可得到友好错误，不让线程异常丢失。
-            if not client_disconnected.is_set():
-                output_queue.put(exc)
+            publish_from_thread(exc)
         finally:
-            if not client_disconnected.is_set():
-                output_queue.put(_SSE_STREAM_END)
-            if on_processing_complete is not None:
-                on_processing_complete()
+            publish_from_thread(_SSE_STREAM_END)
+            finish_processing_from_thread()
 
     worker = Thread(
         target=pump_events,
@@ -2618,8 +2706,11 @@ def _stream_events_with_heartbeats(
     try:
         while True:
             try:
-                queued_event = output_queue.get(timeout=heartbeat_seconds)
-            except Empty:
+                queued_event = await asyncio.wait_for(
+                    output_queue.get(),
+                    timeout=heartbeat_seconds,
+                )
+            except TimeoutError:
                 yield ": keepalive\n\n"
                 if (
                     not expected_duration_notified
