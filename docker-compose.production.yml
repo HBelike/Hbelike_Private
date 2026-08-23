@@ -108,7 +108,7 @@ services:
     environment:
       CAREER_DATABASE_URL: postgresql+psycopg://${CAREER_POSTGRES_USER}:${CAREER_POSTGRES_PASSWORD}@career-postgres:5432/${CAREER_POSTGRES_DB}
       CAREER_TEMPORARY_ATTACHMENT_ROOT: /var/lib/career-temporary-attachments
-      CAREER_REDACTION_ENABLED: ${CAREER_REDACTION_ENABLED:-true}
+      CAREER_REDACTION_ENABLED: ${CAREER_REDACTION_ENABLED:-false}
       CAREER_DOCLING_ENABLED: ${CAREER_DOCLING_ENABLED:-false}
       CAREER_DOCLING_SERVICE_BASE_URL: ${CAREER_DOCLING_SERVICE_BASE_URL:-http://career-docling:5001}
       CAREER_GOTENBERG_ENABLED: ${CAREER_GOTENBERG_ENABLED:-true}
@@ -142,6 +142,47 @@ services:
     init: true
     logging: *default-logging
 
+  # 求职助手的独立 Turn 执行进程。API 只负责解析附件并持久化排队；Worker 从
+  # PostgreSQL 抢占任务。同一会话严格串行，不同会话可并发，多个 Worker 副本共享全局槽位。
+  career-agent-worker:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    image: wechat-agent-career-api:local
+    restart: unless-stopped
+    env_file: ${CAREER_ENV_FILE:-.env.production}
+    environment:
+      CAREER_DATABASE_URL: postgresql+psycopg://${CAREER_POSTGRES_USER}:${CAREER_POSTGRES_PASSWORD}@career-postgres:5432/${CAREER_POSTGRES_DB}
+      CAREER_REDACTION_ENABLED: ${CAREER_REDACTION_ENABLED:-false}
+      CAREER_AGENT_WORKER_ID: ${CAREER_AGENT_WORKER_ID:-career-agent-worker}
+      CAREER_AGENT_GLOBAL_CONCURRENCY: ${CAREER_AGENT_GLOBAL_CONCURRENCY:-8}
+      CAREER_AGENT_WORKER_CONCURRENCY: ${CAREER_AGENT_WORKER_CONCURRENCY:-4}
+      CAREER_AGENT_LEASE_SECONDS: ${CAREER_AGENT_LEASE_SECONDS:-90}
+      CAREER_AGENT_HEARTBEAT_SECONDS: ${CAREER_AGENT_HEARTBEAT_SECONDS:-20}
+      CAREER_AGENT_EVENT_POLL_MILLISECONDS: ${CAREER_AGENT_EVENT_POLL_MILLISECONDS:-300}
+      CAREER_DOCLING_ENABLED: ${CAREER_DOCLING_ENABLED:-false}
+      CAREER_DOCLING_SERVICE_BASE_URL: ${CAREER_DOCLING_SERVICE_BASE_URL:-http://career-docling:5001}
+      CAREER_GOTENBERG_ENABLED: ${CAREER_GOTENBERG_ENABLED:-true}
+      CAREER_GOTENBERG_SERVICE_BASE_URL: ${CAREER_GOTENBERG_SERVICE_BASE_URL:-http://career-gotenberg:3000}
+      VIDEO_SUBMIT_ENABLED: ${VIDEO_SUBMIT_ENABLED:-false}
+      AUDIO_ENABLED: ${AUDIO_ENABLED:-false}
+    command: ["python", "scripts/run_career_agent_worker.py"]
+    volumes:
+      - application_data:/app/data
+      - application_outputs:/app/outputs
+      - application_logs:/app/logs
+      - application_skills:/app/.agents
+    depends_on:
+      career-migrate:
+        condition: service_completed_successfully
+      career-gotenberg:
+        condition: service_started
+      skill-seed:
+        condition: service_completed_successfully
+    networks: [career-private]
+    init: true
+    logging: *default-logging
+
   # 公众号周榜的唯一常驻调度进程。它和 API 共用 SQLite/媒体卷，必须保持单副本；
   # 不要横向扩容，直到旧工作流迁移为 PostgreSQL 或引入分布式任务锁。
   pipeline-scheduler:
@@ -155,7 +196,7 @@ services:
       APP_RUN_MODE: scheduler
       CAREER_DATABASE_URL: postgresql+psycopg://${CAREER_POSTGRES_USER}:${CAREER_POSTGRES_PASSWORD}@career-postgres:5432/${CAREER_POSTGRES_DB}
       CAREER_TEMPORARY_ATTACHMENT_ROOT: /var/lib/career-temporary-attachments
-      CAREER_REDACTION_ENABLED: ${CAREER_REDACTION_ENABLED:-true}
+      CAREER_REDACTION_ENABLED: ${CAREER_REDACTION_ENABLED:-false}
       CAREER_DOCLING_ENABLED: ${CAREER_DOCLING_ENABLED:-false}
       CAREER_DOCLING_SERVICE_BASE_URL: ${CAREER_DOCLING_SERVICE_BASE_URL:-http://career-docling:5001}
       CAREER_GOTENBERG_ENABLED: ${CAREER_GOTENBERG_ENABLED:-true}
