@@ -2,11 +2,18 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  advanceSetupProgress,
   estimateAsrCost,
   formatDuration,
   isInterviewMasterPath,
   pickInitialAnswerModel
 } from './browser-live-interview/view.js'
+
+test('setup progress advances smoothly without claiming completion', () => {
+  assert.equal(advanceSetupProgress(24), 30)
+  assert.equal(advanceSetupProgress(91), 92)
+  assert.equal(advanceSetupProgress(92), 92)
+})
 
 test('interview master view recognizes its single-task route', () => {
   assert.equal(isInterviewMasterPath('/career/interview-master'), true)

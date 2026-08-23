@@ -6,6 +6,7 @@ import { openAnswerPictureInPicture, supportsAnswerPictureInPicture } from '../b
 import { createInterviewState, reduceInterviewEvent } from '../browser-live-interview/session-state.js'
 import { LiveInterviewSocket } from '../browser-live-interview/socket.js'
 import {
+  advanceSetupProgress,
   answerPreviewLines,
   estimateAsrCost,
   formatDuration,
@@ -13,6 +14,7 @@ import {
 } from '../browser-live-interview/view.js'
 
 const setupLoading = ref(true)
+const setupProgress = ref(8)
 const setupOptions = ref(null)
 const selectedAnswerModelId = ref('')
 const candidateEnabled = ref(false)
@@ -34,6 +36,7 @@ const latencySamples = ref([])
 let capture = null
 let liveSocket = null
 let timer = null
+let setupProgressTimer = null
 let startedAt = 0
 const questionDetectedAt = new Map()
 const answeredVersions = new Set()
@@ -67,6 +70,11 @@ const phaseLabel = computed(() => ({
 }[phase.value] || '准备采集'))
 const actionLabel = computed(() => phase.value === 'paused' ? '重新选择面试标签页' : '开始面试')
 const canOpenPip = computed(() => phase.value === 'active' && supportsAnswerPictureInPicture())
+const setupProgressLabel = computed(() => {
+  if (setupProgress.value >= 100) return '模型与声音已准备完成'
+  if (setupProgress.value >= 24) return '正在读取模型配置'
+  return '正在检查 Chrome 能力'
+})
 
 async function requestJson(url, options = {}) {
   const response = await fetch(url, {
@@ -81,16 +89,29 @@ async function requestJson(url, options = {}) {
 
 async function loadSetupOptions() {
   setupLoading.value = true
+  setupProgress.value = Math.max(24, setupProgress.value)
   errorMessage.value = ''
+  stopSetupProgress()
+  setupProgressTimer = window.setInterval(() => {
+    setupProgress.value = advanceSetupProgress(setupProgress.value)
+  }, 220)
   try {
     setupOptions.value = await requestJson('/api/career/live-interviews/setup-options')
     const preferred = new URLSearchParams(window.location.search).get('answer_model_profile_id') || ''
     selectedAnswerModelId.value = pickInitialAnswerModel(setupOptions.value.answer_models, preferred)
+    setupProgress.value = 100
+    await new Promise((resolve) => window.setTimeout(resolve, 180))
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '无法读取模型配置'
   } finally {
+    stopSetupProgress()
     setupLoading.value = false
   }
+}
+
+function stopSetupProgress() {
+  if (setupProgressTimer) window.clearInterval(setupProgressTimer)
+  setupProgressTimer = null
 }
 
 function handleServerEvent(event) {
@@ -257,10 +278,12 @@ function goBack() {
 
 onMounted(() => {
   support.value = detectBrowserInterviewSupport()
+  setupProgress.value = 24
   void loadSetupOptions()
 })
 
 onBeforeUnmount(() => {
+  stopSetupProgress()
   if (timer) window.clearInterval(timer)
   timer = null
   liveSocket?.close()
@@ -301,7 +324,27 @@ onBeforeUnmount(() => {
           <h2>检查模型与声音</h2>
         </div>
 
-        <div v-if="setupLoading" class="setup-loading">正在读取模型配置…</div>
+        <div v-if="setupLoading" class="setup-loading" role="status" aria-live="polite">
+          <div class="setup-loading-copy">
+            <span>{{ setupProgressLabel }}</span>
+            <strong>{{ Math.round(setupProgress) }}%</strong>
+          </div>
+          <div
+            class="setup-progress-track"
+            role="progressbar"
+            aria-label="面试准备进度"
+            aria-valuemin="0"
+            aria-valuemax="100"
+            :aria-valuenow="Math.round(setupProgress)"
+          >
+            <span :style="{ width: `${setupProgress}%` }"></span>
+          </div>
+          <div class="setup-progress-stages" aria-hidden="true">
+            <span class="complete">检查浏览器</span>
+            <span :class="{ complete: setupProgress >= 24 }">读取模型</span>
+            <span :class="{ complete: setupProgress >= 100 }">完成准备</span>
+          </div>
+        </div>
         <template v-else>
           <label class="field-group">
             <span>实时转写</span>
@@ -446,6 +489,10 @@ onBeforeUnmount(() => {
 .capture-boundary { margin-top: 64px; padding-top: 24px; max-width: 610px; display: grid; gap: 8px; border-top: 1px solid rgba(255,255,255,.18); }.capture-boundary span { color: #92a9cb; font-size: 14px; }
 .pulse-orbit { position: absolute; right: -110px; bottom: -120px; width: 440px; height: 440px; border: 1px solid rgba(59, 147, 255, .2); border-radius: 50%; }.pulse-orbit span { position: absolute; inset: 60px; border: 1px solid rgba(59,147,255,.15); border-radius: inherit; }.pulse-orbit span:nth-child(2) { inset: 130px; }.pulse-orbit span:nth-child(3) { inset: 205px; background: #1671e8; box-shadow: 0 0 80px rgba(22,113,232,.8); }
 .preparation-panel { padding: clamp(52px, 7vw, 110px); display: flex; flex-direction: column; justify-content: center; gap: 20px; background: #f7faff; }.preparation-panel h2 { margin: 6px 0 12px; font-size: 36px; letter-spacing: -.03em; }
+.setup-loading { padding: 20px; display: grid; gap: 12px; border: 1px solid #d7e2f1; border-radius: 14px; background: rgba(255,255,255,.82); box-shadow: 0 9px 24px rgba(34,67,107,.05); }
+.setup-loading-copy { display: flex; align-items: center; justify-content: space-between; gap: 20px; color: #53657e; font-size: 14px; }.setup-loading-copy strong { color: #176fe5; font: 800 13px ui-monospace, Consolas, monospace; }
+.setup-progress-track { position: relative; height: 9px; overflow: hidden; border-radius: 999px; background: #dfe8f4; box-shadow: inset 0 1px 2px rgba(20,51,91,.08); }.setup-progress-track > span { position: absolute; inset: 0 auto 0 0; border-radius: inherit; background: linear-gradient(90deg, #176fe5, #3f96ff); box-shadow: 0 0 16px rgba(23,111,229,.35); transition: width .24s ease-out; }.setup-progress-track > span::after { content: ''; position: absolute; inset: 0; background: linear-gradient(105deg, transparent 30%, rgba(255,255,255,.55) 50%, transparent 70%); transform: translateX(-100%); animation: progress-glint 1.35s ease-in-out infinite; }
+.setup-progress-stages { display: flex; justify-content: space-between; color: #9aabc0; font-size: 11px; font-weight: 700; }.setup-progress-stages span { transition: color .2s ease; }.setup-progress-stages span.complete { color: #176fe5; }
 .field-group { padding: 18px 20px; display: grid; gap: 7px; border: 1px solid #d7e2f1; border-radius: 14px; background: white; }.field-group > span { color: #6a7d97; font-size: 12px; font-weight: 700; }.field-group strong { font-size: 16px; }.field-group strong.blocked { color: #b74343; }.field-group small { color: #7c8da4; }.field-group select { width: 100%; padding: 5px 0; border: 0; outline: 0; background: white; color: #10213e; font: inherit; font-weight: 700; }
 .toggle-row, .consent-row { display: flex; align-items: center; justify-content: space-between; gap: 18px; }.toggle-row { padding: 18px 20px; border: 1px solid #d7e2f1; border-radius: 14px; background: white; }.toggle-row span { display: grid; gap: 4px; }.toggle-row small { color: #7c8da4; }.toggle-row input { width: 44px; height: 24px; accent-color: #1671e8; }.consent-row { justify-content: flex-start; color: #53657e; font-size: 13px; }.consent-row input { width: 18px; height: 18px; accent-color: #1671e8; }
 .browser-check { padding: 16px 18px; display: flex; gap: 12px; border-radius: 14px; background: #fff2f1; color: #9c3838; }.browser-check.ok { background: #eaf8f3; color: #176449; }.browser-check > div { display: grid; gap: 4px; }.browser-check small { line-height: 1.5; }.status-dot { width: 9px; height: 9px; margin-top: 5px; flex: 0 0 auto; border-radius: 50%; background: currentColor; box-shadow: 0 0 0 5px currentColor; opacity: .6; }
@@ -459,7 +506,7 @@ onBeforeUnmount(() => {
 .answer-grid { margin-top: 18px; display: grid; grid-template-columns: minmax(280px, .72fr) minmax(460px, 1.45fr); gap: 18px; }.quick-answer-card, .full-answer-card, .history-section { border: 1px solid #d9e3f1; border-radius: 16px; background: white; box-shadow: 0 9px 24px rgba(34,67,107,.06); }.quick-answer-card, .full-answer-card { min-height: 330px; padding: 22px; }.quick-answer-card header, .full-answer-card header { display: flex; align-items: center; justify-content: space-between; }.quick-answer-card header span, .full-answer-card header span { font-weight: 800; }.quick-answer-card small, .full-answer-card small { color: #7a8ca4; }.quick-answer-card ol { padding-left: 25px; }.quick-answer-card li { margin: 16px 0; padding-left: 5px; line-height: 1.65; }.full-answer-card header > div { display: flex; gap: 10px; align-items: baseline; }.answer-text { margin-top: 20px; color: #263b59; font-size: 16px; line-height: 1.86; white-space: pre-wrap; }.typing-dot { width: 9px; height: 9px; border-radius: 50%; background: #176fe5; animation: breathe 1s ease-in-out infinite; }
 .history-section { margin-top: 18px; padding: 22px; }.history-section > header span { color: #7a8ca4; font-size: 12px; }.history-list { margin-top: 12px; display: grid; gap: 8px; }.history-list details { padding: 14px 16px; border-radius: 11px; background: #f4f7fb; }.history-list summary { display: flex; gap: 12px; cursor: pointer; font-weight: 700; }.history-list summary span { color: #176fe5; }.history-list p { margin: 14px 0 2px; color: #435773; line-height: 1.75; white-space: pre-wrap; }.empty-copy { color: #8292a8; line-height: 1.7; }
 .answer-pip-card { min-height: 100vh; padding: 18px; color: #10213e; background: #edf3fb; font-family: "Microsoft YaHei", sans-serif; }.answer-pip-card > header { display: flex; align-items: center; gap: 9px; }.answer-pip-card header small { margin-left: auto; color: #61748f; }.answer-pip-card section { margin-top: 14px; padding: 18px; border-radius: 14px; background: white; }.answer-pip-card section > span { color: #176fe5; font-size: 11px; font-weight: 800; }.answer-pip-card h1 { margin: 10px 0 0; font-size: 21px; line-height: 1.45; }.answer-pip-card .pip-answer { min-height: 360px; }.answer-pip-card p { white-space: pre-wrap; line-height: 1.75; }
-@keyframes wave { 0%,100% { transform: scaleY(.55); } 50% { transform: scaleY(1); } } @keyframes breathe { 50% { opacity: .25; transform: scale(1.45); } }
-@media (prefers-reduced-motion: reduce) { .brand-wave i, .question-pulse span, .typing-dot { animation: none; } }
+@keyframes wave { 0%,100% { transform: scaleY(.55); } 50% { transform: scaleY(1); } } @keyframes breathe { 50% { opacity: .25; transform: scale(1.45); } } @keyframes progress-glint { 65%,100% { transform: translateX(100%); } }
+@media (prefers-reduced-motion: reduce) { .brand-wave i, .question-pulse span, .typing-dot, .setup-progress-track > span::after { animation: none; } }
 @media (max-width: 1050px) { .preparation-layout { grid-template-columns: 1fr; }.preparation-thesis { min-height: 48vh; }.live-layout { grid-template-columns: 280px 1fr; }.answer-grid { grid-template-columns: 1fr; } }
 </style>

@@ -26,6 +26,13 @@ export function pickInitialAnswerModel(models, preferredId = '') {
   return ready.some((item) => item.id === preferredId) ? preferredId : ready[0]?.id || ''
 }
 
+export function advanceSetupProgress(current, cap = 92) {
+  const value = Math.max(0, Number(current) || 0)
+  const limit = Math.max(value, Number(cap) || 92)
+  const remaining = limit - value
+  return Math.min(limit, value + Math.max(1, Math.ceil(remaining * 0.08)))
+}
+
 export function answerPreviewLines(answerText, limit = 5) {
   return String(answerText || '')
     .split(/\r?\n/)
