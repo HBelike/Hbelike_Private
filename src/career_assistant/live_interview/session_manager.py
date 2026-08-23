@@ -88,7 +88,11 @@ class LiveSessionManager:
             self._reader_tasks.append(
                 asyncio.create_task(self._read_asr(channel, session), name=f"live-asr-{channel.value}")
             )
-        await self._emit("session.ready", sample_rate=24_000)
+        await self._emit(
+            "session.ready",
+            sample_rate=24_000,
+            active_channels=[channel.value for channel in self._asr_sessions],
+        )
 
     async def next_event(self) -> ServerEvent:
         return await self._outgoing.get()
@@ -99,8 +103,12 @@ class LiveSessionManager:
         if isinstance(event, SessionStartEvent):
             await self.start()
         elif isinstance(event, AudioAppendEvent):
+            if event.channel not in self._asr_sessions:
+                raise ValueError(f"当前会话未启用 {event.channel.value} 音频轨道")
             await self._asr_sessions[event.channel].append_audio(event.pcm, event.sequence)
         elif isinstance(event, AudioCommitEvent):
+            if event.channel not in self._asr_sessions:
+                raise ValueError(f"当前会话未启用 {event.channel.value} 音频轨道")
             await self._asr_sessions[event.channel].commit()
         elif isinstance(event, AnswerRequestEvent):
             await self._handle_answer_request(event)

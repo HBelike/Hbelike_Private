@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 from collections.abc import AsyncIterator
+from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect, status
@@ -58,6 +59,8 @@ router = APIRouter(prefix="/api/career/live-interviews", tags=["live-interview"]
 class CreateLiveInterviewRequest(BaseModel):
     asr_model_profile_id: UUID | None = None
     answer_model_profile_id: UUID | None = None
+    client_kind: Literal["desktop", "browser"] = "desktop"
+    candidate_audio_enabled: bool = True
 
 
 def get_live_actor():
@@ -106,7 +109,7 @@ def setup_options(request: Request, actor=Depends(get_live_actor)) -> dict[str, 
             if ModelCapability.TEXT in item.profile.capabilities
         ],
         "audio_policy": {
-            "platform": "Windows 10/11 x64",
+            "platform": "桌面 Chrome 或 Windows 10/11 Electron",
             "raw_audio_persisted": False,
             "notice": "仅在参与者已知情并允许使用 AI 的场景开始采集。",
         },
@@ -144,6 +147,8 @@ def create_session(
             ),
             asr_model_profile_id=payload.asr_model_profile_id,
             answer_model_profile_id=payload.answer_model_profile_id,
+            client_kind=payload.client_kind,
+            candidate_audio_enabled=payload.candidate_audio_enabled,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -299,7 +304,10 @@ async def _build_live_manager(
     asr_provider = _resolve_asr_provider(services, record)
     sessions = {}
     try:
-        for channel in AudioChannel:
+        active_channels = [AudioChannel.INTERVIEWER]
+        if record.candidate_audio_enabled:
+            active_channels.append(AudioChannel.CANDIDATE)
+        for channel in active_channels:
             sessions[channel] = await asr_provider.start(channel, prompt="、".join(terms[:100]))
     except Exception:
         await asyncio.gather(*(item.close() for item in sessions.values()), return_exceptions=True)
@@ -332,6 +340,8 @@ async def _build_live_manager(
             yield chunk
 
     async def save_transcript(event: TranscriptEvent) -> None:
+        if record.client_kind == "browser" and event.channel is AudioChannel.CANDIDATE:
+            return
         correction = corrector.correct(event.text)
         await asyncio.to_thread(
             repository.append_final_utterance,

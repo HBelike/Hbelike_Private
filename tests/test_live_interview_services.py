@@ -166,6 +166,52 @@ async def _assert_session_manager_detects_question_and_streams_answer() -> None:
     assert interviewer.closed and candidate.closed
 
 
+def test_session_manager_reports_only_active_channels() -> None:
+    asyncio.run(_assert_session_manager_reports_only_active_channels())
+
+
+async def _assert_session_manager_reports_only_active_channels() -> None:
+    interviewer = ScriptedAsrSession(
+        TranscriptEvent(AudioChannel.INTERVIEWER, 1, "请介绍限流算法？", True)
+    )
+
+    async def answer(prompt: str):
+        yield "令牌桶适合允许突发流量。"
+
+    manager = LiveSessionManager(
+        asr_sessions={AudioChannel.INTERVIEWER: interviewer},
+        answer_service=LiveAnswerService(answer),
+    )
+    await manager.start()
+    ready = await manager.next_event()
+
+    assert ready.type == "session.ready"
+    assert ready.payload["active_channels"] == ["interviewer"]
+    try:
+        await manager.handle(AudioAppendEvent(AudioChannel.CANDIDATE, 0, b"pcm"))
+    except ValueError as exc:
+        assert "未启用 candidate" in str(exc)
+    else:
+        raise AssertionError("未启用的 candidate 音频轨道不应被接收")
+    await manager.close("test")
+
+
+def test_follow_up_prompt_uses_recent_conversation_for_reference_resolution() -> None:
+    prompt = build_answer_prompt(
+        "那它的缺点是什么？",
+        QuestionIntent.FOLLOW_UP,
+        LiveAnswerContext(
+            recent_conversation=(
+                "interviewer: 请介绍令牌桶？",
+                "candidate: 我会先说明令牌补充与突发流量。",
+            )
+        ),
+    )
+
+    assert "请介绍令牌桶" in prompt
+    assert "令牌补充与突发流量" in prompt
+
+
 def test_manual_regenerate_increments_attempt_and_close_is_idempotent() -> None:
     asyncio.run(_assert_manual_regenerate_increments_attempt_and_close_is_idempotent())
 

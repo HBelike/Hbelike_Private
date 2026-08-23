@@ -30,6 +30,8 @@ class LiveInterviewSessionRecord:
     asr_provider: str
     asr_model_profile_id: UUID | None
     answer_model_profile_id: UUID | None
+    client_kind: str
+    candidate_audio_enabled: bool
     status: LiveInterviewStatus
     started_at: datetime | None
     ended_at: datetime | None
@@ -54,6 +56,8 @@ class LiveInterviewRepository:
         asr_provider: str = "openai",
         asr_model_profile_id: UUID | None = None,
         answer_model_profile_id: UUID | None = None,
+        client_kind: str = "desktop",
+        candidate_audio_enabled: bool = True,
     ) -> LiveInterviewSessionRecord:
         session_id = uuid4()
         params = {
@@ -66,6 +70,8 @@ class LiveInterviewRepository:
             "asr_provider": asr_provider.strip() or "openai",
             "asr_model_profile_id": asr_model_profile_id,
             "answer_model_profile_id": answer_model_profile_id,
+            "client_kind": client_kind,
+            "candidate_audio_enabled": candidate_audio_enabled,
         }
         with self._database.transaction() as connection:
             row = connection.execute(
@@ -74,11 +80,13 @@ class LiveInterviewRepository:
                     INSERT INTO career_assistant.live_interview_sessions
                         (id, organization_id, actor_id, candidate_profile_id,
                          target_role_profile_id, interview_experience_ids,
-                         asr_provider, asr_model_profile_id, answer_model_profile_id)
+                         asr_provider, asr_model_profile_id, answer_model_profile_id,
+                         client_kind, candidate_audio_enabled)
                     SELECT
                         :id, :organization_id, :actor_id, :candidate_profile_id,
                         :target_role_profile_id, CAST(:experience_ids AS JSONB),
-                        :asr_provider, :asr_model_profile_id, :answer_model_profile_id
+                        :asr_provider, :asr_model_profile_id, :answer_model_profile_id,
+                        :client_kind, :candidate_audio_enabled
                     WHERE
                         (CAST(:candidate_profile_id AS UUID) IS NULL OR EXISTS(
                             SELECT 1 FROM career_assistant.candidate_profiles
@@ -342,6 +350,8 @@ def _session(row: RowMapping) -> LiveInterviewSessionRecord:
         asr_provider=str(row["asr_provider"]),
         asr_model_profile_id=UUID(str(row["asr_model_profile_id"])) if row["asr_model_profile_id"] else None,
         answer_model_profile_id=UUID(str(row["answer_model_profile_id"])) if row["answer_model_profile_id"] else None,
+        client_kind=str(row["client_kind"]),
+        candidate_audio_enabled=bool(row["candidate_audio_enabled"]),
         status=LiveInterviewStatus(str(row["status"])),
         started_at=row["started_at"],
         ended_at=row["ended_at"],
@@ -360,6 +370,8 @@ def _session_payload(record: LiveInterviewSessionRecord) -> dict[str, object]:
         "asr_provider": record.asr_provider,
         "asr_model_profile_id": str(record.asr_model_profile_id) if record.asr_model_profile_id else None,
         "answer_model_profile_id": str(record.answer_model_profile_id) if record.answer_model_profile_id else None,
+        "client_kind": record.client_kind,
+        "candidate_audio_enabled": record.candidate_audio_enabled,
         "started_at": record.started_at,
         "ended_at": record.ended_at,
         "created_at": record.created_at,

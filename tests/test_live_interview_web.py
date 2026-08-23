@@ -69,6 +69,8 @@ def _record():
         asr_provider="fake",
         asr_model_profile_id=None,
         answer_model_profile_id=None,
+        client_kind="desktop",
+        candidate_audio_enabled=True,
         status=LiveInterviewStatus.PREPARING,
         started_at=None,
         ended_at=None,
@@ -80,7 +82,46 @@ def _record():
 def test_session_payload_never_contains_audio() -> None:
     payload = session_payload(_record())
     assert "pcm" not in str(payload).lower()
-    assert "audio" not in str(payload).lower()
+    assert "raw_audio" not in str(payload).lower()
+
+
+def test_create_request_preserves_desktop_defaults() -> None:
+    payload = live_web.CreateLiveInterviewRequest()
+
+    assert payload.client_kind == "desktop"
+    assert payload.candidate_audio_enabled is True
+
+
+def test_browser_session_records_capture_policy() -> None:
+    app = FastAPI()
+    app.include_router(live_web.router)
+    repository = SimpleNamespace()
+    captured: dict[str, object] = {}
+
+    def create_session(*args, **kwargs):
+        captured.update(kwargs)
+        return replace(
+            _record(),
+            client_kind=kwargs["client_kind"],
+            candidate_audio_enabled=kwargs["candidate_audio_enabled"],
+        )
+
+    repository.create_session = create_session
+    with (
+        patch.dict(os.environ, {"LIVE_INTERVIEW_FAKE_ASR": "1"}),
+        patch.object(live_web, "get_live_repository", return_value=repository),
+        TestClient(app) as client,
+    ):
+        response = client.post(
+            "/api/career/live-interviews/sessions",
+            json={"client_kind": "browser", "candidate_audio_enabled": False},
+        )
+
+    assert response.status_code == 201
+    assert captured["client_kind"] == "browser"
+    assert captured["candidate_audio_enabled"] is False
+    assert response.json()["session"]["client_kind"] == "browser"
+    assert response.json()["session"]["candidate_audio_enabled"] is False
 
 
 def test_session_can_start_without_reference_materials() -> None:
