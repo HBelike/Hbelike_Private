@@ -110,12 +110,60 @@ class CareerAgentTurnProcessor:
             event_payload={
                 "state": final_result.turn.status.value,
                 "turn_id": str(final_result.turn.id),
+                "turn": {
+                    "id": str(final_result.turn.id),
+                    "conversation_id": str(final_result.turn.conversation_id),
+                    "status": final_result.turn.status.value,
+                    "input_kind_codes": list(final_result.turn.input_kind_codes),
+                    "requested_selection_mode": (
+                        final_result.turn.requested_selection_mode.value
+                    ),
+                    "created_at": final_result.turn.created_at.isoformat(),
+                    "started_at": (
+                        final_result.turn.started_at.isoformat()
+                        if final_result.turn.started_at
+                        else None
+                    ),
+                    "completed_at": (
+                        final_result.turn.completed_at.isoformat()
+                        if final_result.turn.completed_at
+                        else None
+                    ),
+                },
+                "message": {
+                    "id": str(intake_result.persisted_message.id),
+                    "turn_id": str(intake_result.persisted_message.turn_id),
+                    "role": intake_result.persisted_message.role.value,
+                    "content": intake_result.persisted_message.content_text,
+                    "is_redacted": intake_result.persisted_message.is_redacted,
+                    "created_at": intake_result.persisted_message.created_at.isoformat(),
+                },
                 "assistant_message": {
                     "id": str(final_result.assistant_message.id),
+                    "turn_id": str(final_result.assistant_message.turn_id),
                     "role": final_result.assistant_message.role.value,
-                    "content_text": final_result.assistant_message.content_text,
+                    "content": final_result.assistant_message.content_text,
+                    "is_redacted": final_result.assistant_message.is_redacted,
                     "created_at": final_result.assistant_message.created_at.isoformat(),
                 },
+                "completed_steps": [step.value for step in intake_result.completed_steps],
+                "job_source": {
+                    "status": intake_result.job_source_status,
+                    "message": intake_result.job_source_message,
+                },
+                "activated_skills": [
+                    {
+                        "id": item.skill_id,
+                        "name": item.name,
+                        "description": item.description,
+                        "status": "mounted",
+                        "execution_mode": item.execution_mode.value,
+                        "tool_names": list(item.tool_names),
+                        "invocation_source": item.invocation_source,
+                        "primary": item.primary,
+                    }
+                    for item in intake_result.model_context.activated_skills
+                ],
                 "skill_executions": [
                     {
                         "skill_name": item.skill_name,

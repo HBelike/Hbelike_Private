@@ -12,6 +12,12 @@ import CareerMessageContent from './CareerMessageContent.vue'
 import { toTargetRolePayload } from '../job-library-target-role.js'
 import { isAssessmentPending } from '../career-assessment-view.js'
 import {
+  firstServerTurn,
+  removeServerTurn,
+  restoreServerTurns,
+  upsertServerTurn
+} from '../career-turn-client-queue.js'
+import {
   DEFAULT_HISTORY_PAGE_SIZE,
   HISTORY_PAGE_SIZE_OPTIONS,
   normalizeHistoryPage,
@@ -30,6 +36,7 @@ const freeModelCatalog = ref([])
 const freeModelCatalogError = ref('')
 const loading = ref(false)
 const sending = ref(false)
+const pendingTurns = ref([])
 const creating = ref(false)
 const savingModel = ref(false)
 const testingConnection = ref(false)
@@ -62,6 +69,8 @@ const streamedAssistantText = ref('')
 const streamStatus = ref('')
 const streamProgress = ref([])
 const activeTemporaryMessageId = ref('')
+const activeObservedTurnId = ref('')
+const submittingTurnCount = ref(0)
 const modelForm = ref(emptyModelForm())
 const conversationMenuId = ref('')
 const renamingConversationId = ref('')
@@ -703,6 +712,9 @@ function resetConversationDraft() {
   streamStatus.value = ''
   streamProgress.value = []
   activeTemporaryMessageId.value = ''
+  activeObservedTurnId.value = ''
+  pendingTurns.value = []
+  sending.value = false
   lastTurn.value = null
 }
 
@@ -729,10 +741,22 @@ function stopTurnRecoveryPolling() {
 
 function scheduleTurnRecoveryPolling() {
   stopTurnRecoveryPolling()
-  if (sending.value || !selectedConversation.value || !isActiveTurn(lastTurn.value)) return
+  if (!selectedConversation.value || pendingTurns.value.length === 0) return
   turnRecoveryPollTimer = setTimeout(() => {
     void refreshActiveConversationTurn()
   }, 3000)
+}
+
+async function restoreServerQueue(conversationId) {
+  const payload = await requestJson(`/api/career/conversations/${conversationId}/active-turns`)
+  if (selectedConversation.value?.id !== conversationId) return
+  pendingTurns.value = restoreServerTurns(payload.items ?? [])
+  if (pendingTurns.value.length > 0) {
+    lastTurn.value = pendingTurns.value.at(-1)?.serverTurn ?? lastTurn.value
+    void observeNextServerTurn()
+  } else {
+    syncSendingState()
+  }
 }
 
 async function refreshActiveConversationTurn() {
@@ -745,6 +769,7 @@ async function refreshActiveConversationTurn() {
     conversationContext.value = payload.context ?? null
     restoreConversationModelSelection(payload.last_model_selection)
     lastTurn.value = payload.latest_turn ?? null
+    await restoreServerQueue(conversationId)
   } catch (error) {
     // 后台任务仍在运行时，短暂网络波动不应以弹窗打断用户；下一次轮询会继续尝试。
     if (!isActiveTurn(lastTurn.value)) return
@@ -951,7 +976,7 @@ async function selectConversation(conversationId, clearFeedback = true) {
     messages.value = payload.messages ?? []
     restoreConversationModelSelection(payload.last_model_selection)
     lastTurn.value = payload.latest_turn ?? null
-    scheduleTurnRecoveryPolling()
+    await restoreServerQueue(conversationId)
   } catch (error) {
     if (requestId !== conversationSelectionRequestId) return
     errorMessage.value = error instanceof Error ? error.message : '会话读取失败'
@@ -1281,9 +1306,6 @@ async function sendMessage() {
     errorMessage.value = '请输入要咨询的问题。'
     return
   }
-  sending.value = true
-  errorMessage.value = ''
-  feedback.value = ''
   const activeSkillInvocations = activeSelectedSkillInvocations(messageText.value)
   const input = {
     text: messageText.value.trim(),
@@ -1297,17 +1319,46 @@ async function sendMessage() {
     skillInvocations: [...activeSkillInvocations]
   }
   const temporaryMessage = createTemporaryMessage(input)
-  activeTemporaryMessageId.value = temporaryMessage.id
+  const preparedTurn = {
+    conversationId: selectedConversation.value.id,
+    input,
+    temporaryMessage
+  }
   clearComposerAfterSubmit()
+
+  await submitPreparedTurn(preparedTurn)
+}
+
+function syncSendingState() {
+  sending.value = Boolean(
+    submittingTurnCount.value > 0
+    || activeObservedTurnId.value
+    || pendingTurns.value.length > 0
+  )
+}
+
+async function submitPreparedTurn(preparedTurn) {
+  const { conversationId, input, temporaryMessage } = preparedTurn
+  const conversation = conversations.value.find((item) => item.id === conversationId)
+    ?? (selectedConversation.value?.id === conversationId ? selectedConversation.value : null)
+  if (!conversation) {
+    messages.value.push({ ...temporaryMessage, local_state: 'failed' })
+    errorMessage.value = '消息所属会话已不可用。'
+    return
+  }
+
+  submittingTurnCount.value += 1
+  syncSendingState()
+  errorMessage.value = ''
+  feedback.value = ''
   let temporaryMessageMounted = false
   try {
-    const conversation = selectedConversation.value
     messages.value.push(temporaryMessage)
     temporaryMessageMounted = true
     const hasMaterial = Boolean(input.resumeFile)
     const endpoint = hasMaterial
-      ? `/api/career/conversations/${conversation.id}/intake-with-materials-stream`
-      : `/api/career/conversations/${conversation.id}/intake-stream`
+      ? `/api/career/conversations/${conversation.id}/turns-with-materials`
+      : `/api/career/conversations/${conversation.id}/turns`
     const requestOptions = hasMaterial
       ? createMaterialsRequest(input)
       : {
@@ -1322,122 +1373,160 @@ async function sendMessage() {
             selected_skill_ids: input.selectedSkillIds
           })
         }
-    let payload = null
-    let streamFailure = ''
-    streamStatus.value = '正在思考…'
-    streamedAssistantText.value = ''
-    streamProgress.value = [{
-      key: 'intake_started',
-      label: '已收到提问，正在建立本轮任务',
-      state: 'running'
-    }]
-    await requestSse(endpoint, requestOptions, {
-      status: (event) => { streamStatus.value = event.message ?? '正在处理…' },
-      progress: (event) => {
-        updateStreamProgress(event)
-        streamStatus.value = event.label ?? streamStatus.value
-      },
-      accepted: (event) => {
-        replaceOrAppendMessage(event.message, activeTemporaryMessageId.value)
-        activeTemporaryMessageId.value = ''
-        if (event.turn) lastTurn.value = event.turn
-      },
-      delta: (event) => {
-        streamStatus.value = '正在生成回复…'
-        streamedAssistantText.value += (event.content ?? '')
-      },
-      done: (event) => { payload = event },
-      error: (event) => {
-        if (event.assistant_message) payload = event
-        else streamFailure = event.detail ?? '模型流式响应未完成。'
+    const payload = await requestJson(endpoint, requestOptions)
+    const serverTurn = payload.turn
+    const temporaryIndex = messages.value.findIndex((message) => message.id === temporaryMessage.id)
+    if (temporaryIndex >= 0) {
+      messages.value[temporaryIndex] = {
+        ...messages.value[temporaryIndex],
+        local_state: 'queued'
       }
+    }
+    pendingTurns.value = upsertServerTurn(pendingTurns.value, {
+      ...serverTurn,
+      content: temporaryMessage.content,
+      temporaryMessageId: temporaryMessage.id,
+      attachmentProcessing: payload.attachment_processing ?? null
     })
-    if (!payload) throw new Error(streamFailure || '模型流式响应未返回最终结果。')
-    replaceOrAppendMessage(payload.message, activeTemporaryMessageId.value)
-    activeTemporaryMessageId.value = ''
-    replaceOrAppendMessage(payload.assistant_message)
-    finalizeStreamProgress()
-    lastTurn.value = payload.turn
-    if (hasMaterial) {
-      const processing = payload.attachment_processing ?? {}
-      const extractedCharacters = Number(processing.text_characters ?? 0)
-      const notices = Array.isArray(processing.notices) ? processing.notices : []
-      const processingItems = Array.isArray(processing.items) ? processing.items : []
-      const doclingItem = processingItems.find((item) => item?.parser_name === 'docling-serve')
-      const cloudVisionItem = processingItems.find((item) => item?.processing_route === 'cloud_vision')
-      const parserDescription = cloudVisionItem
-        ? '云端图片理解已自动完成'
-        : doclingItem
-        ? `Docling OCR 已${doclingItem.parser_status === 'success' ? '完成' : '部分完成'}`
-        : ''
-      feedback.value = notices.length > 0
-        ? `已收到附件；${notices[0]} 原文件已自动清理。`
-        : extractedCharacters > 0
-        ? `已收到附件${parserDescription ? `，${parserDescription}` : ''}，并提取 ${extractedCharacters} 个字符供本轮模型分析；原文件已自动清理。`
-        : '已收到附件，但未提取到可复制文本；若是扫描版 PDF，请上传图片简历或可复制文本的 PDF。'
-    } else {
-      feedback.value = payload.turn?.status === 'succeeded'
-        ? '已完成本轮模型回复。'
-        : '本轮内容已保存，但模型调用未完成；具体原因已显示在对话内。'
-    }
-    const skillExecutions = Array.isArray(payload.skill_executions) ? payload.skill_executions : []
-    if (skillExecutions.length) {
-      const succeededExecutions = skillExecutions.filter((item) => item.status === 'succeeded')
-      const failedExecutions = skillExecutions.filter((item) => item.status !== 'succeeded')
-      const executionSummary = succeededExecutions
-        .map((item) => `${item.tool_name}（${Number(item.result_count ?? 0)} 个结果）`)
-        .join('、')
-      if (executionSummary) {
-        feedback.value = `${feedback.value} 已真实执行 Skill 工具：${executionSummary}。`
-      }
-      if (failedExecutions.length) {
-        const failureSummary = failedExecutions
-          .map((item) => `${item.tool_name}：${item.message || '执行失败'}`)
-          .join('；')
-        feedback.value = `${feedback.value} 部分 Skill 工具未完成：${failureSummary}。`
-      }
-    } else {
-      const promptSkills = (payload.activated_skills ?? [])
-        .filter((item) => item.execution_mode === 'prompt')
-        .map((item) => item.name)
-        .filter(Boolean)
-      if (promptSkills.length) {
-        feedback.value = `${feedback.value} 已挂载 SKILL.md：${promptSkills.join('、')}。`
-      }
-    }
-    const jobSource = payload.job_source ?? {}
-    if (jobSource.status === 'unavailable' || jobSource.status === 'not_configured') {
-      const jobSourceMessage = jobSource.message || '职位链接暂时无法读取，请直接粘贴职位描述。'
-      feedback.value = `${feedback.value} ${jobSourceMessage}`.trim()
-    }
-    const conversationIndex = conversations.value.findIndex((item) => item.id === conversation.id)
-    if (conversationIndex >= 0) {
-      const updatedConversation = {
-        ...conversations.value[conversationIndex],
-        updated_at: payload.assistant_message?.created_at ?? payload.message?.created_at ?? new Date().toISOString()
-      }
-      conversations.value = [
-        updatedConversation,
-        ...conversations.value.filter((item) => item.id !== conversation.id)
-      ]
-      selectedConversation.value = updatedConversation
-    }
-    historyPage.value = 1
-    void loadConversationPage(1)
+    lastTurn.value = serverTurn
+    const ahead = Number(serverTurn.conversation_position ?? 0)
+    feedback.value = ahead > 0
+      ? `消息已保存到服务端队列，前方还有 ${ahead} 个 Turn。`
+      : '消息已保存到服务端，正在等待 Worker 处理。'
+    void observeNextServerTurn()
   } catch (error) {
     if (temporaryMessageMounted) {
-      markTemporaryMessageFailed(activeTemporaryMessageId.value)
+      markTemporaryMessageFailed(temporaryMessage.id)
     } else {
       restoreComposerAfterPreflightFailure(input)
     }
     errorMessage.value = error instanceof Error ? error.message : '消息提交失败'
   } finally {
+    submittingTurnCount.value = Math.max(0, submittingTurnCount.value - 1)
+    syncSendingState()
+  }
+}
+
+function updateObservedTurn(turnId, update) {
+  const item = pendingTurns.value.find((candidate) => candidate.id === turnId)
+  if (!item) return null
+  if (update.status) item.serverTurn.status = update.status
+  if (update.progress) item.progress = update.progress
+  if (typeof update.streamedText === 'string') item.streamedText = update.streamedText
+  return item
+}
+
+function syncObservedTurnDisplay(item) {
+  if (!item || activeObservedTurnId.value !== item.id) return
+  streamedAssistantText.value = item.streamedText
+  streamProgress.value = item.progress
+  streamStatus.value = item.serverTurn.status === 'queued'
+    ? `已进入服务端队列，前方 ${Number(item.serverTurn.conversation_position ?? 0)} 个 Turn`
+    : 'Worker 正在处理本轮任务…'
+}
+
+async function observeNextServerTurn() {
+  if (activeObservedTurnId.value) return
+  const item = firstServerTurn(pendingTurns.value)
+  if (!item) {
+    syncSendingState()
+    return
+  }
+  activeObservedTurnId.value = item.id
+  activeTemporaryMessageId.value = item.temporaryMessageId
+  syncSendingState()
+  syncObservedTurnDisplay(item)
+  let payload = null
+  let streamFailure = ''
+  let terminalObserved = false
+  let retryObservation = false
+  try {
+    await requestSse(`/api/career/turns/${item.id}/events`, { method: 'GET' }, {
+      queued: (event) => {
+        updateObservedTurn(item.id, { status: event.state ?? 'queued' })
+        syncObservedTurnDisplay(item)
+      },
+      started: () => {
+        updateObservedTurn(item.id, { status: 'running' })
+        syncObservedTurnDisplay(item)
+      },
+      progress: (event) => {
+        const current = pendingTurns.value.find((candidate) => candidate.id === item.id)
+        if (!current) return
+        const key = event.step ?? event.key ?? `step-${current.progress.length + 1}`
+        const label = event.label ?? `已完成：${String(event.step ?? '处理步骤')}`
+        const progress = [
+          ...current.progress.filter((entry) => entry.key !== key),
+          { key, label, state: event.state ?? 'completed' }
+        ]
+        updateObservedTurn(item.id, { progress })
+        syncObservedTurnDisplay(current)
+      },
+      delta: (event) => {
+        const current = pendingTurns.value.find((candidate) => candidate.id === item.id)
+        if (!current) return
+        updateObservedTurn(item.id, {
+          streamedText: current.streamedText + (event.content ?? '')
+        })
+        syncObservedTurnDisplay(current)
+      },
+      done: (event) => { payload = event },
+      error: (event) => {
+        if (event.assistant_message) payload = event
+        else streamFailure = event.detail ?? event.message ?? '服务端 Turn 未完成。'
+      }
+    })
+    if (!payload) throw new Error(streamFailure || '服务端 Turn 未返回最终结果。')
+    terminalObserved = true
+    replaceOrAppendMessage(payload.message, item.temporaryMessageId)
+    replaceOrAppendMessage(payload.assistant_message)
+    lastTurn.value = payload.turn ?? { ...item.serverTurn, status: payload.state }
+    feedback.value = payload.turn?.status === 'succeeded'
+      ? '已完成本轮模型回复。'
+      : '本轮内容已保存，但模型调用未完成；具体原因已显示在对话内。'
+    const jobSource = payload.job_source ?? {}
+    if (jobSource.status === 'unavailable' || jobSource.status === 'not_configured') {
+      feedback.value = `${feedback.value} ${jobSource.message || '职位链接暂时无法读取，请直接粘贴职位描述。'}`
+    }
+    historyPage.value = 1
+    void loadConversationPage(1)
+  } catch (error) {
+    try {
+      const statusPayload = await requestJson(`/api/career/turns/${item.id}`)
+      const latestTurn = statusPayload.turn
+      lastTurn.value = latestTurn
+      if (isActiveTurn(latestTurn)) {
+        pendingTurns.value = upsertServerTurn(pendingTurns.value, {
+          ...latestTurn,
+          content: item.content,
+          temporaryMessageId: item.temporaryMessageId
+        })
+        retryObservation = true
+        feedback.value = '任务仍在服务端执行，正在重新连接进度。'
+      } else {
+        terminalObserved = true
+        markTemporaryMessageFailed(item.temporaryMessageId)
+        errorMessage.value = latestTurn.error_message || '服务端 Turn 未完成。'
+      }
+    } catch {
+      retryObservation = true
+      errorMessage.value = error instanceof Error ? error.message : '服务端 Turn 观察失败'
+    }
+  } finally {
+    if (terminalObserved) {
+      pendingTurns.value = removeServerTurn(pendingTurns.value, item.id)
+    }
+    activeObservedTurnId.value = ''
     activeTemporaryMessageId.value = ''
     streamedAssistantText.value = ''
     streamStatus.value = ''
     streamProgress.value = []
-    sending.value = false
-    scheduleTurnRecoveryPolling()
+    syncSendingState()
+    if (retryObservation) {
+      setTimeout(() => { void observeNextServerTurn() }, 1000)
+    } else if (pendingTurns.value.length > 0) {
+      void observeNextServerTurn()
+    }
   }
 }
 
@@ -1927,7 +2016,7 @@ onMounted(() => {
         <article v-for="message in messages" :key="message.id" class="message" :class="[message.role === 'user' ? 'from-user' : 'from-agent', message.local_state ? `message-${message.local_state}` : '']" :aria-label="message.role === 'user' ? '你的消息' : '求职助手消息'">
           <header v-if="message.role !== 'user'" class="message-role"><i aria-hidden="true">职</i><strong>求职助手</strong></header>
           <CareerMessageContent :content="message.content" />
-          <small class="message-time">{{ formatDate(message.created_at) }}<template v-if="message.local_state === 'sending'"> · 正在发送</template><template v-else-if="message.local_state === 'failed'"> · 发送失败</template></small>
+          <small class="message-time">{{ formatDate(message.created_at) }}<template v-if="message.local_state === 'sending'"> · 正在提交</template><template v-else-if="message.local_state === 'queued'"> · 已保存并排队</template><template v-else-if="message.local_state === 'failed'"> · 发送失败</template></small>
         </article>
         <article v-if="sending" class="agent-message agent-pending">
           <div class="stream-pending-heading"><div class="message-role"><i aria-hidden="true">职</i><strong>求职助手</strong></div><span>正在思考</span></div>
@@ -1937,6 +2026,14 @@ onMounted(() => {
           <CareerMessageContent v-if="streamedAssistantText" class="streamed-answer" :content="streamedAssistantText" />
           <p v-else class="stream-status">{{ streamStatus || '正在思考…' }}</p>
         </article>
+        <section v-if="pendingTurns.length" class="turn-queue-preview" aria-label="服务端排队消息">
+          <strong>服务端队列（{{ pendingTurns.length }}）</strong>
+          <article v-for="(pendingTurn, index) in pendingTurns" :key="pendingTurn.id">
+            <span>{{ Number(pendingTurn.serverTurn.conversation_position ?? index) + 1 }}</span>
+            <p>{{ pendingTurn.content }}</p>
+            <small>{{ pendingTurn.serverTurn.status === 'running' ? '处理中' : '等待中' }}</small>
+          </article>
+        </section>
         <div v-if="lastTurn" class="turn-status" :class="{ active: isActiveTurn(lastTurn) }">{{ turnStatusText(lastTurn) }}</div>
       </section>
 
@@ -1987,7 +2084,7 @@ onMounted(() => {
             <small>{{ experience.job_name }}<template v-if="experience.interview_date"> · {{ experience.interview_date }}</template></small>
           </button>
         </div>
-        <div class="composer-footer"><small>当前模型：{{ modelLabel }}。输入 @ 可引用面经或 Skill，输入 / 可调用 Skill；已添加的简历或 JD 会自动用于后续回答。</small><button class="send-button" type="button" :disabled="sending || !selectedConversation" @click="sendMessage">{{ sending ? '正在思考…' : '发送' }}</button></div>
+        <div class="composer-footer"><small>当前模型：{{ modelLabel }}。输入 @ 可引用面经或 Skill，输入 / 可调用 Skill；每条消息会立即保存到服务端并按顺序执行。</small><button class="send-button" type="button" :disabled="!selectedConversation" @click="sendMessage">{{ sending ? '发送并排队' : '发送' }}</button></div>
       </footer>
     </section>
 
@@ -2197,7 +2294,8 @@ onMounted(() => {
 .message-role strong { color:var(--ui-text-secondary); font-size:12px; font-weight:800; }
 .message-time { display:block; margin-top:10px; color:var(--ui-text-muted); font-size:10px; }.from-user .message-time { margin-top:6px; color:#8193aa; text-align:right; }
 .turn-status { align-self:center; border-radius:999px; background:var(--ui-surface-soft); color:var(--ui-text-secondary); padding:7px 11px; font-size:12px; }.turn-status.active { background:var(--ui-warning-soft); color:var(--ui-warning); }
-.message-sending { opacity:.76; }.message-failed { border-color:#edcaca; background:#fff8f8 !important; }.message-failed small { color:#b35454; font-weight:800; }.agent-pending { width:min(560px,86%); color:var(--ui-text-secondary); }.stream-pending-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; color:var(--ui-text-secondary); }.stream-pending-heading .message-role { margin-bottom:0; }.stream-pending-heading::before { width:13px; height:13px; flex:0 0 auto; border:2px solid var(--ui-line-strong); border-top-color:var(--ui-accent); border-radius:50%; content:''; animation:career-thinking-spin .8s linear infinite; }.stream-pending-heading span { color:var(--ui-text-muted); font-size:11px; font-weight:800; }.stream-progress-list { display:grid; gap:7px; margin:11px 0 0; padding:0; list-style:none; }.stream-progress-item { display:flex; align-items:center; gap:8px; color:var(--ui-text-muted); font-size:12px; line-height:1.45; }.stream-progress-item i { width:7px; height:7px; flex:0 0 auto; border-radius:50%; background:var(--ui-line-strong); }.stream-progress-item.running { color:var(--ui-accent-ink); font-weight:750; }.stream-progress-item.running i { background:var(--ui-accent); animation:career-progress-pulse 1s ease-in-out infinite; }.stream-progress-item.completed i { background:var(--ui-success); }.stream-status,.streamed-answer { margin:10px 0 0 !important; }.streamed-answer { border-top:1px solid var(--ui-line); padding-top:10px; } @keyframes career-progress-pulse { 50% { transform:scale(.72); opacity:.55; } }
+.message-sending,.message-queued { opacity:.76; }.message-failed { border-color:#edcaca; background:#fff8f8 !important; }.message-failed small { color:#b35454; font-weight:800; }.agent-pending { width:min(560px,86%); color:var(--ui-text-secondary); }.stream-pending-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; color:var(--ui-text-secondary); }.stream-pending-heading .message-role { margin-bottom:0; }.stream-pending-heading::before { width:13px; height:13px; flex:0 0 auto; border:2px solid var(--ui-line-strong); border-top-color:var(--ui-accent); border-radius:50%; content:''; animation:career-thinking-spin .8s linear infinite; }.stream-pending-heading span { color:var(--ui-text-muted); font-size:11px; font-weight:800; }.stream-progress-list { display:grid; gap:7px; margin:11px 0 0; padding:0; list-style:none; }.stream-progress-item { display:flex; align-items:center; gap:8px; color:var(--ui-text-muted); font-size:12px; line-height:1.45; }.stream-progress-item i { width:7px; height:7px; flex:0 0 auto; border-radius:50%; background:var(--ui-line-strong); }.stream-progress-item.running { color:var(--ui-accent-ink); font-weight:750; }.stream-progress-item.running i { background:var(--ui-accent); animation:career-progress-pulse 1s ease-in-out infinite; }.stream-progress-item.completed i { background:var(--ui-success); }.stream-status,.streamed-answer { margin:10px 0 0 !important; }.streamed-answer { border-top:1px solid var(--ui-line); padding-top:10px; } @keyframes career-progress-pulse { 50% { transform:scale(.72); opacity:.55; } }
+.turn-queue-preview{display:grid;width:min(560px,86%);gap:7px;border:1px dashed var(--ui-line-strong);border-radius:12px;background:var(--ui-surface-soft);padding:10px 12px;color:var(--ui-text-secondary)}.turn-queue-preview>strong{font-size:11px}.turn-queue-preview article{display:grid;grid-template-columns:20px minmax(0,1fr) auto;align-items:start;gap:7px}.turn-queue-preview article span{display:grid;width:18px;height:18px;place-items:center;border-radius:50%;background:var(--ui-surface-active);color:var(--ui-accent-ink);font-size:10px;font-weight:850}.turn-queue-preview article p{overflow:hidden;margin:0;font-size:12px;line-height:1.45;text-overflow:ellipsis;white-space:nowrap}.turn-queue-preview article small{border-radius:999px;background:#fff;padding:2px 6px;color:var(--ui-text-muted);font-size:10px;font-weight:800}
 @keyframes career-thinking-spin { to { transform:rotate(360deg); } }
 .composer { border-top:1px solid #edf0e7; background:#fff; padding:12px 16px 14px; }.composer-toolbar { min-height:36px; flex-wrap:wrap; border-bottom:1px solid #edf0e7; padding-bottom:9px; }.input-tools,.session-tools { display:flex; min-width:0; flex-wrap:wrap; align-items:center; gap:7px; }.session-tools { margin-left:auto; justify-content:flex-end; }.job-url-row { display:grid; grid-template-columns:auto 1fr; align-items:center; gap:8px; margin:10px 0 9px; color:#738068; font-size:12px; font-weight:800; }.job-url-row input,.composer textarea { padding:10px 11px; }.composer textarea { display:block; min-height:68px; margin-top:10px; resize:vertical; }.composer-footer { margin-top:9px; }.input-tools { justify-content:flex-start; }.resume-input { display:none; }.chip-button.active { max-width:240px; overflow:hidden; background:#eaf4d4; color:#5a7d21; text-overflow:ellipsis; white-space:nowrap; }.file-clear-button { border-color:#f0d5d5; background:#fff8f8; color:#a65a5a; }.free-model-entry-button { border-style:dashed; background:#fff; color:#62812d; }.free-model-entry-button:hover { border-color:#9fbd67; background:#f5f9ed; }.model-select { width:auto; max-width:300px; padding:7px 9px; color:#65775a; font-size:12px; font-weight:700; }.send-button { min-width:88px; padding:9px 13px; }.composer-footer > small { color:#98a18e; font-size:11px; }
 .interview-reference-row { display:flex; flex-wrap:wrap; gap:7px; margin-top:9px; }
