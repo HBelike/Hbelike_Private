@@ -52,6 +52,7 @@
 - 公网 `https://xingxingtech.cn/career/interview-master` 返回 200；健康接口返回 200；权限头为 `camera=(), microphone=(self), geolocation=()`。
 - 公网 WSS 已到达 FastAPI，并按设计拒绝未登录连接；生产 API 容器确认 ASR Key 已注入，未输出 Key 内容。
 - 准备页读取模型配置时展示浏览器检查、模型读取、完成准备三段进度和百分比；请求未完成前平滑推进但最多停在 92%，只有真实返回成功后才显示 100%。相关前端完整测试现为 `53 passed`，生产构建通过。
+- 2026-08-24 本地 8% 卡死问题已修复：Chrome 的 `audioWorklet` 是 `AudioContext` 实例 getter，旧检测从 prototype 读取会抛出 `Illegal invocation`，导致 `onMounted` 在配置请求前中断。检测现只验证 `AudioContext` 构造器，并保证即使能力检测异常也继续加载配置、显示可操作错误。本地 Vite 代理配置接口返回 200，ASR 为 ready，真实 Qwen 会话收到仅面试官通道的 `session.ready`；前端完整测试 `54 passed`，生产构建通过。本次仅本地验证，未部署生产。
 
 ## 尚未伪报通过的边界
 

@@ -14,9 +14,9 @@ export function detectBrowserInterviewSupport({
   if (!isDesktopChrome) missing.push('请使用桌面版 Chrome')
   if (typeof mediaDevices?.getDisplayMedia !== 'function') missing.push('浏览器不支持标签页音频共享')
   if (typeof mediaDevices?.getUserMedia !== 'function') missing.push('浏览器不支持麦克风授权')
-  if (!AudioContextImpl?.prototype?.audioWorklet && typeof AudioContextImpl !== 'function') {
-    missing.push('浏览器不支持 Web Audio')
-  }
+  // Chrome 的 audioWorklet 是实例 getter；从 prototype 读取会抛出 Illegal invocation。
+  // 此处只判断 AudioContext 构造器，实际 AudioWorklet 能力在用户点击开始后由实例验证。
+  if (typeof AudioContextImpl !== 'function') missing.push('浏览器不支持 Web Audio')
   if (typeof WebSocketImpl !== 'function') missing.push('浏览器不支持实时连接')
   if (globalThis.isSecureContext === false && globalThis.location?.hostname !== 'localhost') {
     missing.push('页面必须通过 HTTPS 打开')

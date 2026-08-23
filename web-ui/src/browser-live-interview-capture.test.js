@@ -29,6 +29,26 @@ test('browser audio capture only accepts desktop Chrome capabilities', () => {
   }).supported, true)
 })
 
+test('browser capability detection does not invoke the AudioContext prototype getter', () => {
+  class BrowserAudioContext {}
+  Object.defineProperty(BrowserAudioContext.prototype, 'audioWorklet', {
+    get() {
+      throw new TypeError('Illegal invocation')
+    }
+  })
+  const mediaDevices = {
+    getDisplayMedia() {},
+    getUserMedia() {}
+  }
+
+  assert.deepEqual(detectBrowserInterviewSupport({
+    userAgent: 'Mozilla/5.0 Chrome/140.0.0.0 Safari/537.36',
+    mediaDevices,
+    AudioContextImpl: BrowserAudioContext,
+    WebSocketImpl: class {}
+  }), { supported: true, missing: [] })
+})
+
 test('browser audio capture stops an invalid shared stream without audio', async () => {
   const video = track('video')
   const mediaDevices = {

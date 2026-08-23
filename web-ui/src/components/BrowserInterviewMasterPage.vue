@@ -277,7 +277,11 @@ function goBack() {
 }
 
 onMounted(() => {
-  support.value = detectBrowserInterviewSupport()
+  try {
+    support.value = detectBrowserInterviewSupport()
+  } catch {
+    support.value = { supported: false, missing: ['无法检查 Chrome 音频能力，请刷新页面重试'] }
+  }
   setupProgress.value = 24
   void loadSetupOptions()
 })
