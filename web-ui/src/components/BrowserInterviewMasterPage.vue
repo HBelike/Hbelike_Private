@@ -68,7 +68,7 @@ const phaseLabel = computed(() => ({
   paused: '采集已暂停',
   ended: '本场已结束'
 }[phase.value] || '准备采集'))
-const actionLabel = computed(() => phase.value === 'paused' ? '重新选择面试标签页' : '开始面试')
+const actionLabel = computed(() => phase.value === 'paused' ? '重新选择声音来源' : '开始面试')
 const canOpenPip = computed(() => phase.value === 'active' && supportsAnswerPictureInPicture())
 const setupProgressLabel = computed(() => {
   if (setupProgress.value >= 100) return '模型与声音已准备完成'
@@ -149,7 +149,7 @@ function handleServerEvent(event) {
 function handleConnectionState(nextState) {
   connectionState.value = nextState
   if (nextState === 'backpressure') message.value = '网络发送稍慢，已跳过一小段音频以保持实时性。'
-  if (nextState === 'disconnected' && phase.value === 'active') void pauseCapture('实时连接已中断，请重新选择面试标签页。')
+  if (nextState === 'disconnected' && phase.value === 'active') void pauseCapture('实时连接已中断，请重新选择电脑声音。')
 }
 
 async function startInterview() {
@@ -164,7 +164,7 @@ async function startInterview() {
     const captureResult = await capture.start({
       candidateEnabled: candidateEnabled.value,
       onFrame: ({ channel, sequence, pcm }) => liveSocket?.sendAudio(channel, sequence, pcm),
-      onEnded: () => void pauseCapture('标签页停止共享，回答和历史已保留。')
+      onEnded: () => void pauseCapture('电脑声音共享已停止，回答和历史已保留。')
     })
     if (captureResult.warning) message.value = captureResult.warning
     candidateEnabled.value = captureResult.candidateEnabled
@@ -313,9 +313,9 @@ onBeforeUnmount(() => {
     <section v-if="phase === 'preparing' && !sessionIds.length" class="preparation-layout">
       <article class="preparation-thesis">
         <div class="pulse-orbit" aria-hidden="true"><span></span><span></span><span></span></div>
-        <p class="section-label">Chrome 标签页实时辅助</p>
+        <p class="section-label">Chrome 电脑声音实时辅助</p>
         <h1>听清问题，<br />把回答组织成能开口的话。</h1>
-        <p>你选择面试标签页后，Qwen 负责中英混合转写，当前文本模型把面试官的问题实时整理为中文回答。页面不读取简历、岗位或面经。</p>
+        <p>Chrome 获得电脑声音授权后，Qwen 负责中英混合转写，当前文本模型把面试官的问题实时整理为中文回答。腾讯会议、飞书、QQ、微信或浏览器通话都走同一条电脑音频轨，不需要绑定平台。</p>
         <div class="capture-boundary">
           <strong>本场只处理你主动授权的声音</strong>
           <span>不保存原始音频、屏幕画面、转写半句或你的麦克风文本。</span>
@@ -375,7 +375,7 @@ onBeforeUnmount(() => {
             <span class="status-dot"></span>
             <div>
               <strong>{{ support.supported ? '桌面 Chrome 能力正常' : '当前环境暂不可开始' }}</strong>
-              <small>{{ support.supported ? '点击开始后请选择正在面试的 Chrome 标签页，并勾选共享标签页音频。' : support.missing.join('；') }}</small>
+              <small>{{ support.supported ? '点击开始后，在 Chrome 授权窗口选择“整个屏幕”并开启“共享系统音频”；浏览器会议也可直接选择对应标签页。' : support.missing.join('；') }}</small>
             </div>
           </div>
 

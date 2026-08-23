@@ -12,7 +12,7 @@ export function detectBrowserInterviewSupport({
     && !/(Edg|OPR|Android|Mobile|CriOS)\//i.test(userAgent)
   const missing = []
   if (!isDesktopChrome) missing.push('请使用桌面版 Chrome')
-  if (typeof mediaDevices?.getDisplayMedia !== 'function') missing.push('浏览器不支持标签页音频共享')
+  if (typeof mediaDevices?.getDisplayMedia !== 'function') missing.push('浏览器不支持电脑音频共享')
   if (typeof mediaDevices?.getUserMedia !== 'function') missing.push('浏览器不支持麦克风授权')
   // Chrome 的 audioWorklet 是实例 getter；从 prototype 读取会抛出 Illegal invocation。
   // 此处只判断 AudioContext 构造器，实际 AudioWorklet 能力在用户点击开始后由实例验证。
@@ -50,12 +50,13 @@ export class BrowserAudioCapture {
   async start({ candidateEnabled = false, onFrame, onEnded }) {
     // getDisplayMedia 必须直接发生在点击事件的瞬时用户授权中，不能先等待异步清理。
     const displayRequest = this.mediaDevices.getDisplayMedia({
-      video: true,
+      video: { displaySurface: 'monitor' },
       audio: true,
       preferCurrentTab: false,
       selfBrowserSurface: 'exclude',
-      surfaceSwitching: 'exclude',
-      systemAudio: 'exclude'
+      surfaceSwitching: 'include',
+      monitorTypeSurfaces: 'include',
+      systemAudio: 'include'
     })
     await this.stop()
     this.stopping = false
@@ -71,7 +72,7 @@ export class BrowserAudioCapture {
     const interviewerTrack = displayStream.getAudioTracks()[0]
     if (!interviewerTrack) {
       this._stopStream(displayStream)
-      throw new Error('没有检测到共享标签页音频，请重新选择面试标签页并勾选“共享标签页音频”')
+      throw new Error('没有检测到共享电脑声音。请在 Chrome 授权窗口选择“整个屏幕”并开启“共享系统音频”，或选择正在通话的浏览器标签页并共享音频。')
     }
     await this._connectTrack(interviewerTrack, 'interviewer')
 

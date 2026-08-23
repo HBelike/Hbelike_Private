@@ -51,8 +51,10 @@ test('browser capability detection does not invoke the AudioContext prototype ge
 
 test('browser audio capture stops an invalid shared stream without audio', async () => {
   const video = track('video')
+  let requestedOptions = null
   const mediaDevices = {
-    async getDisplayMedia() {
+    async getDisplayMedia(options) {
+      requestedOptions = options
       return {
         getAudioTracks: () => [],
         getVideoTracks: () => [video],
@@ -64,8 +66,12 @@ test('browser audio capture stops an invalid shared stream without audio', async
 
   await assert.rejects(
     capture.start({ candidateEnabled: false, onFrame() {}, onEnded() {} }),
-    /共享标签页音频/
+    /共享电脑声音/
   )
+  assert.equal(requestedOptions.systemAudio, 'include')
+  assert.equal(requestedOptions.video.displaySurface, 'monitor')
+  assert.equal(requestedOptions.monitorTypeSurfaces, 'include')
+  assert.equal(requestedOptions.surfaceSwitching, 'include')
   assert.equal(video.stopped, 1)
 })
 
