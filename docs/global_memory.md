@@ -12,5 +12,5 @@
 8. **技能库**：`find-skills`、`ai-image-generation`、`og-image-design`、`grill-me`、`github-project-blog` 已作为 `deploy/skill-seeds` 种子；持久卷中的已编辑 Skill 不会被重新部署覆盖。
 9. **调度边界**：周五 08:00 生产、09:00 建微信草稿；Scheduler 与人工流水线共享文件锁，生产只能单实例运行。本地默认保持音视频关闭；生产已显式设置 `VIDEO_SUBMIT_ENABLED=true`、`AUDIO_ENABLED=true`，会运行 Seedance、视觉质检、豆包 TTS 与最终视频装配并产生相应调用。
 10. **上线修复**：`eba2f08` 为生产 Nginx 增加静态 `root /usr/share/nginx/html` 与 `index index.html`；服务器已通过标准 Git 拉取、重建 Web/Caddy，`career-web` 健康检查恢复正常。
-11. **当前生产版本**：2026-08-23 已部署 Chrome 浏览器“面试大师”提交 `94190a3`，PostgreSQL 迁移至 `20260823_19`；公网页面与健康接口返回 200，API/Web/PostgreSQL/Scheduler 均正常，Caddy 允许同源麦克风并继续禁止摄像头。浏览器通过标签页音频、同源 WSS、DashScope Qwen-Audio Streaming 和现有文本模型完成实时转写与中文回答；Electron 旧方案保留不变。
+11. **当前生产版本**：2026-08-24 已部署生产代码提交 `ad9df71`，包含 Chrome 系统音频优先、转写侧栏滚动、结束面试后将问题可选归并到面经库，以及 Agent Worker 过期租约 SQL 修复；PostgreSQL 仍为 `20260823_19`。正式页面与健康接口返回 200，API/Web/PostgreSQL/Scheduler/Worker 正常，Worker 重启次数为 0；归档接口保持登录鉴权，Electron 旧方案不变。
 12. **当前边界**：登录页支持邮箱验证码、邮箱密码、显式注册和找回密码；生产保持 `PLATFORM_AUTH_REQUIRED=true`、`PLATFORM_CLOSED_OPERATOR_MODE=true`、`PLATFORM_PUBLIC_REGISTRATION_ENABLED=true`、`PLATFORM_CLI_BOOTSTRAP_ONLY=true` 与 `CAREER_REDACTION_ENABLED=true`。求职助手模型选择器只展示真实可用模型；前端仅维护电脑端与手机端。
