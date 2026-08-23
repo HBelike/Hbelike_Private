@@ -8,7 +8,7 @@ const previewBridge: Bridge = {
       return {
         asr_models: [{ id: 'preview-asr', display_name: 'OpenAI 双语实时转写', readiness: 'ready' }],
         answer_models: [{ id: 'preview-answer', display_name: '中文回答模型', readiness: 'ready' }],
-        environment_asr: { readiness: 'blocked', blocked_reason: '预览环境未配置服务端 ASR' },
+        environment_asr: { readiness: 'blocked', blocked_reason: '预览环境未配置服务端 ASR', display_name: '未配置实时转写模型' },
       } as T
     }
     if (path.endsWith('/interview-library/tree')) {

@@ -120,7 +120,10 @@ def test_session_rejects_missing_transcription_configuration() -> None:
     app.include_router(live_web.router)
 
     with (
-        patch.dict(os.environ, {"OPENAI_API_KEY": ""}),
+        patch.dict(
+            os.environ,
+            {"DASHSCOPE_API_KEY": "", "OPENAI_API_KEY": "", "LIVE_INTERVIEW_FAKE_ASR": ""},
+        ),
         TestClient(app) as client,
     ):
         response = client.post(
@@ -130,6 +133,60 @@ def test_session_rejects_missing_transcription_configuration() -> None:
 
     assert response.status_code == 422
     assert "实时转写模型" in response.json()["detail"]
+
+
+def test_session_uses_dashscope_environment_transcription() -> None:
+    app = FastAPI()
+    app.include_router(live_web.router)
+    repository = SimpleNamespace()
+    captured: dict[str, object] = {}
+
+    def create_session(*args, **kwargs):
+        captured.update(kwargs)
+        return replace(
+            _record(),
+            asr_provider=kwargs["asr_provider"],
+            asr_model_profile_id=kwargs["asr_model_profile_id"],
+            answer_model_profile_id=kwargs["answer_model_profile_id"],
+        )
+
+    repository.create_session = create_session
+    with (
+        patch.dict(
+            os.environ,
+            {
+                "DASHSCOPE_API_KEY": "configured",
+                "OPENAI_API_KEY": "",
+                "LIVE_INTERVIEW_FAKE_ASR": "",
+            },
+        ),
+        patch.object(live_web, "get_live_repository", return_value=repository),
+        TestClient(app) as client,
+    ):
+        response = client.post(
+            "/api/career/live-interviews/sessions",
+            json={"answer_model_profile_id": str(uuid4())},
+        )
+
+    assert response.status_code == 201
+    assert captured["asr_provider"] == "dashscope"
+
+
+def test_environment_asr_prefers_dashscope_and_hides_key() -> None:
+    with patch.dict(
+        os.environ,
+        {
+            "DASHSCOPE_API_KEY": "secret-value",
+            "OPENAI_API_KEY": "also-secret",
+            "LIVE_INTERVIEW_FAKE_ASR": "",
+        },
+    ):
+        config = live_web._environment_asr_config()
+
+    assert config["readiness"] == "ready"
+    assert config["provider_key"] == "dashscope"
+    assert config["model_id"] == "qwen-audio-3.0-asr-flash-streaming"
+    assert "secret-value" not in str(config)
 
 
 def test_desktop_launch_endpoint_starts_windows_capture_tool() -> None:

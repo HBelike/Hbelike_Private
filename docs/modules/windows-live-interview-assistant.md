@@ -13,8 +13,8 @@
 - Electron preload 生产构建固定输出为 CommonJS `preload.cjs`。这是桌面桥接能否加载的必要条件；不能在 `type=module` 项目里把 ESM `preload.js` 直接交给 sandbox preload，否则只会出现空白深色窗口。
 - 不对接腾讯会议、Teams、Zoom 等会议软件 API。系统中任何正在播放的对方声音都由 Windows loopback 捕获，用户麦克风作为另一条独立音轨。
 - 音频由 `AudioWorklet` 读取，重采样为 24 kHz 单声道 PCM16，并以 100 ms 帧发送。系统音频和麦克风分别维护 `sequence`。
-- 转文字不是由普通聊天 LLM 完成。首个 Provider 使用专门的 OpenAI Realtime transcription 语音识别模型；`AsrProvider` 接口允许以后增加 FunASR 等本地工具。普通 LLM 只负责问题理解扩展和中文回答生成。
-- `DeepSeek` 等仅声明 `text` 能力的模型不能承担语音转写。准备页只有在发现可用的 transcription 模型档案或 `OPENAI_API_KEY` 时才允许开始；否则直接显示配置说明，不创建必然失败的会话。
+- 转文字不是由普通聊天 LLM 完成。默认 Provider 使用阿里云百炼 `qwen-audio-3.0-asr-flash-streaming`，通过 DashScope WebSocket 接收 24 kHz PCM 并流式输出中英混合文本；OpenAI transcription 仍作为兼容备用。普通 LLM 只负责问题识别和中文回答生成。
+- `DeepSeek` 等仅声明 `text` 能力的模型不能承担语音转写。准备页只有在发现 `DASHSCOPE_API_KEY`、`OPENAI_API_KEY` 或可用的 transcription 模型档案时才允许开始；否则直接显示配置说明，不创建必然失败的会话。
 - ASR 保留原始语言，不自动翻译；回答 Prompt 强制使用中文，并要求各行业专有名词保留原文。
 - 当前问题识别先使用低延迟确定性规则，Provider/Detector 均保留替换接口。回答 Prompt 只包含当前面试官问题和输出规则，不读取简历、目标岗位、面经或历史对话；遇到个人经历和数字类问题时只给可替换的回答结构，不编造事实。
 - 服务端只保存 session、final utterance 和 answer。PCM、WAV、partial 转写、API Key 和 Provider 原始错误正文都不进入业务表。
@@ -63,11 +63,19 @@ FastAPI /api/career/live-interviews/{id}/stream
 
 ```text
 CAREER_DATABASE_URL=postgresql+psycopg://...
-OPENAI_API_KEY=...
-OPENAI_TRANSCRIPTION_MODEL=gpt-4o-transcribe  # 可选
+DASHSCOPE_API_KEY=sk-...  # 阿里云百炼华北2（北京）API Key
+DASHSCOPE_ASR_MODEL=qwen-audio-3.0-asr-flash-streaming  # 可选，代码默认值
+DASHSCOPE_ASR_WEBSOCKET_URL=wss://dashscope.aliyuncs.com/api-ws/v1/inference  # 可选
+DASHSCOPE_WORKSPACE_ID=  # 默认业务空间留空；子业务空间按控制台填写
 ```
 
-也可以在现有模型档案中创建 `provider_key=openai`、能力包含 `transcription` 的 ASR 档案，并在桌面准备页选择。回答继续使用能力包含 `text` 的现有模型档案。`LIVE_INTERVIEW_FAKE_ASR=1` 只用于本地协议联调，不能作为真实转写验收结果。
+申请与配置入口：
+
+- [阿里云百炼 API Key（华北2·北京）](https://bailian.console.aliyun.com/cn-beijing/?tab=app#/api-key)
+- [官方获取与配置 API Key 指南](https://help.aliyun.com/zh/model-studio/get-api-key)
+- [Qwen-Audio 实时语音识别文档](https://help.aliyun.com/zh/model-studio/real-time-speech-recognition-user-guide)
+
+在 `DASHSCOPE_API_KEY` 留空时，也可以继续使用 `OPENAI_API_KEY` 与 `OPENAI_TRANSCRIPTION_MODEL`，或在现有模型档案中创建能力包含 `transcription` 的 DashScope/OpenAI ASR 档案。回答继续使用能力包含 `text` 的现有 DeepSeek 模型档案。`LIVE_INTERVIEW_FAKE_ASR=1` 只用于本地协议联调，不能作为真实转写验收结果。
 
 首次安装与运行：
 
@@ -84,7 +92,7 @@ npm start
 
 截至 2026-08-23 已完成：
 
-- Python 核心、服务、桌面启动、WebSocket、Actor 隔离及相关 Career 回归：33 项通过。
+- Python 核心、服务、桌面启动、WebSocket、Actor 隔离及相关 Career 回归：37 项通过。
 - 原求职助手前端：39 项测试通过，Vite 生产构建通过；“面试大师”位于用户指定的会话顶部工具区。
 - 双通道映射、乱序 partial、final 限制、混合语言、术语纠错、追问、手动生成和版本过滤均有自动测试。
 - Electron：8 项 Vitest 通过，`vue-tsc` 与 Electron TypeScript 检查通过，Vite 和 Electron 主/预加载脚本生产构建通过。
@@ -94,6 +102,8 @@ npm start
 - 已在 Windows 桌面实机验收入口链路：点击/调用入口不会打开 PowerShell，Electron 能渲染准备界面，自动使用当前 `http://127.0.0.1:18080` 服务并加载可用转写模型、回答模型和麦克风。
 - 纯问题模式已移除准备页的简历、岗位和面经选择；会话创建只提交 ASR/回答模型 ID，避免 Vue 响应式资料数组跨 IPC 时触发 `An object could not be cloned`。
 - 实时连接现在等待服务端发送 `session.ready` 后才开始系统音频与麦克风采集；连接提前关闭或发送失败只在界面内显示可操作错误，不再从 `ipcMain` 抛出 JavaScript 主进程崩溃弹窗。
+- 默认云端 ASR 已切换为 DashScope Qwen-Audio Streaming：等待 `task-started` 后发送二进制 PCM，映射 `result-generated` partial/final，并在结束时发送 `finish-task`；API Key 只从服务端环境读取。
+- 已使用当前本机百炼凭据完成真实 `qwen-audio-3.0-asr-flash-streaming` 握手，以及 FastAPI 会话创建、双 ASR Session 就绪和正常结束链路验证；验证过程不输出 API Key，也不保存原始音频。
 - Alembic 只有一个 head：`20260823_18`。
 - 数据库迁移及仓储没有 PCM、WAV 或 partial 持久化字段。
 
@@ -107,7 +117,7 @@ powershell -ExecutionPolicy Bypass -File scripts/verify-live-interview.ps1
 
 以下项目需要真实外部条件，当前没有伪报通过：
 
-- 使用 OpenAI 有效凭据完成中文、英文、中英混合和非 IT 专有名词的真实流式 ASR。
+- 使用 DashScope 有效凭据完成中文、英文、中英混合和非 IT 专有名词的真实流式 ASR。
 - 在 Zoom、Teams、腾讯会议或 Google Meet 中至少选择两个进行双端通话，分别验证耳机和扬声器。
 - 验证真实问题结束到首个回答骨架的 P95 是否不超过 2 秒，并校准规则检测 Precision。
 - 连续运行 60 分钟，验证网络波动、切换默认播放设备和重复追问。当前断线会立即安全停止采集；ASR 自动重连与最多 10 秒音频缓冲尚未实现。

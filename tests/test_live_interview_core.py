@@ -1,9 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 import base64
+import json
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from src.career_assistant.live_interview.asr.dashscope_realtime import (
+    DashScopeRealtimeAsrProvider,
+    map_dashscope_event,
+)
 from src.career_assistant.live_interview.asr.openai_realtime import map_openai_event
 from src.career_assistant.live_interview.contracts import (
     AnswerRequestEvent,
@@ -179,3 +186,85 @@ def test_openai_transcription_messages_map_to_domain_events() -> None:
     assert partial is not None and not partial.is_final
     assert final is not None and final.is_final
     assert final.text == "Explain CAP theorem"
+
+
+def test_dashscope_transcription_messages_map_to_domain_events() -> None:
+    partial = map_dashscope_event(
+        {
+            "header": {"event": "result-generated"},
+            "payload": {
+                "output": {
+                    "sentence": {"text": "解释 CAP", "sentence_end": False}
+                }
+            },
+        },
+        AudioChannel.INTERVIEWER,
+        12,
+    )
+    final = map_dashscope_event(
+        {
+            "header": {"event": "result-generated"},
+            "payload": {
+                "output": {
+                    "sentence": {"text": "解释 CAP theorem？", "sentence_end": True}
+                }
+            },
+        },
+        AudioChannel.INTERVIEWER,
+        13,
+    )
+
+    assert partial is not None and not partial.is_final
+    assert final is not None and final.is_final
+    assert final.provider == "dashscope"
+    assert final.text == "解释 CAP theorem？"
+
+
+class _FakeDashScopeSocket:
+    def __init__(self) -> None:
+        self.sent: list[str | bytes] = []
+        self.closed = False
+
+    async def send(self, payload: str | bytes) -> None:
+        self.sent.append(payload)
+
+    async def recv(self) -> str:
+        return json.dumps({"header": {"event": "task-started"}, "payload": {}})
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+def test_dashscope_provider_waits_for_task_start_and_streams_pcm() -> None:
+    async def scenario() -> None:
+        socket = _FakeDashScopeSocket()
+        provider = DashScopeRealtimeAsrProvider("dashscope-test-key")
+
+        with patch(
+            "websockets.asyncio.client.connect",
+            new=AsyncMock(return_value=socket),
+        ) as connect:
+            session = await provider.start(
+                AudioChannel.INTERVIEWER,
+                prompt="LangGraph、Kafka",
+            )
+
+        connect.assert_awaited_once()
+        assert connect.await_args.kwargs["additional_headers"]["Authorization"] == (
+            "Bearer dashscope-test-key"
+        )
+        run_task = json.loads(str(socket.sent[0]))
+        assert run_task["header"]["action"] == "run-task"
+        assert run_task["payload"]["model"] == "qwen-audio-3.0-asr-flash-streaming"
+        assert run_task["payload"]["parameters"]["sample_rate"] == 24_000
+        assert run_task["payload"]["parameters"]["language_hints"] == ["zh", "en"]
+        assert run_task["payload"]["input"]["context"][0]["content"][0]["text"] == (
+            "LangGraph、Kafka"
+        )
+
+        await session.append_audio(b"\x01\x02", 1)
+        assert socket.sent[-1] == b"\x01\x02"
+        await session.close()
+        assert socket.closed
+
+    asyncio.run(scenario())

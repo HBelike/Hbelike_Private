@@ -67,8 +67,8 @@ try {
     Write-Host "Automated acceptance passed: backend, protocol, desktop launcher, desktop and main UI tests, type checks, builds, migration, and dependency audit."
 
     if ($Live) {
-        if (-not $env:OPENAI_API_KEY) {
-            throw "Live acceptance requires OPENAI_API_KEY. Automated acceptance remains valid."
+        if (-not $env:DASHSCOPE_API_KEY -and -not $env:OPENAI_API_KEY) {
+            throw "Live acceptance requires DASHSCOPE_API_KEY or OPENAI_API_KEY. Automated acceptance remains valid."
         }
         Write-Host "Live prerequisites are ready. Test $($MeetingApps -join ', ') with two call endpoints for $DurationMinutes minutes; record ASR quality, first-answer latency, device switching, and capture shutdown."
     }

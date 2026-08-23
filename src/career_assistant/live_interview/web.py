@@ -13,6 +13,11 @@ from starlette.concurrency import iterate_in_threadpool
 
 from src.career_assistant.contracts import ModelCapability, ModelSelectionMode, ModelSelectionRequest
 from src.career_assistant.live_interview.answer_service import LiveAnswerService
+from src.career_assistant.live_interview.asr.dashscope_realtime import (
+    DEFAULT_DASHSCOPE_ASR_MODEL,
+    DEFAULT_DASHSCOPE_ASR_URL,
+    DashScopeRealtimeAsrProvider,
+)
 from src.career_assistant.live_interview.asr.fake import FakeAsrProvider
 from src.career_assistant.live_interview.asr.openai_realtime import OpenAIRealtimeAsrProvider
 from src.career_assistant.live_interview.context_builder import LiveAnswerContext
@@ -89,14 +94,7 @@ def setup_options(request: Request, actor=Depends(get_live_actor)) -> dict[str, 
     services = get_live_read_services(request)
     models = services.model_gateway.list_availability(actor.organization_id)
     return {
-        "environment_asr": {
-            "readiness": "ready" if os.getenv("OPENAI_API_KEY", "").strip() else "blocked",
-            "blocked_reason": (
-                None
-                if os.getenv("OPENAI_API_KEY", "").strip()
-                else "尚未配置实时转写模型。DeepSeek 只能生成文本答案，不能把微信通话音频转成文字；请配置带 transcription 能力的 OpenAI 模型档案或 OPENAI_API_KEY。"
-            ),
-        },
+        "environment_asr": _environment_asr_config(),
         "asr_models": [
             _model_payload(item)
             for item in models
@@ -121,10 +119,11 @@ def create_session(
     request: Request,
     actor=Depends(get_live_actor),
 ) -> dict[str, object]:
-    if payload.asr_model_profile_id is None and not os.getenv("OPENAI_API_KEY", "").strip():
+    environment_asr = _environment_asr_config()
+    if payload.asr_model_profile_id is None and environment_asr["readiness"] != "ready":
         raise HTTPException(
             status_code=422,
-            detail="尚未配置实时转写模型。请先配置带 transcription 能力的 OpenAI 模型档案或 OPENAI_API_KEY。",
+            detail=str(environment_asr["blocked_reason"]),
         )
     repository = get_live_repository(request)
     try:
@@ -137,7 +136,11 @@ def create_session(
             asr_provider=(
                 "fake"
                 if os.getenv("LIVE_INTERVIEW_FAKE_ASR", "").strip() == "1"
-                else "openai"
+                else (
+                    "profile"
+                    if payload.asr_model_profile_id is not None
+                    else str(environment_asr["provider_key"])
+                )
             ),
             asr_model_profile_id=payload.asr_model_profile_id,
             answer_model_profile_id=payload.answer_model_profile_id,
@@ -366,13 +369,17 @@ def _resolve_asr_provider(services, record: LiveInterviewSessionRecord):
     if record.asr_provider == "fake" and os.getenv("LIVE_INTERVIEW_FAKE_ASR", "").strip() == "1":
         return FakeAsrProvider()
     if record.asr_model_profile_id is None:
-        api_key = os.getenv("OPENAI_API_KEY", "").strip()
-        if not api_key:
-            raise RuntimeError("请配置带 transcription 能力的 OpenAI 模型档案")
-        return OpenAIRealtimeAsrProvider(
-            api_key,
-            model=os.getenv("OPENAI_TRANSCRIPTION_MODEL", "gpt-4o-transcribe"),
-        )
+        if record.asr_provider == "dashscope":
+            return _dashscope_environment_provider()
+        if record.asr_provider == "openai":
+            api_key = os.getenv("OPENAI_API_KEY", "").strip()
+            if not api_key:
+                raise RuntimeError("OPENAI_API_KEY 尚未配置")
+            return OpenAIRealtimeAsrProvider(
+                api_key,
+                model=os.getenv("OPENAI_TRANSCRIPTION_MODEL", "gpt-4o-transcribe"),
+            )
+        raise RuntimeError("实时转写 Provider 配置无效")
     resolution = services.model_gateway.resolve(
         record.organization_id,
         ModelSelectionRequest(
@@ -383,8 +390,15 @@ def _resolve_asr_provider(services, record: LiveInterviewSessionRecord):
     )
     if resolution.readiness is not ModelReadiness.READY or not resolution.credential:
         raise RuntimeError("实时转写模型尚未配置可用凭据")
+    if resolution.profile.provider_key in {"qwen", "dashscope", "aliyun"}:
+        return DashScopeRealtimeAsrProvider(
+            resolution.credential,
+            model=resolution.profile.model_id or DEFAULT_DASHSCOPE_ASR_MODEL,
+            base_url=os.getenv("DASHSCOPE_ASR_WEBSOCKET_URL", DEFAULT_DASHSCOPE_ASR_URL),
+            workspace_id=os.getenv("DASHSCOPE_WORKSPACE_ID", ""),
+        )
     if resolution.profile.provider_key != "openai":
-        raise RuntimeError("首版实时转写只支持 OpenAI Provider")
+        raise RuntimeError("实时转写仅支持 DashScope 或 OpenAI Provider")
     return OpenAIRealtimeAsrProvider(
         resolution.credential,
         model=resolution.profile.model_id,
@@ -397,6 +411,55 @@ def _realtime_url(api_base_url: str | None) -> str:
         return "wss://api.openai.com/v1/realtime"
     base = api_base_url.rstrip("/").replace("https://", "wss://").replace("http://", "ws://")
     return base if base.endswith("/realtime") else f"{base}/realtime"
+
+
+def _environment_asr_config() -> dict[str, object]:
+    if os.getenv("LIVE_INTERVIEW_FAKE_ASR", "").strip() == "1":
+        return {
+            "readiness": "ready",
+            "blocked_reason": None,
+            "display_name": "本地测试转写",
+            "provider_key": "fake",
+            "model_id": "fake-asr",
+        }
+    if os.getenv("DASHSCOPE_API_KEY", "").strip():
+        return {
+            "readiness": "ready",
+            "blocked_reason": None,
+            "display_name": "阿里云百炼 · Qwen 实时转写",
+            "provider_key": "dashscope",
+            "model_id": os.getenv("DASHSCOPE_ASR_MODEL", DEFAULT_DASHSCOPE_ASR_MODEL),
+        }
+    if os.getenv("OPENAI_API_KEY", "").strip():
+        return {
+            "readiness": "ready",
+            "blocked_reason": None,
+            "display_name": "OpenAI 实时转写",
+            "provider_key": "openai",
+            "model_id": os.getenv("OPENAI_TRANSCRIPTION_MODEL", "gpt-4o-transcribe"),
+        }
+    return {
+        "readiness": "blocked",
+        "blocked_reason": (
+            "尚未配置实时转写模型。请在服务端设置 DASHSCOPE_API_KEY；"
+            "DeepSeek 继续负责生成答案，不能直接把微信通话音频转成文字。"
+        ),
+        "display_name": "未配置实时转写模型",
+        "provider_key": None,
+        "model_id": None,
+    }
+
+
+def _dashscope_environment_provider() -> DashScopeRealtimeAsrProvider:
+    api_key = os.getenv("DASHSCOPE_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("DASHSCOPE_API_KEY 尚未配置")
+    return DashScopeRealtimeAsrProvider(
+        api_key,
+        model=os.getenv("DASHSCOPE_ASR_MODEL", DEFAULT_DASHSCOPE_ASR_MODEL),
+        base_url=os.getenv("DASHSCOPE_ASR_WEBSOCKET_URL", DEFAULT_DASHSCOPE_ASR_URL),
+        workspace_id=os.getenv("DASHSCOPE_WORKSPACE_ID", ""),
+    )
 
 
 def _model_payload(availability) -> dict[str, object]:

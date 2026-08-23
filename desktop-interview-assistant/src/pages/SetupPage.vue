@@ -10,7 +10,7 @@ import { bridge, isElectronBridge } from '../bridge'
 interface SetupOptions {
   asr_models: Array<{ id: string; display_name: string; readiness: string }>
   answer_models: Array<{ id: string; display_name: string; readiness: string }>
-  environment_asr: { readiness: string; blocked_reason: string | null }
+  environment_asr: { readiness: string; blocked_reason: string | null; display_name: string }
 }
 
 const router = useRouter()
@@ -100,7 +100,7 @@ onMounted(loadOptions)
       <label>服务地址<input v-model="apiBaseUrl" spellcheck="false" /></label>
       <div class="inline-actions"><button class="quiet-button" type="button" @click="openLogin">打开登录页</button><button class="quiet-button" type="button" :disabled="loading" @click="loadOptions">重新检查</button></div>
       <div class="field-grid">
-        <label>实时转写<select v-model="asrModelId"><option v-if="environmentAsrReady" value="">服务端 OpenAI 环境配置</option><option v-else-if="!readyAsr.length" value="" disabled>未配置实时转写模型</option><option v-for="item in readyAsr" :key="item.id" :value="item.id">{{ item.display_name }}</option></select></label>
+        <label>实时转写<select v-model="asrModelId"><option v-if="environmentAsrReady" value="">{{ options?.environment_asr.display_name }}</option><option v-else-if="!readyAsr.length" value="" disabled>未配置实时转写模型</option><option v-for="item in readyAsr" :key="item.id" :value="item.id">{{ item.display_name }}</option></select></label>
         <label>回答模型<select v-model="answerModelId"><option value="">免费模型自动选择</option><option v-for="item in readyAnswers" :key="item.id" :value="item.id">{{ item.display_name }}</option></select></label>
       </div>
       <label>麦克风<select v-model="microphoneId"><option v-for="item in microphones" :key="item.deviceId" :value="item.deviceId">{{ item.label || '麦克风' }}</option></select></label>
