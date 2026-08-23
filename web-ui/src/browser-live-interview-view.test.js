@@ -5,9 +5,15 @@ import {
   advanceSetupProgress,
   estimateAsrCost,
   formatDuration,
+  isNearScrollEnd,
   isInterviewMasterPath,
   pickInitialAnswerModel
 } from './browser-live-interview/view.js'
+
+test('transcript list only follows when the reader stays near the latest message', () => {
+  assert.equal(isNearScrollEnd({ scrollHeight: 1000, scrollTop: 650, clientHeight: 320 }), true)
+  assert.equal(isNearScrollEnd({ scrollHeight: 1000, scrollTop: 300, clientHeight: 320 }), false)
+})
 
 test('setup progress advances smoothly without claiming completion', () => {
   assert.equal(advanceSetupProgress(24), 30)

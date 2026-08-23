@@ -33,6 +33,10 @@ export function advanceSetupProgress(current, cap = 92) {
   return Math.min(limit, value + Math.max(1, Math.ceil(remaining * 0.08)))
 }
 
+export function isNearScrollEnd({ scrollHeight = 0, scrollTop = 0, clientHeight = 0 } = {}, threshold = 48) {
+  return Number(scrollHeight) - Number(scrollTop) - Number(clientHeight) <= Math.max(0, Number(threshold) || 0)
+}
+
 export function answerPreviewLines(answerText, limit = 5) {
   return String(answerText || '')
     .split(/\r?\n/)

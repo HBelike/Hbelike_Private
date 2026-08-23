@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import { BrowserAudioCapture, detectBrowserInterviewSupport } from '../browser-live-interview/capture.js'
 import { openAnswerPictureInPicture, supportsAnswerPictureInPicture } from '../browser-live-interview/picture-in-picture.js'
@@ -10,6 +10,7 @@ import {
   answerPreviewLines,
   estimateAsrCost,
   formatDuration,
+  isNearScrollEnd,
   pickInitialAnswerModel
 } from '../browser-live-interview/view.js'
 
@@ -32,6 +33,9 @@ const sessionIds = ref([])
 const pipRoot = ref(null)
 const pipWindow = ref(null)
 const latencySamples = ref([])
+const transcriptList = ref(null)
+const followLatestTranscripts = ref(true)
+const unseenTranscriptCount = ref(0)
 
 let capture = null
 let liveSocket = null
@@ -144,6 +148,25 @@ function handleServerEvent(event) {
     }
   }
   if (event.type === 'error') errorMessage.value = event.message || '实时处理出现错误'
+}
+
+function handleTranscriptScroll(event) {
+  followLatestTranscripts.value = isNearScrollEnd(event.currentTarget)
+  if (followLatestTranscripts.value) unseenTranscriptCount.value = 0
+}
+
+async function scrollTranscriptsToLatest({ force = false, smooth = false } = {}) {
+  if (!force && !followLatestTranscripts.value) return
+  await nextTick()
+  const list = transcriptList.value
+  if (!list) return
+  const top = list.scrollHeight
+  if (typeof list.scrollTo === 'function') list.scrollTo({ top, behavior: smooth ? 'smooth' : 'auto' })
+  else list.scrollTop = top
+  if (force) {
+    followLatestTranscripts.value = true
+    unseenTranscriptCount.value = 0
+  }
 }
 
 function handleConnectionState(nextState) {
@@ -276,6 +299,17 @@ function goBack() {
   window.location.assign('/career')
 }
 
+watch(() => allTranscripts.value.length, (nextLength, previousLength) => {
+  if (nextLength > previousLength && !followLatestTranscripts.value) {
+    unseenTranscriptCount.value += nextLength - previousLength
+  }
+  void scrollTranscriptsToLatest()
+})
+
+watch([interviewerPartial, candidatePartial], () => {
+  void scrollTranscriptsToLatest()
+})
+
 onMounted(() => {
   try {
     support.value = detectBrowserInterviewSupport()
@@ -400,8 +434,16 @@ onBeforeUnmount(() => {
         </div>
 
         <section class="rail-section">
-          <header><h2>实时转写</h2><span>{{ allTranscripts.length }}</span></header>
-          <div class="transcript-list">
+          <header>
+            <h2>实时转写</h2>
+            <div class="transcript-tools">
+              <button v-if="!followLatestTranscripts" type="button" @click="scrollTranscriptsToLatest({ force: true, smooth: true })">
+                {{ unseenTranscriptCount ? `${unseenTranscriptCount} 条新消息` : '回到最新' }} ↓
+              </button>
+              <span>{{ allTranscripts.length }}</span>
+            </div>
+          </header>
+          <div ref="transcriptList" class="transcript-list" @scroll.passive="handleTranscriptScroll">
             <article v-for="(item, index) in latestTranscripts" :key="`${item.sessionId}-${item.channel}-${item.sequence}-${index}`" :class="item.channel">
               <span>{{ item.channel === 'interviewer' ? '面试官' : '我' }}</span>
               <p>{{ item.text }}</p>
@@ -501,11 +543,11 @@ onBeforeUnmount(() => {
 .toggle-row, .consent-row { display: flex; align-items: center; justify-content: space-between; gap: 18px; }.toggle-row { padding: 18px 20px; border: 1px solid #d7e2f1; border-radius: 14px; background: white; }.toggle-row span { display: grid; gap: 4px; }.toggle-row small { color: #7c8da4; }.toggle-row input { width: 44px; height: 24px; accent-color: #1671e8; }.consent-row { justify-content: flex-start; color: #53657e; font-size: 13px; }.consent-row input { width: 18px; height: 18px; accent-color: #1671e8; }
 .browser-check { padding: 16px 18px; display: flex; gap: 12px; border-radius: 14px; background: #fff2f1; color: #9c3838; }.browser-check.ok { background: #eaf8f3; color: #176449; }.browser-check > div { display: grid; gap: 4px; }.browser-check small { line-height: 1.5; }.status-dot { width: 9px; height: 9px; margin-top: 5px; flex: 0 0 auto; border-radius: 50%; background: currentColor; box-shadow: 0 0 0 5px currentColor; opacity: .6; }
 .primary-start { min-height: 58px; border: 0; border-radius: 14px; background: #176fe5; color: white; font-size: 17px; font-weight: 800; cursor: pointer; box-shadow: 0 14px 28px rgba(23,111,229,.22); }.primary-start:disabled { background: #aabbd2; box-shadow: none; cursor: not-allowed; }.inline-error { margin: 0; padding: 12px 14px; border-left: 3px solid #d34a4a; background: #fff1f1; color: #a63838; }
-.live-layout { min-height: calc(100vh - 68px); display: grid; grid-template-columns: 330px 1fr; }.live-rail { min-height: calc(100vh - 68px); padding: 22px; display: flex; flex-direction: column; gap: 22px; background: #0b1d3d; color: white; }
+.live-layout { height: calc(100vh - 68px); min-height: 0; overflow: hidden; display: grid; grid-template-columns: 330px 1fr; }.live-rail { height: 100%; min-height: 0; overflow: hidden; padding: 22px; display: flex; flex-direction: column; gap: 22px; background: #0b1d3d; color: white; }
 .live-status { padding: 16px; display: flex; align-items: center; gap: 14px; border: 1px solid rgba(255,255,255,.13); border-radius: 16px; background: rgba(255,255,255,.05); }.live-status > div:last-child { display: grid; gap: 3px; }.live-status small { color: #8fa7ca; }.question-pulse { height: 34px; display: flex; align-items: center; gap: 3px; }.question-pulse span { width: 3px; height: 10px; border-radius: 3px; background: #52a4ff; }.live-status.active .question-pulse span { animation: wave 1.05s ease-in-out infinite; }.question-pulse span:nth-child(2) { height: 25px; animation-delay: -.2s; }.question-pulse span:nth-child(3) { height: 17px; animation-delay: -.4s; }.question-pulse span:nth-child(4) { height: 30px; animation-delay: -.6s; }
-.rail-section { flex: 1; min-height: 0; display: flex; flex-direction: column; }.rail-section > header, .history-section > header { display: flex; align-items: center; justify-content: space-between; }.rail-section h2, .history-section h2 { margin: 0; font-size: 14px; }.rail-section header span { color: #6f8ab2; font: 700 12px ui-monospace, monospace; }.transcript-list { margin-top: 12px; padding-right: 4px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }.transcript-list article { padding: 12px; border-radius: 12px; background: rgba(255,255,255,.06); }.transcript-list article.candidate { background: rgba(28,123,242,.14); }.transcript-list article.partial { opacity: .66; }.transcript-list span { color: #6eaefe; font-size: 11px; font-weight: 800; }.transcript-list p { margin: 5px 0 0; color: #d5e1f3; font-size: 13px; line-height: 1.55; }
+.rail-section { flex: 1; min-height: 0; display: flex; flex-direction: column; }.rail-section > header, .history-section > header { display: flex; align-items: center; justify-content: space-between; }.rail-section h2, .history-section h2 { margin: 0; font-size: 14px; }.transcript-tools { display: flex; align-items: center; gap: 8px; }.rail-section header span { color: #6f8ab2; font: 700 12px ui-monospace, monospace; }.transcript-tools button { padding: 4px 8px; border: 1px solid rgba(110,174,254,.28); border-radius: 999px; background: rgba(28,123,242,.15); color: #8cc1ff; font-size: 11px; cursor: pointer; }.transcript-list { flex: 1; min-height: 0; margin-top: 12px; padding-right: 8px; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; scrollbar-width: thin; scrollbar-color: #47698f rgba(255,255,255,.06); display: flex; flex-direction: column; gap: 10px; }.transcript-list::-webkit-scrollbar { width: 7px; }.transcript-list::-webkit-scrollbar-track { border-radius: 999px; background: rgba(255,255,255,.05); }.transcript-list::-webkit-scrollbar-thumb { border-radius: 999px; background: #47698f; }.transcript-list article { padding: 12px; border-radius: 12px; background: rgba(255,255,255,.06); }.transcript-list article.candidate { background: rgba(28,123,242,.14); }.transcript-list article.partial { opacity: .66; }.transcript-list span { color: #6eaefe; font-size: 11px; font-weight: 800; }.transcript-list p { margin: 5px 0 0; color: #d5e1f3; font-size: 13px; line-height: 1.55; }
 .rail-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }.rail-actions button { min-height: 40px; border: 1px solid #365173; border-radius: 10px; background: #173053; color: white; cursor: pointer; }.rail-actions .danger { color: #ffb2b2; }
-.answer-workspace { min-width: 0; padding: 26px 30px 50px; overflow-y: auto; }.notice-strip { margin-bottom: 12px; padding: 11px 14px; border-radius: 10px; background: #e3f0ff; color: #285d99; }.notice-strip.error { background: #fff0f0; color: #a93c3c; }
+.answer-workspace { height: 100%; min-width: 0; padding: 26px 30px 50px; overflow-y: auto; }.notice-strip { margin-bottom: 12px; padding: 11px 14px; border-radius: 10px; background: #e3f0ff; color: #285d99; }.notice-strip.error { background: #fff0f0; color: #a93c3c; }
 .current-question-card { padding: 26px 28px; border-radius: 18px; background: #176fe5; color: white; box-shadow: 0 18px 38px rgba(32,92,172,.19); }.question-meta { display: flex; justify-content: space-between; color: #c9e0ff; font-size: 12px; font-weight: 700; }.question-meta em { font-style: normal; }.current-question-card h1 { margin: 18px 0 24px; max-width: 1100px; font-size: clamp(25px, 3vw, 40px); line-height: 1.35; letter-spacing: -.035em; }.question-actions { display: flex; gap: 8px; }.question-actions button { padding: 9px 14px; border: 1px solid rgba(255,255,255,.35); border-radius: 9px; background: rgba(255,255,255,.12); color: white; cursor: pointer; }.question-actions button:disabled { opacity: .45; cursor: not-allowed; }
 .answer-grid { margin-top: 18px; display: grid; grid-template-columns: minmax(280px, .72fr) minmax(460px, 1.45fr); gap: 18px; }.quick-answer-card, .full-answer-card, .history-section { border: 1px solid #d9e3f1; border-radius: 16px; background: white; box-shadow: 0 9px 24px rgba(34,67,107,.06); }.quick-answer-card, .full-answer-card { min-height: 330px; padding: 22px; }.quick-answer-card header, .full-answer-card header { display: flex; align-items: center; justify-content: space-between; }.quick-answer-card header span, .full-answer-card header span { font-weight: 800; }.quick-answer-card small, .full-answer-card small { color: #7a8ca4; }.quick-answer-card ol { padding-left: 25px; }.quick-answer-card li { margin: 16px 0; padding-left: 5px; line-height: 1.65; }.full-answer-card header > div { display: flex; gap: 10px; align-items: baseline; }.answer-text { margin-top: 20px; color: #263b59; font-size: 16px; line-height: 1.86; white-space: pre-wrap; }.typing-dot { width: 9px; height: 9px; border-radius: 50%; background: #176fe5; animation: breathe 1s ease-in-out infinite; }
 .history-section { margin-top: 18px; padding: 22px; }.history-section > header span { color: #7a8ca4; font-size: 12px; }.history-list { margin-top: 12px; display: grid; gap: 8px; }.history-list details { padding: 14px 16px; border-radius: 11px; background: #f4f7fb; }.history-list summary { display: flex; gap: 12px; cursor: pointer; font-weight: 700; }.history-list summary span { color: #176fe5; }.history-list p { margin: 14px 0 2px; color: #435773; line-height: 1.75; white-space: pre-wrap; }.empty-copy { color: #8292a8; line-height: 1.7; }
