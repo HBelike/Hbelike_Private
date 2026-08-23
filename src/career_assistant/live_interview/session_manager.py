@@ -221,14 +221,17 @@ class LiveSessionManager:
                 interview_evidence=self._answer_context.interview_evidence,
                 terminology=self._answer_context.terminology,
             )
+            delta_index = 0
             async for chunk in self._answer_service.stream(question, intent, context):
                 if version != self._question_version or attempt != self._attempt:
                     return
                 text += chunk
+                delta_index += 1
                 await self._emit(
                     "answer.delta",
                     question_version=version,
                     attempt=attempt,
+                    delta_index=delta_index,
                     delta=chunk,
                 )
             await self._answer_hook(version, attempt, question, intent, "completed", text)
