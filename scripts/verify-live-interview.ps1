@@ -9,6 +9,7 @@ $ErrorActionPreference = "Stop"
 $workspaceRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $pythonPath = Join-Path $workspaceRoot ".venv\Scripts\python.exe"
 $desktopRoot = Join-Path $workspaceRoot "desktop-interview-assistant"
+$webUiRoot = Join-Path $workspaceRoot "web-ui"
 
 if (-not (Test-Path -LiteralPath $pythonPath)) {
     throw "Project Python environment was not found: $pythonPath"
@@ -19,6 +20,7 @@ try {
     & $pythonPath -m pytest `
         tests/test_live_interview_core.py `
         tests/test_live_interview_services.py `
+        tests/test_live_interview_desktop_launcher.py `
         tests/test_live_interview_web.py `
         tests/test_career_turn_api.py `
         tests/test_career_optional_context_repository.py `
@@ -51,7 +53,18 @@ try {
         Pop-Location
     }
 
-    Write-Host "Automated acceptance passed: backend, protocol, desktop tests, type checks, builds, migration, and dependency audit."
+    Push-Location $webUiRoot
+    try {
+        npm test
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        npm run build
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    }
+    finally {
+        Pop-Location
+    }
+
+    Write-Host "Automated acceptance passed: backend, protocol, desktop launcher, desktop and main UI tests, type checks, builds, migration, and dependency audit."
 
     if ($Live) {
         if (-not $env:OPENAI_API_KEY) {

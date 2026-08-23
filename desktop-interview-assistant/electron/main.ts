@@ -6,6 +6,7 @@ import WebSocket from 'ws'
 const here = path.dirname(fileURLToPath(import.meta.url))
 let mainWindow: BrowserWindow | null = null
 let currentSocket: WebSocket | null = null
+const hasSingleInstanceLock = app.requestSingleInstanceLock()
 
 function requireWindows(): void {
   if (process.platform !== 'win32') {
@@ -128,10 +129,21 @@ ipcMain.on('socket:close', () => {
   currentSocket = null
 })
 
-app.whenReady().then(createWindow).catch((error) => {
-  console.error(error)
+if (!hasSingleInstanceLock) {
   app.quit()
-})
+} else {
+  app.on('second-instance', () => {
+    if (!mainWindow) return
+    if (mainWindow.isMinimized()) mainWindow.restore()
+    mainWindow.show()
+    mainWindow.focus()
+  })
+
+  app.whenReady().then(createWindow).catch((error) => {
+    console.error(error)
+    app.quit()
+  })
+}
 
 app.on('window-all-closed', () => {
   currentSocket?.close()

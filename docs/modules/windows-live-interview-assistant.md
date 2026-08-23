@@ -2,13 +2,15 @@
 
 ## 设计目标
 
-该模块为 Windows 10/11 视频或语音通话提供本地桌面伴侣：分别采集 Windows 系统输出和麦克风，把前者固定标记为面试官、后者固定标记为应试者；实时转写中文、英文及中英混合对话，检测面试官的问题，并向应试者流式输出统一中文的回答建议。
+该模块作为现有“求职助手”中的“面试大师”工具运行，为 Windows 10/11 视频或语音通话提供本地桌面采集能力：分别采集 Windows 系统输出和麦克风，把前者固定标记为面试官、后者固定标记为应试者；实时转写中文、英文及中英混合对话，检测面试官的问题，并向应试者流式输出统一中文的回答建议。
 
 模块只用于模拟面试或参与者明确允许使用 AI 的场景。不实现隐藏进程、规避屏幕共享、绕过监考、未经授权录音、自动代替用户发言、视频采集或 macOS 适配。
 
 ## 技术取舍
 
 - 桌面端使用 Electron + Vue 3 + TypeScript。Electron 官方的 `setDisplayMediaRequestHandler` 支持在 Windows 使用 `audio: "loopback"` 捕获系统音频；麦克风继续使用独立 `getUserMedia`，因此不需要让 LLM 猜双方角色。
+- 产品入口位于现有求职助手会话顶部的“面试大师”按钮。按钮调用本地 `/api/career/live-interviews/desktop/launch`，直接启动或聚焦 Electron 采集窗口；首次 Electron 二进制尚未完成时会在后台继续准备，完成后自动打开，不要求用户手工执行 `npm start`。
+- 不对接腾讯会议、Teams、Zoom 等会议软件 API。系统中任何正在播放的对方声音都由 Windows loopback 捕获，用户麦克风作为另一条独立音轨。
 - 音频由 `AudioWorklet` 读取，重采样为 24 kHz 单声道 PCM16，并以 100 ms 帧发送。系统音频和麦克风分别维护 `sequence`。
 - 转文字不是由普通聊天 LLM 完成。首个 Provider 使用专门的 OpenAI Realtime transcription 语音识别模型；`AsrProvider` 接口允许以后增加 FunASR 等本地工具。普通 LLM 只负责问题理解扩展和中文回答生成。
 - ASR 保留原始语言，不自动翻译；回答 Prompt 强制使用中文，并要求各行业专有名词保留原文。
@@ -32,11 +34,21 @@ FastAPI /api/career/live-interviews/{id}/stream
   → final utterance / answer 写入 PostgreSQL
 ```
 
+入口调用链：
+
+```text
+求职助手顶部“面试大师”
+  → POST /api/career/live-interviews/desktop/launch
+  → 启动 Electron；已运行时聚焦现有窗口
+  → 用户开始面试后建立双通道采集与 WebSocket
+```
+
 新问题会递增 `question_version` 并取消旧回答；桌面端忽略旧版本迟到增量。用户也可以手动立即生成、停止和重新生成。WebSocket 断开、用户结束或窗口退出时，桌面端停止所有 MediaStream Track 并关闭 AudioContext，服务端关闭两个 ASR 会话并取消回答任务。
 
 ## 页面
 
-- `/live-interview/setup`：登录、服务地址、简历、目标岗位、面经、ASR/回答模型和麦克风预检。
+- 求职助手会话顶部“面试大师”：统一产品入口，点击后启动或聚焦 Windows 采集器。
+- `/live-interview/setup`：采集器内的简历、目标岗位、面经、ASR/回答模型和麦克风预检。
 - `/live-interview/session/:id`：双声轨状态、双方转写、当前问题、中文回答流和手动控制。
 - `/live-interview/history/:id`：final 对话时间线和各问题的回答尝试。
 
@@ -69,7 +81,8 @@ npm start
 
 截至 2026-08-23 已完成：
 
-- Python 核心、服务、WebSocket、Actor 隔离及相关 Career 回归：24 项通过。
+- Python 核心、服务、桌面启动、WebSocket、Actor 隔离及相关 Career 回归：30 项通过。
+- 原求职助手前端：39 项测试通过，Vite 生产构建通过；“面试大师”位于用户指定的会话顶部工具区。
 - 双通道映射、乱序 partial、final 限制、混合语言、术语纠错、追问、手动生成和版本过滤均有自动测试。
 - Electron：5 项 Vitest 通过，`vue-tsc` 与 Electron TypeScript 检查通过，Vite 和 Electron 主/预加载脚本生产构建通过。
 - 依赖审计：0 个已知漏洞。

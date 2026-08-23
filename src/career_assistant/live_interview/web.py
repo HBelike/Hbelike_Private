@@ -16,6 +16,10 @@ from src.career_assistant.live_interview.answer_service import LiveAnswerService
 from src.career_assistant.live_interview.asr.fake import FakeAsrProvider
 from src.career_assistant.live_interview.asr.openai_realtime import OpenAIRealtimeAsrProvider
 from src.career_assistant.live_interview.context_builder import LiveAnswerContext
+from src.career_assistant.live_interview.desktop_launcher import (
+    DesktopLauncherError,
+    launch_windows_desktop_assistant,
+)
 from src.career_assistant.live_interview.contracts import (
     AnswerStatus,
     AudioChannel,
@@ -58,6 +62,17 @@ def get_live_actor():
     from src.career_assistant.web.router import get_request_actor
 
     return get_request_actor()
+
+
+@router.post("/desktop/launch")
+def launch_desktop(_actor=Depends(get_live_actor)) -> dict[str, str]:
+    """从求职助手页面启动本机 Windows 双路音频采集器。"""
+
+    try:
+        result = launch_windows_desktop_assistant()
+    except DesktopLauncherError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    return {"status": result.status, "message": result.message}
 
 
 def get_live_read_services(request: Request):

@@ -81,6 +81,40 @@ def test_session_payload_never_contains_audio() -> None:
     assert "audio" not in str(payload).lower()
 
 
+def test_desktop_launch_endpoint_starts_windows_capture_tool() -> None:
+    app = FastAPI()
+    app.include_router(live_web.router)
+    result = SimpleNamespace(status="launching", message="面试大师正在启动")
+
+    with (
+        patch.object(live_web, "launch_windows_desktop_assistant", return_value=result) as launch,
+        TestClient(app) as client,
+    ):
+        response = client.post("/api/career/live-interviews/desktop/launch")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "launching", "message": "面试大师正在启动"}
+    launch.assert_called_once_with()
+
+
+def test_desktop_launch_endpoint_returns_actionable_error() -> None:
+    app = FastAPI()
+    app.include_router(live_web.router)
+
+    with (
+        patch.object(
+            live_web,
+            "launch_windows_desktop_assistant",
+            side_effect=live_web.DesktopLauncherError("采集组件尚未安装完成"),
+        ),
+        TestClient(app) as client,
+    ):
+        response = client.post("/api/career/live-interviews/desktop/launch")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "采集组件尚未安装完成"
+
+
 def test_websocket_accepts_ping_and_ends_cleanly_in_local_auth_mode() -> None:
     record = _record()
     repository = FakeRepository(record)

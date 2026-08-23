@@ -82,6 +82,7 @@ const contextSetupInitial = ref(null)
 const showJobSearch = ref(false)
 const showGreetingDialog = ref(false)
 const savingJobSearch = ref(false)
+const launchingInterviewMaster = ref(false)
 const jobSearchError = ref('')
 const pendingJobLibraryTarget = ref(null)
 const jobSearchButton = ref(null)
@@ -1061,6 +1062,23 @@ function closeContextSetup() {
   contextSetupInitial.value = null
 }
 
+async function launchInterviewMaster() {
+  if (launchingInterviewMaster.value) return
+  launchingInterviewMaster.value = true
+  errorMessage.value = ''
+  feedback.value = ''
+  try {
+    const payload = await requestJson('/api/career/live-interviews/desktop/launch', {
+      method: 'POST'
+    })
+    feedback.value = payload.message || '面试大师正在启动。'
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '面试大师启动失败，请稍后重试。'
+  } finally {
+    launchingInterviewMaster.value = false
+  }
+}
+
 function openGreetingDialog() {
   if (!selectedConversation.value) {
     errorMessage.value = '请先开启一个对话。'
@@ -1963,6 +1981,16 @@ onMounted(() => {
         </div>
         <div v-if="selectedConversation" class="chat-material-actions" aria-label="求职资料快捷操作">
           <button
+            type="button"
+            class="chat-material-button interview-master"
+            title="捕捉系统播放声与麦克风，实时识别问题并生成中文解题思路"
+            :disabled="launchingInterviewMaster"
+            @click="launchInterviewMaster"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13a8 8 0 0 1 16 0"/><path d="M4 13v5h3v-5zM17 13v5h3v-5z"/><path d="M9 19h6"/></svg>
+            <span>{{ launchingInterviewMaster ? '启动中…' : '面试大师' }}</span>
+          </button>
+          <button
             ref="greetingButton"
             type="button"
             class="chat-material-button greeting"
@@ -2277,6 +2305,7 @@ onMounted(() => {
 .history-pagination-shell{min-height:76px;flex:0 0 auto;margin-top:10px;border-top:1px solid var(--ui-line);border-bottom:1px solid var(--ui-line);padding:8px 4px}.history-pagination-shell :deep(.el-pagination){display:grid;width:100%;box-sizing:border-box;grid-template-columns:28px minmax(0,1fr) 28px;grid-template-rows:28px 28px;align-items:center;gap:6px 4px;--el-color-primary:var(--ui-accent);--el-pagination-button-width:28px;--el-pagination-button-height:28px;--el-pagination-button-bg-color:var(--ui-surface-soft);--el-pagination-hover-color:var(--ui-accent-ink);font-family:inherit}.history-pagination-shell :deep(.el-pagination__total){grid-column:1 / 3;grid-row:1;justify-self:start;margin:0;color:var(--ui-text-muted);font-size:11px;font-weight:750}.history-pagination-shell :deep(.el-pagination__sizes){grid-column:2 / 4;grid-row:1;justify-self:end;margin:0}.history-pagination-shell :deep(.el-pagination__sizes .el-select){width:94px}.history-pagination-shell :deep(.el-pagination__sizes .el-select__wrapper){min-height:28px;border-radius:6px;box-shadow:0 0 0 1px var(--ui-line) inset}.history-pagination-shell :deep(.btn-prev){grid-column:1;grid-row:2}.history-pagination-shell :deep(.el-pager){grid-column:2;grid-row:2;min-width:0;justify-self:center}.history-pagination-shell :deep(.btn-next){grid-column:3;grid-row:2}.history-pagination-shell :deep(.btn-prev),.history-pagination-shell :deep(.btn-next),.history-pagination-shell :deep(.el-pager li){border-radius:6px;font-weight:750}.history-pagination-shell :deep(.el-pager li.is-active){box-shadow:0 3px 8px rgba(8,103,217,.2)}.history-pagination-shell :deep(button:focus-visible),.history-pagination-shell :deep(.el-select__wrapper.is-focused){outline:3px solid var(--ui-focus);outline-offset:1px}.privacy-note{display:flex;min-height:44px;flex:0 0 auto;align-items:center;gap:7px;padding:8px 7px 0;color:var(--ui-text-muted)}.privacy-note>span{display:grid;width:20px;height:20px;flex:0 0 auto;place-items:center;border-radius:6px;background:var(--ui-surface-active);color:var(--ui-accent-ink);font-size:9px;font-weight:850}.privacy-note p{margin:0;font-size:9px;line-height:1.45}.eyebrow { color:var(--ui-accent-ink); font-size:9px; font-weight:900; letter-spacing:.08em; }
 .career-chat-panel { display:flex; height:100%; min-height:0; flex-direction:column; overflow:hidden; }.chat-header { display:flex; min-height:68px; align-items:center; border-bottom:1px solid #e3ebf5; padding:10px 14px 10px 20px; background:#fbfdff; }.chat-header>div:first-child{min-width:0}.chat-header h2,.model-settings h3,.empty-state h2 { margin:3px 0 0; color:#10294c; }.active-context-line{display:flex;align-items:center;gap:7px;margin:5px 0 0;color:#6d7f98;font-size:11px;font-weight:750}.active-context-line span{max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.active-context-line i{color:#0a67db;font-style:normal}.eyebrow { margin:0; }
 .chat-material-actions{display:flex;flex:none;align-items:center;gap:7px}.chat-material-button{position:relative;display:inline-flex;min-height:38px;align-items:center;justify-content:center;gap:7px;border:1px solid var(--ui-line-strong,#bfd2ea);border-radius:9px;background:var(--ui-surface,#fff);color:var(--ui-text-secondary,#526078);padding:8px 12px;font:800 12px/1 var(--ui-font-body,"Segoe UI",sans-serif);white-space:nowrap;cursor:pointer;transition:border-color .15s ease,background .15s ease,color .15s ease,box-shadow .15s ease}.chat-material-button svg{width:16px;height:16px;flex:none;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}.chat-material-button:hover:not(:disabled),.chat-material-button:focus-visible{border-color:var(--ui-accent,#0869d8);background:var(--ui-surface-active,#eaf3ff);color:var(--ui-accent-ink,#004aa8);box-shadow:0 0 0 3px var(--ui-focus,rgba(8,105,216,.14));outline:0}.chat-material-button.primary{border-color:var(--ui-accent,#0869d8);background:var(--ui-accent,#0869d8);color:#fff;padding-right:14px;padding-left:14px}.chat-material-button.primary:hover:not(:disabled),.chat-material-button.primary:focus-visible{background:var(--ui-accent-strong,#0056bd);color:#fff}.chat-material-button:disabled{cursor:wait;opacity:.58}.material-state-dot{width:6px;height:6px;flex:none;border-radius:50%;background:var(--ui-success,#21855b);box-shadow:0 0 0 2px var(--ui-success-soft,#e8f7f0)}
+.chat-material-button.interview-master{border-color:#9fc4f0;background:#edf6ff;color:#075dbd}.chat-material-button.interview-master:hover:not(:disabled),.chat-material-button.interview-master:focus-visible{border-color:#0869d8;background:#deedff;color:#004da8}
 .chat-material-button.greeting{border-color:var(--ui-accent,#0869d8);background:var(--ui-surface-active,#eaf3ff);color:var(--ui-accent-ink,#004aa8)}
 .quiet-button,.chip-button { border:1px solid #dfe8d0; border-radius:10px; background:#f8fbf1; color:#61764b; padding:8px 11px; font-size:12px; font-weight:800; }.quiet-button.danger { border-color:#f0d5d5; background:#fff8f8; color:#ad5a5a; }
 .notice { margin:14px 22px 0; border-radius:12px; padding:10px 13px; font-size:13px; }.notice.success { border:1px solid #d7eabe; background:#f5faec; color:#5c7a2c; }
