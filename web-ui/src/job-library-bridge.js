@@ -7,6 +7,8 @@ const JOB_DETAIL_STRING_FIELDS = [
   'id',
   'securityId',
   'jobId',
+  'bossId',
+  'lid',
   'title',
   'salary',
   'experience',
@@ -47,6 +49,17 @@ export function createJobDetailPayload(job = {}) {
   return {
     securityId: fallback.securityId,
     fallback
+  }
+}
+
+export function createGreetingRequestPayload(job = {}, message = '', defaultGreetingDisabled = false) {
+  return {
+    securityId: cloneString(job?.securityId),
+    jobId: cloneString(job?.jobId),
+    bossId: cloneString(job?.bossId),
+    lid: cloneString(job?.lid),
+    message: cloneString(message),
+    defaultGreetingDisabled: defaultGreetingDisabled === true
   }
 }
 
@@ -109,5 +122,19 @@ export const jobLibraryBridge = {
   },
   getJobDetail(job) {
     return requestExtension('get_job_detail', createJobDetailPayload(job))
+  },
+  preflightGreeting(job, message, options = {}) {
+    return requestExtension('preflight_greeting', createGreetingRequestPayload(
+      job,
+      message,
+      options.defaultGreetingDisabled
+    ))
+  },
+  sendGreeting(job, message, options = {}) {
+    return requestExtension('send_greeting', createGreetingRequestPayload(
+      job,
+      message,
+      options.defaultGreetingDisabled
+    ), 60000)
   }
 }

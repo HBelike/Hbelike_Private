@@ -22,6 +22,7 @@ const previewJobs = [
     <CareerGreetingDialog
       open
       initial-stage="review"
+      simulation-mode
       :candidate-profile="candidateProfile"
       :preview-jobs="previewJobs"
     />

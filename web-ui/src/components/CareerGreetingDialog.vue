@@ -1,20 +1,23 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import JobSearchWorkspace from './JobSearchWorkspace.vue'
+import { JobLibraryBridgeError, jobLibraryBridge } from '../job-library-bridge.js'
 import {
   createGreetingItems,
   needsGreetingRiskWarning,
   normalizeGreetingLimit,
   queueGreetingItems,
   regenerateGreetingItem,
-  stopGreetingItems
+  stopGreetingItems,
+  updateGreetingItemStatus
 } from '../career-greeting-preview.js'
 
 const props = defineProps({
   open: { type: Boolean, default: false },
   candidateProfile: { type: Object, default: null },
   previewJobs: { type: Array, default: () => [] },
-  initialStage: { type: String, default: 'select' }
+  initialStage: { type: String, default: 'select' },
+  simulationMode: { type: Boolean, default: false }
 })
 
 const emit = defineEmits(['cancel'])
@@ -25,11 +28,13 @@ const items = ref([])
 const activeItemId = ref('')
 const riskOpen = ref(false)
 const riskAcknowledged = ref(false)
+const defaultGreetingDisabled = ref(false)
 const sending = ref(false)
 const stopped = ref(false)
+const stopRequested = ref(false)
+const sendError = ref('')
 const regeneratingItemId = ref('')
 const dialogRef = ref(null)
-let sendTimer = null
 let regenerationTimer = null
 
 const steps = [
@@ -42,8 +47,9 @@ const stageIndex = computed(() => Math.max(0, steps.findIndex((item) => item.key
 const includedItems = computed(() => items.value.filter((item) => item.included))
 const activeItem = computed(() => items.value.find((item) => item.id === activeItemId.value) ?? items.value[0] ?? null)
 const sentCount = computed(() => items.value.filter((item) => item.status === 'sent').length)
-const waitingCount = computed(() => items.value.filter((item) => ['queued', 'sending'].includes(item.status)).length)
-const sendComplete = computed(() => stage.value === 'sending' && !sending.value && waitingCount.value === 0 && sentCount.value > 0)
+const waitingCount = computed(() => items.value.filter((item) => ['queued', 'preflighting', 'sending'].includes(item.status)).length)
+const finishedCount = computed(() => items.value.filter((item) => ['sent', 'skipped', 'failed'].includes(item.status)).length)
+const sendComplete = computed(() => stage.value === 'sending' && !sending.value && waitingCount.value === 0 && finishedCount.value > 0)
 
 watch(() => props.open, (open) => {
   clearTimers()
@@ -57,8 +63,11 @@ watch(() => props.open, (open) => {
   activeItemId.value = items.value[0]?.id ?? ''
   riskOpen.value = false
   riskAcknowledged.value = false
+  defaultGreetingDisabled.value = props.simulationMode
   sending.value = false
   stopped.value = false
+  stopRequested.value = false
+  sendError.value = ''
   regeneratingItemId.value = ''
   nextTick(() => dialogRef.value?.focus())
 }, { immediate: true })
@@ -66,14 +75,15 @@ watch(() => props.open, (open) => {
 onBeforeUnmount(clearTimers)
 
 function clearTimers() {
-  if (sendTimer) window.clearTimeout(sendTimer)
   if (regenerationTimer) window.clearTimeout(regenerationTimer)
-  sendTimer = null
   regenerationTimer = null
 }
 
 function close() {
-  if (sending.value) stopSending()
+  if (sending.value) {
+    stopSending()
+    return
+  }
   clearTimers()
   emit('cancel')
 }
@@ -134,55 +144,86 @@ function regenerateActive() {
   }, 520)
 }
 
-function requestLocalSend() {
+function requestSend() {
   if (!includedItems.value.length) return
+  if (!props.simulationMode && !defaultGreetingDisabled.value) return
   if (needsGreetingRiskWarning(includedItems.value.length)) {
     riskAcknowledged.value = false
     riskOpen.value = true
     return
   }
-  startLocalSend()
+  startSend()
 }
 
-function startLocalSend() {
+async function startSend() {
   riskOpen.value = false
   items.value = queueGreetingItems(items.value)
   stage.value = 'sending'
   sending.value = true
   stopped.value = false
-  scheduleNextItem()
+  stopRequested.value = false
+  sendError.value = ''
+  await runSerialQueue()
 }
 
-function scheduleNextItem() {
-  if (!sending.value) return
-  const nextItem = items.value.find((item) => item.status === 'queued')
-  if (!nextItem) {
-    sending.value = false
-    sendTimer = null
-    return
+async function runSerialQueue() {
+  while (!stopRequested.value) {
+    const nextItem = items.value.find((item) => item.status === 'queued')
+    if (!nextItem) break
+
+    activeItemId.value = nextItem.id
+    items.value = updateGreetingItemStatus(items.value, nextItem.id, 'preflighting')
+
+    try {
+      if (props.simulationMode) {
+        await previewDelay(240)
+        if (stopRequested.value) break
+        items.value = updateGreetingItemStatus(items.value, nextItem.id, 'sending')
+        await previewDelay(540)
+        items.value = updateGreetingItemStatus(items.value, nextItem.id, 'sent')
+        continue
+      }
+
+      await jobLibraryBridge.preflightGreeting(nextItem.job, nextItem.message, {
+        defaultGreetingDisabled: true
+      })
+      if (stopRequested.value) break
+
+      items.value = updateGreetingItemStatus(items.value, nextItem.id, 'sending')
+      const result = await jobLibraryBridge.sendGreeting(nextItem.job, nextItem.message, {
+        defaultGreetingDisabled: true
+      })
+      const nextStatus = result?.status === 'skipped' ? 'skipped' : 'sent'
+      items.value = updateGreetingItemStatus(items.value, nextItem.id, nextStatus, result?.reason ?? '')
+    } catch (error) {
+      const code = error instanceof JobLibraryBridgeError ? error.code : 'unknown_error'
+      const message = error instanceof Error ? error.message : '发送失败，请检查 BOSS 页面状态。'
+      if (['job_unavailable', 'already_contacted'].includes(code)) {
+        items.value = updateGreetingItemStatus(items.value, nextItem.id, 'skipped', message)
+        continue
+      }
+      items.value = updateGreetingItemStatus(items.value, nextItem.id, 'failed', message)
+      sendError.value = message
+      stopRequested.value = true
+      break
+    }
   }
-  items.value = items.value.map((item) => item.id === nextItem.id
-    ? { ...item, status: 'sending' }
-    : item)
-  activeItemId.value = nextItem.id
-  sendTimer = window.setTimeout(() => {
-    items.value = items.value.map((item) => item.id === nextItem.id
-      ? { ...item, status: 'sent' }
-      : item)
-    sendTimer = null
-    scheduleNextItem()
-  }, 780)
+
+  if (stopRequested.value) {
+    items.value = stopGreetingItems(items.value)
+    stopped.value = true
+  }
+  sending.value = false
 }
 
 function stopSending() {
-  if (sendTimer) window.clearTimeout(sendTimer)
-  sendTimer = null
-  const activeSendingId = items.value.find((item) => item.status === 'sending')?.id
-  items.value = stopGreetingItems(items.value.map((item) => item.id === activeSendingId
-    ? { ...item, status: 'stopped' }
-    : item))
-  sending.value = false
+  stopRequested.value = true
+  items.value = stopGreetingItems(items.value)
   stopped.value = true
+}
+
+function previewDelay(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms))
 }
 
 function statusLabel(status) {
@@ -191,8 +232,11 @@ function statusLabel(status) {
     generating: '重新生成中',
     excluded: '已取消',
     queued: '等待发送',
+    preflighting: '正在预检',
     sending: '正在发送',
     sent: '已发送',
+    skipped: '已跳过',
+    failed: '发送失败',
     stopped: '已停止'
   }[status] ?? '等待处理'
 }
@@ -213,7 +257,7 @@ function statusLabel(status) {
           <div class="greeting-title-block">
             <div class="greeting-title-row">
               <h2 id="greeting-dialog-title">一键打招呼</h2>
-              <span class="preview-badge"><i aria-hidden="true"></i>本地预览</span>
+              <span class="preview-badge" :class="{ live: !simulationMode }"><i aria-hidden="true"></i>{{ simulationMode ? '安全预览' : '真实发送' }}</span>
             </div>
             <p>从职位库选岗，逐条确认招呼语，再按顺序发送。</p>
           </div>
@@ -322,8 +366,8 @@ function statusLabel(status) {
           </section>
 
           <section v-if="stage === 'sending'" class="sending-stage">
-            <aside class="delivery-track sending-track" aria-label="本地模拟发送顺序">
-              <header><span>投递轨道</span><strong>{{ sentCount }}/{{ includedItems.length }}</strong></header>
+            <aside class="delivery-track sending-track" :aria-label="simulationMode ? '本地模拟发送顺序' : '真实串行发送顺序'">
+              <header><span>投递轨道</span><strong>{{ finishedCount }}/{{ includedItems.length }}</strong></header>
               <div class="track-list">
                 <button
                   v-for="item in items"
@@ -341,16 +385,18 @@ function statusLabel(status) {
             </aside>
 
             <section class="progress-board">
-              <div class="progress-kicker">本地发送演示</div>
-              <h3 v-if="sending">正在按顺序处理第 {{ sentCount + 1 }} 条</h3>
+              <div class="progress-kicker">{{ simulationMode ? '本地发送演示' : 'BOSS 真实发送' }}</div>
+              <h3 v-if="sending">正在按顺序处理第 {{ finishedCount + 1 }} 条</h3>
               <h3 v-else-if="stopped">已停止剩余发送</h3>
-              <h3 v-else>本批模拟发送完成</h3>
-              <p v-if="sending">当前页面只展示未来的状态变化，不会连接或操作 BOSS。</p>
+              <h3 v-else>{{ simulationMode ? '本批模拟发送完成' : '本批真实发送完成' }}</h3>
+              <p v-if="sending">{{ simulationMode ? '当前页面只展示未来的状态变化，不会连接或操作 BOSS。' : '每次只处理一个岗位，确认本条结果后才会继续下一条。' }}</p>
               <p v-else-if="stopped">已完成的记录保留，未开始的岗位已标记为停止。</p>
-              <p v-else>所有已纳入本批的岗位均已完成本地状态演示。</p>
+              <p v-else>{{ simulationMode ? '所有已纳入本批的岗位均已完成本地状态演示。' : '所有已纳入本批的岗位均已完成处理。' }}</p>
 
-              <div class="progress-rail" role="progressbar" :aria-valuenow="sentCount" :aria-valuemax="includedItems.length">
-                <i :style="{ width: `${includedItems.length ? (sentCount / includedItems.length) * 100 : 0}%` }"></i>
+              <p v-if="sendError" class="send-error" role="alert">{{ sendError }}</p>
+
+              <div class="progress-rail" role="progressbar" :aria-valuenow="finishedCount" :aria-valuemax="includedItems.length">
+                <i :style="{ width: `${includedItems.length ? (finishedCount / includedItems.length) * 100 : 0}%` }"></i>
               </div>
               <div class="progress-numbers"><strong>{{ sentCount }}</strong><span>已完成</span><b>{{ waitingCount }}</b><span>待处理</span></div>
 
@@ -360,11 +406,12 @@ function statusLabel(status) {
               </article>
             </section>
 
-            <aside class="simulation-boundary">
-              <span class="boundary-mark">本地</span>
-              <h4>不会执行真实发送</h4>
-              <p>本页未调用浏览器扩展的发送动作，也不会向 BOSS 提交消息。</p>
-              <ul><li>登录与验证码状态未检查</li><li>账号额度未读取</li><li>所有结果仅保存在当前页面</li></ul>
+            <aside class="simulation-boundary" :class="{ live: !simulationMode }">
+              <span class="boundary-mark">{{ simulationMode ? '本地' : 'BOSS' }}</span>
+              <h4>{{ simulationMode ? '不会执行真实发送' : '真实串行发送' }}</h4>
+              <p>{{ simulationMode ? '本页未调用浏览器扩展的发送动作，也不会向 BOSS 提交消息。' : '发送前检查登录、验证与岗位状态；遇到平台异常立即停止。' }}</p>
+              <ul v-if="simulationMode"><li>登录与验证码状态未检查</li><li>账号额度未读取</li><li>所有结果仅保存在当前页面</li></ul>
+              <ul v-else><li>同一时间只发送一条</li><li>不重试失败消息</li><li>不绕过验证码或平台限制</li></ul>
             </aside>
           </section>
         </main>
@@ -375,14 +422,19 @@ function statusLabel(status) {
             <input id="greeting-limit" :value="selectionLimit" type="number" min="1" max="10" @change="updateSelectionLimit" />
             <span>最多 10 个，当前已选 <strong>{{ selectedJobs.length }}</strong> 个</span>
           </div>
-          <div v-else class="local-boundary"><i aria-hidden="true"></i><span>本地预览，不会发送到 BOSS</span></div>
+          <div v-else class="local-boundary" :class="{ live: !simulationMode }">
+            <template v-if="stage === 'review' && !simulationMode">
+              <label class="default-greeting-check"><input v-model="defaultGreetingDisabled" type="checkbox" /><span>我已在 BOSS 关闭默认招呼语</span></label>
+            </template>
+            <template v-else><i aria-hidden="true"></i><span>{{ simulationMode ? '安全预览，不会发送到 BOSS' : '真实发送：逐条预检、逐条确认结果' }}</span></template>
+          </div>
 
           <div class="footer-actions">
             <button v-if="stage === 'review'" type="button" class="secondary-button" @click="returnToSelection">返回选岗</button>
             <button v-if="stage === 'sending' && sending" type="button" class="danger-button" @click="stopSending">停止剩余发送</button>
             <button type="button" class="secondary-button" @click="close">{{ sendComplete || stopped ? '关闭' : '取消' }}</button>
             <button v-if="stage === 'select'" type="button" class="primary-button" :disabled="!selectedJobs.length" @click="startReview">生成 {{ selectedJobs.length || '' }} 条招呼语</button>
-            <button v-else-if="stage === 'review'" type="button" class="primary-button" :disabled="!includedItems.length" @click="requestLocalSend">确认并模拟发送 {{ includedItems.length }} 条</button>
+            <button v-else-if="stage === 'review'" type="button" class="primary-button" :disabled="!includedItems.length || (!simulationMode && !defaultGreetingDisabled)" @click="requestSend">确认并{{ simulationMode ? '模拟' : '真实' }}发送 {{ includedItems.length }} 条</button>
           </div>
         </footer>
 
@@ -392,7 +444,7 @@ function statusLabel(status) {
             <div><small>发送前确认</small><h3 id="greeting-risk-title">本批包含 {{ includedItems.length }} 个岗位</h3></div>
             <p>连续向多个岗位发起沟通可能触发 BOSS 限流、安全验证、沟通额度限制或账号封禁。正式功能遇到任何异常会立即停止，不会尝试绕过平台限制。</p>
             <label><input v-model="riskAcknowledged" type="checkbox" /><span>我已了解批量发送可能带来的账号风险</span></label>
-            <footer><button type="button" class="secondary-button" @click="riskOpen = false">返回检查</button><button type="button" class="risk-confirm-button" :disabled="!riskAcknowledged" @click="startLocalSend">了解风险，开始模拟</button></footer>
+            <footer><button type="button" class="secondary-button" @click="riskOpen = false">返回检查</button><button type="button" class="risk-confirm-button" :disabled="!riskAcknowledged" @click="startSend">了解风险，开始{{ simulationMode ? '模拟' : '真实发送' }}</button></footer>
           </section>
         </div>
       </section>
@@ -449,6 +501,8 @@ function statusLabel(status) {
 .greeting-title-block h2 { margin: 0; font: 850 23px/1.15 var(--ui-font-display, "Segoe UI Variable Display", sans-serif); letter-spacing: -.035em; }
 .greeting-title-block p { margin: 5px 0 0; color: var(--greeting-muted); font-size: 11px; }
 .preview-badge { gap: 6px; border: 1px solid rgba(4,166,166,.25); border-radius: 999px; background: #edf9f7; color: #087d7d; padding: 4px 8px; font: 800 9px/1 var(--ui-font-utility, Consolas, monospace); }
+.preview-badge.live { border-color: rgba(8,105,216,.25); background: var(--greeting-blue-soft); color: var(--greeting-blue-ink); }
+.preview-badge.live i { background: var(--greeting-blue); box-shadow: 0 0 0 3px rgba(8,105,216,.13); }
 .preview-badge i,.local-boundary i { width: 6px; height: 6px; border-radius: 50%; background: var(--greeting-teal); box-shadow: 0 0 0 3px rgba(4,166,166,.13); }
 .greeting-header-meta { gap: 10px; }
 .resume-version { min-height: 32px; border: 1px solid var(--greeting-line); border-radius: 9px; background: #fff; color: var(--greeting-copy); padding: 0 10px; font: 800 10px/1 var(--ui-font-utility, Consolas, monospace); }
@@ -486,15 +540,17 @@ function statusLabel(status) {
 .track-node i { width: 8px; height: 8px; border: 3px solid var(--greeting-canvas); border-radius: 50%; background: var(--greeting-line-strong); box-shadow: 0 0 0 1px var(--greeting-line-strong); }
 .track-item.active .track-node i,.track-item.ready .track-node i { background: var(--greeting-blue); box-shadow: 0 0 0 1px var(--greeting-blue); }
 .track-item.sent .track-node i { background: var(--greeting-teal); box-shadow: 0 0 0 1px var(--greeting-teal); }
-.track-item.sending .track-node i { background: var(--greeting-blue); box-shadow: 0 0 0 4px rgba(8,105,216,.15); animation: track-pulse .75s ease-in-out infinite alternate; }
-.track-item.excluded .track-node i,.track-item.stopped .track-node i { background: #aeb9c8; box-shadow: 0 0 0 1px #aeb9c8; }
+.track-item.sending .track-node i,.track-item.preflighting .track-node i { background: var(--greeting-blue); box-shadow: 0 0 0 4px rgba(8,105,216,.15); animation: track-pulse .75s ease-in-out infinite alternate; }
+.track-item.excluded .track-node i,.track-item.stopped .track-node i,.track-item.skipped .track-node i { background: #aeb9c8; box-shadow: 0 0 0 1px #aeb9c8; }
+.track-item.failed .track-node i { background: var(--greeting-risk); box-shadow: 0 0 0 1px var(--greeting-risk); }
 .track-copy { min-width: 0; }
 .track-copy strong,.track-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .track-copy strong { font-size: 12px; }
 .track-copy small { margin-top: 3px; color: var(--greeting-muted); font-size: 10px; }
 .track-item em { color: var(--greeting-muted); font-size: 9px; font-style: normal; font-weight: 750; white-space: nowrap; }
 .track-item.sent em { color: #087d7d; }
-.track-item.sending em { color: var(--greeting-blue-ink); }
+.track-item.sending em,.track-item.preflighting em { color: var(--greeting-blue-ink); }
+.track-item.failed em { color: var(--greeting-risk); }
 
 .message-editor { min-width: 0; overflow-y: auto; background: #fff; padding: 26px 30px; }
 .editor-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
@@ -541,6 +597,7 @@ function statusLabel(status) {
 .progress-kicker { color: var(--greeting-blue-ink); font: 850 10px/1 var(--ui-font-utility, Consolas, monospace); }
 .progress-board h3 { margin: 12px 0 0; font: 880 28px/1.2 var(--ui-font-display, "Segoe UI Variable Display", sans-serif); letter-spacing: -.035em; }
 .progress-board > p { margin: 9px 0 0; color: var(--greeting-muted); font-size: 12px; }
+.progress-board > .send-error { border-left: 3px solid var(--greeting-risk); border-radius: 0 8px 8px 0; background: #fff3f4; color: #a93c47; padding: 9px 11px; line-height: 1.55; }
 .progress-rail { height: 8px; overflow: hidden; margin-top: 34px; border-radius: 999px; background: var(--greeting-blue-soft); }
 .progress-rail i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg,var(--greeting-blue),var(--greeting-teal)); transition: width .35s ease; }
 .progress-numbers { display: grid; grid-template-columns: auto auto auto auto 1fr; align-items: baseline; gap: 7px; margin-top: 12px; }
@@ -560,6 +617,7 @@ function statusLabel(status) {
 .simulation-boundary p { margin: 8px 0 0; color: var(--greeting-muted); font-size: 10px; line-height: 1.65; }
 .simulation-boundary ul { display: grid; gap: 9px; margin: 19px 0 0; padding: 0; list-style: none; }
 .simulation-boundary li { border-top: 1px solid var(--greeting-line); color: var(--greeting-copy); padding-top: 9px; font-size: 10px; }
+.simulation-boundary.live .boundary-mark { border-color: rgba(8,105,216,.25); background: var(--greeting-blue-soft); color: var(--greeting-blue-ink); }
 
 .greeting-footer { display: flex; min-height: 68px; align-items: center; justify-content: space-between; gap: 18px; border-top: 1px solid var(--greeting-line); background: #fff; padding: 10px 16px 10px 20px; }
 .batch-limit-control { display: flex; align-items: center; gap: 8px; color: var(--greeting-copy); font-size: 10px; }
@@ -569,6 +627,9 @@ function statusLabel(status) {
 .batch-limit-control > span { color: var(--greeting-muted); }
 .batch-limit-control strong { color: var(--greeting-blue-ink); }
 .local-boundary { gap: 8px; color: #087d7d; font-size: 10px; font-weight: 800; }
+.local-boundary.live { color: var(--greeting-blue-ink); }
+.default-greeting-check { display: flex; align-items: center; gap: 7px; cursor: pointer; }
+.default-greeting-check input { margin: 0; accent-color: var(--greeting-blue); }
 .footer-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
 .primary-button,.secondary-button,.danger-button,.risk-confirm-button { min-height: 40px; border-radius: 10px; padding: 8px 14px; cursor: pointer; font-size: 11px; font-weight: 850; }
 .primary-button { min-width: 148px; border: 1px solid var(--greeting-blue); background: var(--greeting-blue); color: #fff; box-shadow: 0 8px 20px rgba(8,105,216,.17); }

@@ -1,6 +1,13 @@
 const WEB_CHANNEL = 'find-job-job-library-web-v1'
 const EXTENSION_CHANNEL = 'find-job-job-library-extension-v1'
-const ALLOWED_ACTIONS = new Set(['ping', 'list_cities', 'search_jobs', 'get_job_detail'])
+const ALLOWED_ACTIONS = new Set([
+  'ping',
+  'list_cities',
+  'search_jobs',
+  'get_job_detail',
+  'preflight_greeting',
+  'send_greeting'
+])
 
 function postResponse(requestId, payload) {
   window.postMessage({

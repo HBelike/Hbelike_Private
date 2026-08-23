@@ -72,6 +72,8 @@ test('normalizeSearchResponse maps真实列表字段并保留详情标识', () =
       jobList: [{
         securityId: 'secure-1',
         encryptJobId: 'job-1',
+        encryptBossId: 'boss-1',
+        lid: 'lid-1',
         jobName: 'Agent开发工程师',
         salaryDesc: '30-50K',
         jobExperience: '3-5年',
@@ -87,6 +89,8 @@ test('normalizeSearchResponse maps真实列表字段并保留详情标识', () =
 
   assert.equal(result.hasMore, true)
   assert.equal(result.jobs[0].id, 'secure-1')
+  assert.equal(result.jobs[0].bossId, 'boss-1')
+  assert.equal(result.jobs[0].lid, 'lid-1')
   assert.equal(result.jobs[0].district, '徐汇区 · 漕河泾')
   assert.equal(result.jobs[0].sourceUrl, 'https://www.zhipin.com/job_detail/job-1.html')
 })
@@ -121,15 +125,18 @@ test('normalizeDetailResponse maps职位正文、公司和招聘者字段', () =
         locationName: '上海',
         address: '上海市徐汇区',
         postDescription: '岗位职责\n1. 开发 Agent 平台',
+        lid: 'detail-lid',
         showSkills: ['Java', 'LLM']
       },
-      bossInfo: { name: '陈女士', title: '招聘经理', online: true },
+      bossInfo: { name: '陈女士', title: '招聘经理', online: true, encryptBossId: 'detail-boss' },
       brandComInfo: { brandName: '示例科技', industryName: '人工智能', scaleName: '100-499人', stageName: 'B轮' }
     }
   }, { id: 'secure-1', securityId: 'secure-1' })
 
   assert.equal(result.description, '岗位职责\n1. 开发 Agent 平台')
   assert.equal(result.company, '示例科技')
+  assert.equal(result.bossId, 'detail-boss')
+  assert.equal(result.lid, 'detail-lid')
   assert.equal(result.recruiter, '陈女士 · 招聘经理')
   assert.deepEqual(result.skills, ['Java', 'LLM'])
 })

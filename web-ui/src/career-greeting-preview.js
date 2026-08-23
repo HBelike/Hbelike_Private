@@ -99,6 +99,12 @@ export function advanceGreetingSend(items) {
 export function stopGreetingItems(items) {
   return (Array.isArray(items) ? items : []).map((item) => ({
     ...item,
-    status: item.status === 'queued' ? 'stopped' : item.status
+    status: ['queued', 'preflighting'].includes(item.status) ? 'stopped' : item.status
   }))
+}
+
+export function updateGreetingItemStatus(items, id, status, error = '') {
+  return (Array.isArray(items) ? items : []).map((item) => item.id === id
+    ? { ...item, status, error }
+    : item)
 }

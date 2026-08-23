@@ -11,6 +11,11 @@ import {
   shouldSyncBossSearchPage,
   shouldRefreshBossSession
 } from './boss-data.js'
+import {
+  buildBossChatUrl,
+  classifyFriendAddResponse,
+  normalizeGreetingPayload
+} from './boss-greeting.js'
 
 const WEB_CHANNEL = 'find-job-job-library-web-v1'
 const ALLOWED_APP_HOSTS = new Set(['127.0.0.1', 'localhost', 'xingxingtech.cn', 'www.xingxingtech.cn'])
@@ -22,6 +27,7 @@ const SESSION_REFRESH_STORAGE_KEY = 'bossLastSessionRefreshAt'
 let requestQueue = Promise.resolve()
 let lastRequestAt = 0
 let lastSessionRefreshAt = 0
+let greetingTabId = null
 
 function isAllowedSender(sender) {
   try {
@@ -247,6 +253,241 @@ async function runBossFetch(tabId, endpoint) {
   return result
 }
 
+async function runFriendAdd(tabId, payload) {
+  const [{ result } = {}] = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: 'MAIN',
+    args: [payload],
+    func: async (job) => {
+      const pageText = document.body?.innerText ?? ''
+      if (/安全验证|环境存在异常|请稍候/.test(pageText) || /verify|security-check/i.test(location.pathname)) {
+        return { kind: 'verification' }
+      }
+      if (/登录后继续|扫码登录|密码登录/.test(pageText) || /\/web\/user\/?$/.test(location.pathname)) {
+        return { kind: 'login' }
+      }
+
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), 12000)
+      try {
+        const tokenResponse = await fetch('/wapi/zppassport/get/zpToken', {
+          credentials: 'include',
+          cache: 'no-store',
+          signal: controller.signal
+        })
+        if (!tokenResponse.ok) return { kind: 'http', status: tokenResponse.status }
+        const tokenPayload = await tokenResponse.json()
+        const token = String(tokenPayload?.zpData?.token ?? '').trim()
+        if (!token) return { kind: 'login' }
+
+        const endpoint = new URL('/wapi/zpgeek/friend/add.json', location.origin)
+        endpoint.search = new URLSearchParams({
+          securityId: job.securityId,
+          lid: job.lid,
+          jobId: job.jobId
+        }).toString()
+        const response = await fetch(endpoint, {
+          method: 'POST',
+          credentials: 'include',
+          cache: 'no-store',
+          headers: {
+            Accept: 'application/json, text/plain, */*',
+            zp_token: token
+          },
+          signal: controller.signal
+        })
+        if (!response.ok) return { kind: 'http', status: response.status }
+        return { kind: 'api', response: await response.json() }
+      } catch (error) {
+        return {
+          kind: 'network',
+          message: error instanceof Error && error.name === 'AbortError'
+            ? 'BOSS 建立沟通请求超时。'
+            : (error instanceof Error ? error.message : 'BOSS 建立沟通请求失败。')
+        }
+      } finally {
+        clearTimeout(timeoutId)
+      }
+    }
+  })
+  return result
+}
+
+async function getGreetingTab(url) {
+  if (greetingTabId) {
+    try {
+      const current = await chrome.tabs.get(greetingTabId)
+      if (current?.id) return navigateBossTab(current.id, url, 25000)
+    } catch {
+      greetingTabId = null
+    }
+  }
+  const created = await chrome.tabs.create({ url, active: false })
+  if (!created.id) throw new Error('无法打开 BOSS 聊天页面。')
+  greetingTabId = created.id
+  return waitForTabReady(created.id, 25000)
+}
+
+async function runChatSend(tabId, message) {
+  const [{ result } = {}] = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: 'MAIN',
+    args: [message],
+    func: async (finalMessage) => {
+      const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds))
+      const normalized = String(finalMessage ?? '').trim()
+      const pageState = () => {
+        const pageText = document.body?.innerText ?? ''
+        if (/安全验证|环境存在异常|请稍候/.test(pageText) || /verify|security-check/i.test(location.pathname)) {
+          return { code: 'verification_required', message: 'BOSS 要求安全验证。', stopBatch: true }
+        }
+        if (/登录后继续|扫码登录|密码登录/.test(pageText) || /\/web\/user\/?$/.test(location.pathname)) {
+          return { code: 'login_required', message: 'BOSS 登录状态已失效。', stopBatch: true }
+        }
+        if (/操作过于频繁|沟通上限|沟通额度|已与\d+位BOSS沟通/.test(pageText)) {
+          return { code: 'rate_limited', message: 'BOSS 限制了当前沟通频率。', stopBatch: true }
+        }
+        return null
+      }
+      const currentPageState = pageState()
+      if (currentPageState) return currentPageState
+
+      let chatInput = null
+      let sendButton = null
+      for (let attempt = 0; attempt < 200; attempt += 1) {
+        const blocked = pageState()
+        if (blocked) return blocked
+        chatInput = document.querySelector('#chat-input')
+        sendButton = document.querySelector('.chat-op .btn-send')
+          || [...document.querySelectorAll('button,a')].find((element) => element.textContent?.trim() === '发送')
+        if (chatInput && sendButton) break
+        await sleep(100)
+      }
+      if (!chatInput || !sendButton) {
+        return { code: 'chat_unavailable', message: 'BOSS 聊天输入框或发送按钮未加载。', stopBatch: true }
+      }
+
+      const outgoingMessages = () => [...document.querySelectorAll('.item-myself .message-text')]
+        .filter((element) => element.textContent?.trim() === normalized)
+      if (outgoingMessages().some((element) => {
+        const status = element.closest('.item-myself')?.querySelector('.status')
+        return status?.classList.contains('status-delivery') || status?.classList.contains('status-read')
+      })) {
+        return { ok: true, status: 'already_sent' }
+      }
+
+      chatInput.focus()
+      const selection = window.getSelection()
+      const range = document.createRange()
+      range.selectNodeContents(chatInput)
+      selection?.removeAllRanges()
+      selection?.addRange(range)
+      let inserted = false
+      try {
+        inserted = document.execCommand('insertText', false, normalized)
+      } catch {
+        inserted = false
+      }
+      if (!inserted || chatInput.textContent?.trim() !== normalized) {
+        chatInput.textContent = normalized
+      }
+      chatInput.dispatchEvent(new InputEvent('input', {
+        bubbles: true,
+        inputType: 'insertText',
+        data: normalized
+      }))
+      chatInput.dispatchEvent(new Event('change', { bubbles: true }))
+      await sleep(180)
+      if (chatInput.textContent?.trim() !== normalized) {
+        return { code: 'message_fill_failed', message: '招呼语未能写入 BOSS 聊天框。', stopBatch: true }
+      }
+      if (sendButton.disabled || sendButton.getAttribute('aria-disabled') === 'true') {
+        return { code: 'send_disabled', message: 'BOSS 发送按钮当前不可用。', stopBatch: true }
+      }
+
+      sendButton.click()
+      for (let attempt = 0; attempt < 150; attempt += 1) {
+        const blocked = pageState()
+        if (blocked) return blocked
+        for (const element of outgoingMessages()) {
+          const status = element.closest('.item-myself')?.querySelector('.status')
+          if (status?.classList.contains('status-delivery') || status?.classList.contains('status-read')) {
+            return { ok: true, status: 'sent' }
+          }
+          if (status?.classList.contains('status-fail')) {
+            return { code: 'send_failed', message: 'BOSS 明确返回发送失败。', stopBatch: true }
+          }
+        }
+        await sleep(100)
+      }
+      return {
+        code: 'send_unknown',
+        message: '未能确认招呼语是否送达，已停止本批以避免重复发送。',
+        stopBatch: true
+      }
+    }
+  })
+  return result
+}
+
+function greetingFailure(result) {
+  if (!result) return { code: 'empty_response', message: 'BOSS 没有返回发送结果。', stopBatch: true }
+  if (result.kind === 'verification') return { code: 'verification_required', message: 'BOSS 要求安全验证。', stopBatch: true }
+  if (result.kind === 'login') return { code: 'login_required', message: '请先登录 BOSS。', stopBatch: true }
+  if (result.kind === 'network') return { code: 'network_error', message: result.message || 'BOSS 网络请求失败。', stopBatch: true }
+  if (result.kind === 'http') {
+    return Number(result.status) === 429
+      ? { code: 'rate_limited', message: 'BOSS 限制了当前沟通频率。', stopBatch: true }
+      : { code: 'boss_http_error', message: `BOSS 返回 HTTP ${result.status || '异常状态'}。`, stopBatch: true }
+  }
+  return null
+}
+
+async function handleGreetingOperation(action, rawPayload) {
+  let payload
+  try {
+    payload = normalizeGreetingPayload(rawPayload)
+  } catch (error) {
+    return { ok: false, error: { code: 'invalid_greeting', message: error.message, stopBatch: true } }
+  }
+
+  const bossTab = await getBossTab(BOSS_HOME)
+  if (!bossTab?.id || isBossBlockedPage(bossTab.url)) {
+    return { ok: false, error: { code: 'login_or_verification_required', message: '请检查 BOSS 登录或安全验证状态。', stopBatch: true } }
+  }
+
+  await respectRequestGap()
+  const detailResult = await runBossFetch(bossTab.id, buildDetailEndpoint(payload.securityId))
+  lastRequestAt = Date.now()
+  const detailFailure = classifyBossFailure(detailResult)
+  if (detailFailure) return { ok: false, error: { ...detailFailure, stopBatch: true } }
+  const detail = normalizeDetailResponse(detailResult.response, payload)
+  if (!detail.jobId || !detail.bossId || !detail.lid) {
+    return { ok: false, error: { code: 'job_identifiers_missing', message: '岗位缺少聊天标识，请重新搜索并选择岗位。', stopBatch: true } }
+  }
+  if (action === 'preflight_greeting') {
+    return { ok: true, data: { ready: true, job: { securityId: detail.securityId, jobId: detail.jobId, bossId: detail.bossId, lid: detail.lid } } }
+  }
+
+  await respectRequestGap()
+  const friendResult = await runFriendAdd(bossTab.id, detail)
+  lastRequestAt = Date.now()
+  const transportFailure = greetingFailure(friendResult)
+  if (transportFailure) return { ok: false, error: transportFailure }
+  const friendFailure = classifyFriendAddResponse(friendResult.response)
+  if (!friendFailure.ok) {
+    if (friendFailure.stopBatch === false) {
+      return { ok: true, data: { status: 'skipped', reason: friendFailure.message, code: friendFailure.code } }
+    }
+    return { ok: false, error: friendFailure }
+  }
+
+  const chatTab = await getGreetingTab(buildBossChatUrl({ ...detail, message: payload.message }))
+  const sendResult = await runChatSend(chatTab.id, payload.message)
+  if (!sendResult?.ok) return { ok: false, error: sendResult || { code: 'send_unknown', message: '发送结果未知。', stopBatch: true } }
+  return { ok: true, data: { status: sendResult.status, sentAt: new Date().toISOString() } }
+}
+
 async function handleBossOperation(action, payload) {
   await respectRequestGap()
   const endpoint = action === 'search_jobs'
@@ -353,6 +594,9 @@ async function handleMessage(message, sender) {
     return { ok: false, error: { code: 'forbidden_sender', message: '当前页面不能调用职位库助手。' } }
   }
   if (message.action === 'ping') return { ok: true, data: { connected: true, version: chrome.runtime.getManifest().version } }
+  if (['preflight_greeting', 'send_greeting'].includes(message.action)) {
+    return handleGreetingOperation(message.action, message.payload ?? {})
+  }
   if (!['list_cities', 'search_jobs', 'get_job_detail'].includes(message.action)) {
     return { ok: false, error: { code: 'unsupported_action', message: '职位库助手不支持该操作。' } }
   }

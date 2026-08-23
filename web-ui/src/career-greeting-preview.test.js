@@ -6,6 +6,8 @@ import {
   needsGreetingRiskWarning,
   normalizeGreetingLimit,
   regenerateGreetingItem,
+  stopGreetingItems,
+  updateGreetingItemStatus,
   toggleGreetingJob
 } from './career-greeting-preview.js'
 
@@ -75,4 +77,22 @@ test('取消项不会进入本地发送队列', () => {
   const sent = advanceGreetingSend(queued)
   assert.equal(sent[0].status, 'sent')
   assert.equal(sent[1].status, 'excluded')
+})
+
+test('串行发送状态按预检、发送、完成推进', () => {
+  const items = createGreetingItems([job('1'), job('2')]).map((item) => ({ ...item, status: 'queued' }))
+  const preflighting = updateGreetingItemStatus(items, items[0].id, 'preflighting')
+  assert.deepEqual(preflighting.map((item) => item.status), ['preflighting', 'queued'])
+  const sending = updateGreetingItemStatus(preflighting, items[0].id, 'sending')
+  assert.deepEqual(sending.map((item) => item.status), ['sending', 'queued'])
+  const sent = updateGreetingItemStatus(sending, items[0].id, 'sent')
+  assert.deepEqual(sent.map((item) => item.status), ['sent', 'queued'])
+})
+
+test('停止批次会停止未发送和预检中的岗位，但不篡改已提交项', () => {
+  const items = createGreetingItems([job('1'), job('2'), job('3')]).map((item, index) => ({
+    ...item,
+    status: ['sending', 'preflighting', 'queued'][index]
+  }))
+  assert.deepEqual(stopGreetingItems(items).map((item) => item.status), ['sending', 'stopped', 'stopped'])
 })
