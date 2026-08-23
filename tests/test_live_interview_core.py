@@ -1,0 +1,181 @@
+from __future__ import annotations
+
+import base64
+
+import pytest
+
+from src.career_assistant.live_interview.asr.openai_realtime import map_openai_event
+from src.career_assistant.live_interview.contracts import (
+    AnswerRequestEvent,
+    AudioAppendEvent,
+    AudioChannel,
+    QuestionIntent,
+    SpeakerRole,
+    TranscriptEvent,
+    parse_client_event,
+)
+from src.career_assistant.live_interview.question_detector import RuleBasedQuestionDetector
+from src.career_assistant.live_interview.terminology import TerminologyCorrector, extract_terms
+from src.career_assistant.live_interview.transcript_assembler import TranscriptAssembler
+
+
+def test_audio_event_decodes_pcm_and_maps_roles() -> None:
+    event = parse_client_event(
+        {
+            "type": "audio.append",
+            "channel": "interviewer",
+            "sequence": 3,
+            "pcm_base64": base64.b64encode(b"\x01\x02").decode(),
+        }
+    )
+
+    assert isinstance(event, AudioAppendEvent)
+    assert event.pcm == b"\x01\x02"
+    assert event.channel.role is SpeakerRole.INTERVIEWER
+    assert AudioChannel.CANDIDATE.role is SpeakerRole.CANDIDATE
+
+
+@pytest.mark.parametrize(
+    "payload, message",
+    [
+        (
+            {
+                "type": "audio.append",
+                "channel": "interviewer",
+                "sequence": -1,
+                "pcm_base64": "AA==",
+            },
+            "sequence",
+        ),
+        (
+            {
+                "type": "audio.append",
+                "channel": "candidate",
+                "sequence": 0,
+                "pcm_base64": "%%%",
+            },
+            "Base64",
+        ),
+    ],
+)
+def test_audio_event_rejects_invalid_payload(payload: dict[str, object], message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        parse_client_event(payload)
+
+
+def test_manual_answer_request_contract() -> None:
+    event = parse_client_event(
+        {"type": "answer.request", "mode": "regenerate", "question": "请解释 CAP theorem"}
+    )
+
+    assert isinstance(event, AnswerRequestEvent)
+    assert event.mode == "regenerate"
+    assert event.question == "请解释 CAP theorem"
+
+
+def test_assembler_keeps_channel_sequences_independent_and_drops_stale_partial() -> None:
+    assembler = TranscriptAssembler()
+    interviewer = TranscriptEvent(
+        channel=AudioChannel.INTERVIEWER,
+        sequence=4,
+        text="Explain CAP theorem",
+        is_final=True,
+    )
+    candidate = TranscriptEvent(
+        channel=AudioChannel.CANDIDATE,
+        sequence=1,
+        text="我会从 consistency 开始",
+        is_final=True,
+    )
+
+    assert assembler.accept(interviewer) == interviewer
+    assert assembler.accept(candidate) == candidate
+    assert (
+        assembler.accept(
+            TranscriptEvent(
+                channel=AudioChannel.INTERVIEWER,
+                sequence=3,
+                text="Explain CAP",
+                is_final=False,
+            )
+        )
+        is None
+    )
+
+
+def test_terminology_correction_is_limited_to_confirmed_terms() -> None:
+    terms = extract_terms("使用 PostgreSQL、Kafka 和 IEC 62304 交付医疗设备软件")
+    result = TerminologyCorrector(terms).correct("使用 Postgres SQL 和 kafka 进行开发")
+
+    assert "PostgreSQL" in result.corrected_text
+    assert "Kafka" in result.corrected_text
+    assert "IEC 62304" not in result.corrected_text
+    assert result.raw_text == "使用 Postgres SQL 和 kafka 进行开发"
+
+
+def test_detector_only_uses_interviewer_final_and_supports_mixed_language() -> None:
+    detector = RuleBasedQuestionDetector()
+    candidate = TranscriptEvent(
+        channel=AudioChannel.CANDIDATE,
+        sequence=1,
+        text="I used Kafka 处理事件",
+        is_final=True,
+    )
+    partial = TranscriptEvent(
+        channel=AudioChannel.INTERVIEWER,
+        sequence=2,
+        text="Explain CAP",
+        is_final=False,
+    )
+    question = TranscriptEvent(
+        channel=AudioChannel.INTERVIEWER,
+        sequence=3,
+        text="请结合你的项目解释 CAP theorem？",
+        is_final=True,
+    )
+
+    assert detector.detect(candidate) is None
+    assert detector.detect(partial) is None
+    detected = detector.detect(question)
+    assert detected is not None
+    assert detected.intent is QuestionIntent.PROJECT_DEEP_DIVE
+    assert detected.normalized_question == "请结合你的项目解释 CAP theorem？"
+
+
+def test_detector_marks_follow_up() -> None:
+    detected = RuleBasedQuestionDetector().detect(
+        TranscriptEvent(
+            channel=AudioChannel.INTERVIEWER,
+            sequence=9,
+            text="那如果流量再增加十倍呢？",
+            is_final=True,
+        ),
+        previous_question="你如何处理高并发？",
+    )
+
+    assert detected is not None
+    assert detected.intent is QuestionIntent.FOLLOW_UP
+    assert detected.is_follow_up
+
+
+def test_openai_transcription_messages_map_to_domain_events() -> None:
+    partial = map_openai_event(
+        {
+            "type": "conversation.item.input_audio_transcription.delta",
+            "delta": "Explain CAP",
+        },
+        AudioChannel.INTERVIEWER,
+        7,
+    )
+    final = map_openai_event(
+        {
+            "type": "conversation.item.input_audio_transcription.completed",
+            "transcript": "Explain CAP theorem",
+        },
+        AudioChannel.INTERVIEWER,
+        7,
+    )
+
+    assert partial is not None and not partial.is_final
+    assert final is not None and final.is_final
+    assert final.text == "Explain CAP theorem"
