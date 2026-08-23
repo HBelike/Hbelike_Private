@@ -1038,26 +1038,49 @@ def get_conversation(
     """读取会话及其已脱敏消息历史。"""
 
     actor = get_request_actor()
-    services = get_career_services(request)
-    try:
-        conversation = services.agent_loop.resume_conversation(actor.actor_id, conversation_id)
-    except LookupError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    messages = services.conversation_repository.list_messages(actor.actor_id, conversation_id)
-    last_model_selection = services.conversation_repository.get_last_model_selection(
+    read_services = get_career_read_services(request)
+    conversation = read_services.conversation_repository.get_conversation(
         actor.actor_id,
         conversation_id,
     )
-    latest_turn = services.conversation_repository.get_latest_agent_turn(
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="会话不存在、已删除或无访问权限")
+    messages = read_services.conversation_repository.list_messages(
         actor.actor_id,
         conversation_id,
     )
-    context = services.context_repository.get_conversation_context(
+    last_model_selection = read_services.conversation_repository.get_last_model_selection(
         actor.actor_id,
         conversation_id,
     )
-    if context is not None:
+    latest_turn = read_services.conversation_repository.get_latest_agent_turn(
+        actor.actor_id,
+        conversation_id,
+    )
+    context = read_services.context_repository.get_conversation_context(
+        actor.actor_id,
+        conversation_id,
+    )
+    assessment = (
+        _current_job_assessment(read_services, context)
+        if context is not None
+        else None
+    )
+    has_complete_assessment_context = (
+        context is not None
+        and context.candidate is not None
+        and context.target_role is not None
+    )
+    if has_complete_assessment_context and assessment is None:
+        services = get_career_services(request)
         _enqueue_job_assessment(services, background_tasks, context)
+        assessment = _current_job_assessment(services, context)
+    elif has_complete_assessment_context:
+        background_tasks.add_task(
+            _refresh_job_assessment_after_response,
+            request,
+            context,
+        )
     return {
         "conversation": _conversation_payload(conversation),
         "messages": [_message_payload(item) for item in messages],
@@ -1066,7 +1089,7 @@ def get_conversation(
         "context": (
             _conversation_context_payload(
                 context,
-                _current_job_assessment(services, context),
+                assessment,
             )
             if context
             else None
@@ -3252,7 +3275,10 @@ def _conversation_context_payload(context, assessment_record=None) -> dict[str, 
     }
 
 
-def _current_job_assessment(services: CareerAssistantServices, context):
+def _current_job_assessment(
+    services: CareerAssistantReadServices | CareerAssistantServices,
+    context,
+):
     if context.candidate is None or context.target_role is None:
         return None
     return services.job_assessment_repository.get_current(
@@ -3276,6 +3302,21 @@ def _enqueue_job_assessment(
             services.job_assessment_service.run_assessment,
             record.id,
         )
+
+
+def _refresh_job_assessment_after_response(request: Request, context) -> None:
+    """在历史详情已经返回后恢复队列，并检查 Judge 配置版本更新。"""
+
+    try:
+        services = get_career_services(request)
+        queued = services.job_assessment_service.enqueue_context(context)
+        if queued is None:
+            return
+        record, _ = queued
+        if record.status.value == "queued":
+            services.job_assessment_service.run_assessment(record.id)
+    except Exception:
+        logger.exception("历史会话岗位评估后台刷新失败")
 
 
 def _job_assessment_payload(record) -> dict[str, object] | None:

@@ -213,6 +213,155 @@ class CareerHistoryFastPathTests(unittest.TestCase):
         enqueue_assessment.assert_called_once()
         self.assertEqual(payload["context"], {"bound": True})
 
+    def test_ready_history_detail_uses_read_services_without_full_agent_initialization(
+        self,
+    ) -> None:
+        now = datetime.now(UTC)
+        conversation = ConversationRecord(
+            id=uuid4(),
+            organization_id=career_router.DEFAULT_ORGANIZATION_ID,
+            actor_id=career_router.DEFAULT_ACTOR_ID,
+            title="历史求职咨询",
+            status="active",
+            created_at=now,
+            updated_at=now,
+            archived_at=None,
+        )
+        candidate = SimpleNamespace(actor_id=career_router.DEFAULT_ACTOR_ID, id=uuid4())
+        target_role = SimpleNamespace(id=uuid4())
+        context = SimpleNamespace(candidate=candidate, target_role=target_role)
+        ready_assessment = SimpleNamespace(status=SimpleNamespace(value="ready"))
+
+        class ReadingConversationRepository:
+            def get_conversation(self, actor_id, conversation_id):
+                self.get_call = (actor_id, conversation_id)
+                return conversation
+
+            def list_messages(self, actor_id, conversation_id):
+                return []
+
+            def get_last_model_selection(self, actor_id, conversation_id):
+                return None
+
+            def get_latest_agent_turn(self, actor_id, conversation_id):
+                return None
+
+        class ReadingContextRepository:
+            def get_conversation_context(self, actor_id, conversation_id):
+                self.get_call = (actor_id, conversation_id)
+                return context
+
+        class ReadingAssessmentRepository:
+            def get_current(self, actor_id, candidate_id, target_role_id):
+                self.get_call = (actor_id, candidate_id, target_role_id)
+                return ready_assessment
+
+        conversation_repository = ReadingConversationRepository()
+        context_repository = ReadingContextRepository()
+        read_services = SimpleNamespace(
+            conversation_repository=conversation_repository,
+            context_repository=context_repository,
+            job_assessment_repository=ReadingAssessmentRepository(),
+        )
+        request = Request({"type": "http", "app": FastAPI()})
+        background_tasks = BackgroundTasks()
+
+        with (
+            patch.object(career_router, "get_career_read_services", return_value=read_services),
+            patch.object(
+                career_router,
+                "get_career_services",
+                side_effect=AssertionError("历史详情响应不应初始化完整 Agent 服务"),
+            ),
+            patch.object(
+                career_router,
+                "_conversation_context_payload",
+                return_value={"bound": True},
+            ),
+        ):
+            payload = career_router.get_conversation(
+                conversation.id,
+                request,
+                background_tasks,
+            )
+
+        self.assertEqual(payload["conversation"]["id"], str(conversation.id))
+        self.assertEqual(payload["messages"], [])
+        self.assertEqual(payload["context"], {"bound": True})
+        self.assertEqual(len(background_tasks.tasks), 1)
+        self.assertIs(
+            background_tasks.tasks[0].func,
+            career_router._refresh_job_assessment_after_response,
+        )
+        self.assertEqual(
+            conversation_repository.get_call,
+            (career_router.DEFAULT_ACTOR_ID, conversation.id),
+        )
+
+    def test_unassessed_history_detail_keeps_full_assessment_enqueue_flow(self) -> None:
+        now = datetime.now(UTC)
+        conversation = ConversationRecord(
+            id=uuid4(),
+            organization_id=career_router.DEFAULT_ORGANIZATION_ID,
+            actor_id=career_router.DEFAULT_ACTOR_ID,
+            title="尚未分析的历史求职咨询",
+            status="active",
+            created_at=now,
+            updated_at=now,
+            archived_at=None,
+        )
+        candidate = SimpleNamespace(actor_id=career_router.DEFAULT_ACTOR_ID, id=uuid4())
+        target_role = SimpleNamespace(id=uuid4())
+        context = SimpleNamespace(candidate=candidate, target_role=target_role)
+
+        class ReadingConversationRepository:
+            def get_conversation(self, actor_id, conversation_id):
+                return conversation
+
+            def list_messages(self, actor_id, conversation_id):
+                return []
+
+            def get_last_model_selection(self, actor_id, conversation_id):
+                return None
+
+            def get_latest_agent_turn(self, actor_id, conversation_id):
+                return None
+
+        class ReadingContextRepository:
+            def get_conversation_context(self, actor_id, conversation_id):
+                return context
+
+        class EmptyAssessmentRepository:
+            def get_current(self, actor_id, candidate_id, target_role_id):
+                return None
+
+        read_services = SimpleNamespace(
+            conversation_repository=ReadingConversationRepository(),
+            context_repository=ReadingContextRepository(),
+            job_assessment_repository=EmptyAssessmentRepository(),
+        )
+        full_services = SimpleNamespace(job_assessment_repository=EmptyAssessmentRepository())
+        request = Request({"type": "http", "app": FastAPI()})
+
+        with (
+            patch.object(career_router, "get_career_read_services", return_value=read_services),
+            patch.object(career_router, "get_career_services", return_value=full_services),
+            patch.object(career_router, "_enqueue_job_assessment") as enqueue_assessment,
+            patch.object(
+                career_router,
+                "_conversation_context_payload",
+                return_value={"bound": True},
+            ),
+        ):
+            payload = career_router.get_conversation(
+                conversation.id,
+                request,
+                BackgroundTasks(),
+            )
+
+        enqueue_assessment.assert_called_once()
+        self.assertEqual(payload["context"], {"bound": True})
+
 
 if __name__ == "__main__":
     unittest.main()
