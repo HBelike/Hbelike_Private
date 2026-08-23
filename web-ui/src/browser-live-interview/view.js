@@ -37,6 +37,34 @@ export function isNearScrollEnd({ scrollHeight = 0, scrollTop = 0, clientHeight 
   return Number(scrollHeight) - Number(scrollTop) - Number(clientHeight) <= Math.max(0, Number(threshold) || 0)
 }
 
+export function defaultInterviewDate(startedAt = '', fallback = new Date()) {
+  const value = startedAt ? new Date(startedAt) : fallback
+  const valid = Number.isNaN(value.getTime()) ? fallback : value
+  const year = valid.getFullYear()
+  const month = String(valid.getMonth() + 1).padStart(2, '0')
+  const day = String(valid.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+export function buildArchivePreview(payload = {}, fallbackQuestions = []) {
+  const serverQuestions = Array.isArray(payload.question_preview) ? payload.question_preview : []
+  const questions = (serverQuestions.length ? serverQuestions : fallbackQuestions)
+    .map((item) => typeof item === 'string' ? item : item?.question)
+    .map((item) => String(item || '').trim())
+    .filter(Boolean)
+    .slice(0, 5)
+  const requestedCount = Number(payload.question_count)
+  const questionCount = Number.isFinite(requestedCount) && requestedCount >= 0
+    ? requestedCount
+    : questions.length
+  return {
+    questionCount,
+    questions,
+    remainingCount: Math.max(0, questionCount - questions.length),
+    interviewDate: defaultInterviewDate(payload.started_at)
+  }
+}
+
 export function answerPreviewLines(answerText, limit = 5) {
   return String(answerText || '')
     .split(/\r?\n/)

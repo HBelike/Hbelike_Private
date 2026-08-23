@@ -5,15 +5,17 @@ from __future__ import annotations
 import asyncio
 import os
 from collections.abc import AsyncIterator
+from datetime import date
 from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from starlette.concurrency import iterate_in_threadpool
 
 from src.career_assistant.contracts import ModelCapability, ModelSelectionMode, ModelSelectionRequest
 from src.career_assistant.live_interview.answer_service import LiveAnswerService
+from src.career_assistant.live_interview.archive import LiveInterviewArchiveService
 from src.career_assistant.live_interview.asr.dashscope_realtime import (
     DEFAULT_DASHSCOPE_ASR_MODEL,
     DEFAULT_DASHSCOPE_ASR_URL,
@@ -63,6 +65,16 @@ class CreateLiveInterviewRequest(BaseModel):
     candidate_audio_enabled: bool = True
 
 
+class LiveInterviewArchivePreviewRequest(BaseModel):
+    session_ids: list[UUID] = Field(min_length=1, max_length=20)
+
+
+class LiveInterviewArchiveRequest(LiveInterviewArchivePreviewRequest):
+    company_name: str = Field(min_length=1, max_length=120)
+    role_name: str = Field(min_length=1, max_length=160)
+    interview_date: date
+
+
 def get_live_actor():
     from src.career_assistant.web.router import get_request_actor
 
@@ -90,6 +102,17 @@ def get_live_read_services(request: Request):
 
 def get_live_repository(request: Request) -> LiveInterviewRepository:
     return LiveInterviewRepository(get_live_read_services(request).database)
+
+
+def get_live_archive_service(request: Request) -> LiveInterviewArchiveService:
+    from src.career_assistant.web.router import get_career_services
+
+    services = get_career_services(request)
+    return LiveInterviewArchiveService(
+        live_repository=LiveInterviewRepository(services.database),
+        interview_repository=services.interview_library_repository,
+        interview_service=services.interview_library_service,
+    )
 
 
 @router.get("/setup-options")
@@ -187,6 +210,75 @@ def get_history(
     if payload is None:
         raise HTTPException(status_code=404, detail="实时面试会话不存在或无权访问")
     return payload
+
+
+@router.post("/archive/preview")
+def preview_archive(
+    payload: LiveInterviewArchivePreviewRequest,
+    request: Request,
+    actor=Depends(get_live_actor),
+) -> dict[str, object]:
+    """从完整后端历史读取结束弹窗的题数和前五题。"""
+
+    try:
+        preview = get_live_archive_service(request).preview(
+            organization_id=actor.organization_id,
+            actor_id=actor.actor_id,
+            session_ids=tuple(payload.session_ids),
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return _archive_preview_payload(preview)
+
+
+@router.post("/archive", status_code=status.HTTP_201_CREATED)
+def archive_interview(
+    payload: LiveInterviewArchiveRequest,
+    request: Request,
+    actor=Depends(get_live_actor),
+) -> dict[str, object]:
+    """把本场多个实时会话中的问题归并到面经库。"""
+
+    try:
+        result = get_live_archive_service(request).archive(
+            organization_id=actor.organization_id,
+            actor_id=actor.actor_id,
+            session_ids=tuple(payload.session_ids),
+            company_name=payload.company_name,
+            role_name=payload.role_name,
+            interview_date=payload.interview_date,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {
+        **_archive_preview_payload(result),
+        "experience": {
+            "id": str(result.experience.id),
+            "company_name": result.experience.company_name,
+            "role_name": result.experience.role_name,
+            "job_name": result.experience.job_name,
+            "interview_date": (
+                result.experience.interview_date.isoformat()
+                if result.experience.interview_date
+                else None
+            ),
+        },
+    }
+
+
+def _archive_preview_payload(preview) -> dict[str, object]:
+    return {
+        "question_count": preview.question_count,
+        "question_preview": list(preview.question_preview),
+        "started_at": preview.started_at.isoformat(),
+        "ended_at": preview.ended_at.isoformat(),
+    }
 
 
 @router.websocket("/{session_id}/stream")

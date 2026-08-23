@@ -1102,7 +1102,11 @@ async function finishImport(payload, { importedCount = 1 } = {}) {
   }, 700)
 }
 
-onMounted(() => loadTree({ preserveSelection: false }))
+onMounted(async () => {
+  await loadTree({ preserveSelection: false })
+  const linkedExperienceId = new URLSearchParams(window.location.search).get('experience_id')
+  if (linkedExperienceId) await selectExperience(linkedExperienceId)
+})
 
 onBeforeUnmount(() => {
   if (queryTimer) window.clearTimeout(queryTimer)

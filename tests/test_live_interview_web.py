@@ -16,6 +16,7 @@ from src.career_assistant.live_interview.contracts import ServerEvent
 from src.career_assistant.live_interview.persistence import session_payload
 from src.career_assistant.live_interview import web as live_web
 from src.career_assistant.live_interview.contracts import LiveInterviewStatus
+from src.career_assistant.live_interview.archive import LiveInterviewArchiveResult
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -277,6 +278,100 @@ def test_desktop_launch_endpoint_returns_actionable_error() -> None:
 
     assert response.status_code == 409
     assert response.json()["detail"] == "采集组件尚未安装完成"
+
+
+def test_live_interview_archive_preview_returns_only_questions() -> None:
+    app = FastAPI()
+    app.include_router(live_web.router)
+    session_id = uuid4()
+    archive_service = SimpleNamespace(
+        preview=lambda **kwargs: SimpleNamespace(
+            questions=("如何设计 Agent？", "如何处理重试？"),
+            started_at=_record().created_at,
+            ended_at=_record().created_at,
+            question_count=2,
+            question_preview=("如何设计 Agent？", "如何处理重试？"),
+        )
+    )
+
+    with (
+        patch.object(live_web, "get_live_archive_service", return_value=archive_service),
+        TestClient(app) as client,
+    ):
+        response = client.post(
+            "/api/career/live-interviews/archive/preview",
+            json={"session_ids": [str(session_id)]},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["question_count"] == 2
+    assert response.json()["question_preview"] == ["如何设计 Agent？", "如何处理重试？"]
+    assert "answer" not in str(response.json()).lower()
+    assert "audio" not in str(response.json()).lower()
+
+
+def test_live_interview_archive_endpoint_returns_saved_experience() -> None:
+    app = FastAPI()
+    app.include_router(live_web.router)
+    session_id = uuid4()
+    experience_id = uuid4()
+    now = _record().created_at
+    archive_service = SimpleNamespace(
+        archive=lambda **kwargs: LiveInterviewArchiveResult(
+            experience=SimpleNamespace(
+                id=experience_id,
+                company_name="字节跳动",
+                role_name="AI Agent 开发工程师",
+                job_name="AI Agent 开发工程师 · 2026-08-24",
+                interview_date=now.date(),
+            ),
+            questions=("如何设计 Agent？",),
+            started_at=now,
+            ended_at=now,
+        )
+    )
+
+    with (
+        patch.object(live_web, "get_live_archive_service", return_value=archive_service),
+        TestClient(app) as client,
+    ):
+        response = client.post(
+            "/api/career/live-interviews/archive",
+            json={
+                "session_ids": [str(session_id)],
+                "company_name": "字节跳动",
+                "role_name": "AI Agent 开发工程师",
+                "interview_date": "2026-08-24",
+            },
+        )
+
+    assert response.status_code == 201
+    assert response.json()["experience"]["id"] == str(experience_id)
+    assert response.json()["question_count"] == 1
+    assert response.json()["question_preview"] == ["如何设计 Agent？"]
+
+
+def test_live_interview_archive_endpoint_maps_empty_questions_to_422() -> None:
+    app = FastAPI()
+    app.include_router(live_web.router)
+    archive_service = SimpleNamespace(archive=lambda **kwargs: (_ for _ in ()).throw(ValueError("本场未识别到可归档的问题")))
+
+    with (
+        patch.object(live_web, "get_live_archive_service", return_value=archive_service),
+        TestClient(app) as client,
+    ):
+        response = client.post(
+            "/api/career/live-interviews/archive",
+            json={
+                "session_ids": [str(uuid4())],
+                "company_name": "示例公司",
+                "role_name": "后端开发",
+                "interview_date": "2026-08-24",
+            },
+        )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "本场未识别到可归档的问题"
 
 
 def test_websocket_accepts_ping_and_ends_cleanly_in_local_auth_mode() -> None:

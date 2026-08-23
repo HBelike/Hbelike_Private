@@ -1,14 +1,59 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 
 import {
   advanceSetupProgress,
+  buildArchivePreview,
+  defaultInterviewDate,
   estimateAsrCost,
   formatDuration,
   isNearScrollEnd,
   isInterviewMasterPath,
   pickInitialAnswerModel
 } from './browser-live-interview/view.js'
+
+const interviewMasterPage = readFileSync(
+  new URL('./components/BrowserInterviewMasterPage.vue', import.meta.url),
+  'utf8'
+)
+const interviewLibraryPage = readFileSync(
+  new URL('./components/InterviewLibraryPage.vue', import.meta.url),
+  'utf8'
+)
+
+test('ending an interview exposes the optional archive dialog contract', () => {
+  for (const copy of ['保存本次面经？', '公司名称', '面试职位', '面试日期', '本次不保存', '保存到面经库']) {
+    assert.match(interviewMasterPage, new RegExp(copy))
+  }
+  assert.ok(
+    interviewMasterPage.indexOf('await currentCapture?.stop()') < interviewMasterPage.indexOf('await openArchiveDialog()'),
+    '声音采集必须先停止，之后才能打开归档弹窗'
+  )
+})
+
+test('saved archive links can open the matching interview library entry', () => {
+  assert.match(interviewMasterPage, /\/interviews\?experience_id=/)
+  assert.match(interviewLibraryPage, /new URLSearchParams\(window\.location\.search\)\.get\('experience_id'\)/)
+})
+
+test('archive preview uses complete server count and only shows five questions', () => {
+  const preview = buildArchivePreview({
+    question_count: 8,
+    question_preview: ['问题1', '问题2', '问题3', '问题4', '问题5', '问题6'],
+    started_at: '2026-08-24T06:30:00Z'
+  })
+
+  assert.equal(preview.questionCount, 8)
+  assert.deepEqual(preview.questions, ['问题1', '问题2', '问题3', '问题4', '问题5'])
+  assert.equal(preview.remainingCount, 3)
+  assert.equal(preview.interviewDate, '2026-08-24')
+})
+
+test('archive date falls back to the local current date', () => {
+  assert.equal(defaultInterviewDate('2026-08-24T06:30:00Z'), '2026-08-24')
+  assert.match(defaultInterviewDate('', new Date(2026, 7, 25, 9, 0, 0)), /^2026-08-25$/)
+})
 
 test('transcript list only follows when the reader stays near the latest message', () => {
   assert.equal(isNearScrollEnd({ scrollHeight: 1000, scrollTop: 650, clientHeight: 320 }), true)

@@ -8,6 +8,7 @@ import { LiveInterviewSocket } from '../browser-live-interview/socket.js'
 import {
   advanceSetupProgress,
   answerPreviewLines,
+  buildArchivePreview,
   estimateAsrCost,
   formatDuration,
   isNearScrollEnd,
@@ -36,6 +37,15 @@ const latencySamples = ref([])
 const transcriptList = ref(null)
 const followLatestTranscripts = ref(true)
 const unseenTranscriptCount = ref(0)
+const archiveDialogOpen = ref(false)
+const archiveLoading = ref(false)
+const archiveSaving = ref(false)
+const archiveStatus = ref('idle')
+const archiveError = ref('')
+const archivePreviewFailed = ref(false)
+const archivedExperienceId = ref('')
+const archivePreview = ref(buildArchivePreview())
+const archiveForm = ref({ companyName: '', roleName: '', interviewDate: '' })
 
 let capture = null
 let liveSocket = null
@@ -54,7 +64,7 @@ const canStart = computed(() => (
   && asrReady.value
   && consentAccepted.value
   && !setupLoading.value
-  && ['preparing', 'paused', 'ended'].includes(phase.value)
+  && ['preparing', 'paused'].includes(phase.value)
 ))
 const activeTrackCount = computed(() => (
   state.value.activeChannels.includes('candidate') || (phase.value === 'starting' && candidateEnabled.value) ? 2 : 1
@@ -79,6 +89,14 @@ const setupProgressLabel = computed(() => {
   if (setupProgress.value >= 24) return '正在读取模型配置'
   return '正在检查 Chrome 能力'
 })
+const canSaveArchive = computed(() => (
+  !archiveLoading.value
+  && !archiveSaving.value
+  && Boolean(archiveForm.value.companyName.trim())
+  && Boolean(archiveForm.value.roleName.trim())
+  && Boolean(archiveForm.value.interviewDate)
+  && (archivePreview.value.questionCount > 0 || archivePreviewFailed.value)
+))
 
 async function requestJson(url, options = {}) {
   const response = await fetch(url, {
@@ -254,6 +272,82 @@ async function endInterview(reason = '本场面试已结束。') {
   if (timer) window.clearInterval(timer)
   timer = null
   closePip()
+  await openArchiveDialog()
+}
+
+async function openArchiveDialog() {
+  archiveDialogOpen.value = true
+  archiveLoading.value = true
+  archiveSaving.value = false
+  archiveStatus.value = 'idle'
+  archiveError.value = ''
+  archivePreviewFailed.value = false
+  archivedExperienceId.value = ''
+  archivePreview.value = buildArchivePreview({}, completedHistory.value)
+  archiveForm.value = {
+    companyName: '',
+    roleName: '',
+    interviewDate: archivePreview.value.interviewDate
+  }
+  if (!sessionIds.value.length) {
+    archiveLoading.value = false
+    archiveError.value = '本场没有可归档的实时面试会话。'
+    return
+  }
+  try {
+    const payload = await requestJson('/api/career/live-interviews/archive/preview', {
+      method: 'POST',
+      body: JSON.stringify({ session_ids: sessionIds.value })
+    })
+    archivePreview.value = buildArchivePreview(payload, completedHistory.value)
+    archiveForm.value.interviewDate = archivePreview.value.interviewDate
+  } catch (error) {
+    archivePreviewFailed.value = true
+    archiveError.value = `${error instanceof Error ? error.message : '无法读取完整问题预览'}；保存时会重新读取本场完整会话。`
+  } finally {
+    archiveLoading.value = false
+  }
+}
+
+function discardArchive() {
+  if (archiveSaving.value) return
+  archiveDialogOpen.value = false
+  archiveStatus.value = 'discarded'
+  archiveError.value = ''
+}
+
+async function saveArchive() {
+  if (!canSaveArchive.value) {
+    if (!archiveForm.value.companyName.trim() || !archiveForm.value.roleName.trim() || !archiveForm.value.interviewDate) {
+      archiveError.value = '请填写公司名称、面试职位和面试日期。'
+    }
+    return
+  }
+  archiveSaving.value = true
+  archiveError.value = ''
+  try {
+    const payload = await requestJson('/api/career/live-interviews/archive', {
+      method: 'POST',
+      body: JSON.stringify({
+        session_ids: sessionIds.value,
+        company_name: archiveForm.value.companyName.trim(),
+        role_name: archiveForm.value.roleName.trim(),
+        interview_date: archiveForm.value.interviewDate
+      })
+    })
+    archiveStatus.value = 'saved'
+    archivedExperienceId.value = payload.experience?.id || ''
+    archivePreview.value = buildArchivePreview(payload, archivePreview.value.questions)
+  } catch (error) {
+    archiveError.value = error instanceof Error ? error.message : '保存面经失败，请稍后重试。'
+  } finally {
+    archiveSaving.value = false
+  }
+}
+
+function viewArchivedExperience() {
+  if (!archivedExperienceId.value) return
+  window.location.assign(`/interviews?experience_id=${encodeURIComponent(archivedExperienceId.value)}`)
 }
 
 function answerNow() {
@@ -455,9 +549,10 @@ onBeforeUnmount(() => {
         </section>
 
         <div class="rail-actions">
-          <button v-if="phase === 'paused' || phase === 'ended'" type="button" :disabled="!canStart" @click="startInterview">{{ actionLabel }}</button>
-          <button v-else type="button" @click="pauseCapture('已暂停采集，结果仍保留在当前窗口。')">暂停采集</button>
-          <button class="danger" type="button" @click="endInterview()">结束面试</button>
+          <button v-if="phase === 'paused'" type="button" :disabled="!canStart" @click="startInterview">{{ actionLabel }}</button>
+          <button v-else-if="phase !== 'ended'" type="button" @click="pauseCapture('已暂停采集，结果仍保留在当前窗口。')">暂停采集</button>
+          <button v-if="phase !== 'ended'" class="danger" type="button" @click="endInterview()">结束面试</button>
+          <button v-else type="button" @click="goBack">返回求职助手</button>
         </div>
       </aside>
 
@@ -506,6 +601,77 @@ onBeforeUnmount(() => {
       </section>
     </section>
 
+    <Teleport to="body">
+      <div
+        v-if="archiveDialogOpen"
+        class="archive-backdrop"
+        role="presentation"
+        @click.self="discardArchive"
+      >
+        <section class="archive-dialog" role="dialog" aria-modal="true" aria-labelledby="archive-dialog-title">
+          <header class="archive-dialog-header">
+            <div>
+              <span class="archive-mark" aria-hidden="true">问</span>
+              <div>
+                <h2 id="archive-dialog-title">保存本次面经？</h2>
+                <p v-if="archiveLoading">正在读取本场完整问题…</p>
+                <p v-else-if="archivePreview.questionCount">本场识别到 {{ archivePreview.questionCount }} 个问题，保存后可在面经库检索。</p>
+                <p v-else>本场未识别到可归档的问题。</p>
+              </div>
+            </div>
+            <button type="button" aria-label="本次不保存并关闭" :disabled="archiveSaving" @click="discardArchive">×</button>
+          </header>
+
+          <div v-if="archiveStatus === 'saved'" class="archive-success" role="status">
+            <span aria-hidden="true">✓</span>
+            <h3>已保存到面经库</h3>
+            <p>{{ archivePreview.questionCount }} 个问题已完成归并和检索索引。</p>
+            <div>
+              <button type="button" class="archive-secondary" @click="goBack">返回求职助手</button>
+              <button type="button" class="archive-primary" @click="viewArchivedExperience">查看面经</button>
+            </div>
+          </div>
+
+          <form v-else class="archive-form" @submit.prevent="saveArchive">
+            <div class="archive-fields">
+              <label>
+                <span>公司名称 <em>*</em></span>
+                <input v-model="archiveForm.companyName" type="text" maxlength="120" autocomplete="organization" placeholder="请输入公司名称" />
+              </label>
+              <label>
+                <span>面试职位 <em>*</em></span>
+                <input v-model="archiveForm.roleName" type="text" maxlength="160" placeholder="请输入职位名称" />
+              </label>
+              <label class="archive-date-field">
+                <span>面试日期 <em>*</em></span>
+                <input v-model="archiveForm.interviewDate" type="date" />
+              </label>
+            </div>
+
+            <section class="archive-question-preview" aria-live="polite">
+              <header>
+                <strong>问题预览</strong>
+                <span>共 {{ archivePreview.questionCount }} 题</span>
+              </header>
+              <ol v-if="archivePreview.questions.length">
+                <li v-for="question in archivePreview.questions" :key="question">{{ question }}</li>
+              </ol>
+              <p v-else>{{ archiveLoading ? '正在整理问题清单…' : '没有可展示的问题。' }}</p>
+              <small v-if="archivePreview.remainingCount">其余 {{ archivePreview.remainingCount }} 个问题将在保存后写入面经。</small>
+            </section>
+
+            <p v-if="archiveError" class="archive-error" role="alert">{{ archiveError }}</p>
+            <footer>
+              <button type="button" class="archive-secondary" :disabled="archiveSaving" @click="discardArchive">本次不保存</button>
+              <button type="submit" class="archive-primary" :disabled="!canSaveArchive">
+                {{ archiveSaving ? '正在整理并建立索引…' : '保存到面经库' }}
+              </button>
+            </footer>
+          </form>
+        </section>
+      </div>
+    </Teleport>
+
     <Teleport v-if="pipRoot" :to="pipRoot">
       <main class="answer-pip-card">
         <header><span class="status-dot"></span><strong>面试大师</strong><small>{{ phaseLabel }}</small></header>
@@ -551,8 +717,16 @@ onBeforeUnmount(() => {
 .current-question-card { padding: 26px 28px; border-radius: 18px; background: #176fe5; color: white; box-shadow: 0 18px 38px rgba(32,92,172,.19); }.question-meta { display: flex; justify-content: space-between; color: #c9e0ff; font-size: 12px; font-weight: 700; }.question-meta em { font-style: normal; }.current-question-card h1 { margin: 18px 0 24px; max-width: 1100px; font-size: clamp(25px, 3vw, 40px); line-height: 1.35; letter-spacing: -.035em; }.question-actions { display: flex; gap: 8px; }.question-actions button { padding: 9px 14px; border: 1px solid rgba(255,255,255,.35); border-radius: 9px; background: rgba(255,255,255,.12); color: white; cursor: pointer; }.question-actions button:disabled { opacity: .45; cursor: not-allowed; }
 .answer-grid { margin-top: 18px; display: grid; grid-template-columns: minmax(280px, .72fr) minmax(460px, 1.45fr); gap: 18px; }.quick-answer-card, .full-answer-card, .history-section { border: 1px solid #d9e3f1; border-radius: 16px; background: white; box-shadow: 0 9px 24px rgba(34,67,107,.06); }.quick-answer-card, .full-answer-card { min-height: 330px; padding: 22px; }.quick-answer-card header, .full-answer-card header { display: flex; align-items: center; justify-content: space-between; }.quick-answer-card header span, .full-answer-card header span { font-weight: 800; }.quick-answer-card small, .full-answer-card small { color: #7a8ca4; }.quick-answer-card ol { padding-left: 25px; }.quick-answer-card li { margin: 16px 0; padding-left: 5px; line-height: 1.65; }.full-answer-card header > div { display: flex; gap: 10px; align-items: baseline; }.answer-text { margin-top: 20px; color: #263b59; font-size: 16px; line-height: 1.86; white-space: pre-wrap; }.typing-dot { width: 9px; height: 9px; border-radius: 50%; background: #176fe5; animation: breathe 1s ease-in-out infinite; }
 .history-section { margin-top: 18px; padding: 22px; }.history-section > header span { color: #7a8ca4; font-size: 12px; }.history-list { margin-top: 12px; display: grid; gap: 8px; }.history-list details { padding: 14px 16px; border-radius: 11px; background: #f4f7fb; }.history-list summary { display: flex; gap: 12px; cursor: pointer; font-weight: 700; }.history-list summary span { color: #176fe5; }.history-list p { margin: 14px 0 2px; color: #435773; line-height: 1.75; white-space: pre-wrap; }.empty-copy { color: #8292a8; line-height: 1.7; }
+.archive-backdrop { position: fixed; z-index: 80; inset: 0; display: grid; place-items: center; padding: 24px; background: rgba(7, 24, 52, .58); backdrop-filter: blur(5px); }
+.archive-dialog { width: min(640px, 100%); max-height: calc(100vh - 48px); overflow-y: auto; border: 1px solid rgba(190, 211, 238, .85); border-radius: 22px; background: #fff; color: #10213e; box-shadow: 0 32px 90px rgba(5, 28, 66, .28); font-family: "Microsoft YaHei", "PingFang SC", sans-serif; }
+.archive-dialog-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; border-bottom: 1px solid #e5ecf5; padding: 24px 26px 20px; }.archive-dialog-header > div { display: flex; align-items: flex-start; gap: 14px; }.archive-mark { display: grid; width: 42px; height: 42px; flex: none; place-items: center; border-radius: 13px; background: #176fe5; color: white; font-size: 17px; font-weight: 900; box-shadow: 0 10px 20px rgba(23,111,229,.2); }.archive-dialog-header h2 { margin: 1px 0 7px; font-size: 23px; letter-spacing: -.03em; }.archive-dialog-header p { margin: 0; color: #6b7e99; font-size: 13px; line-height: 1.55; }.archive-dialog-header > button { width: 34px; height: 34px; flex: none; border: 0; border-radius: 50%; background: #f1f5fa; color: #60728b; cursor: pointer; font-size: 22px; line-height: 1; }.archive-dialog-header > button:disabled { opacity: .45; cursor: not-allowed; }
+.archive-form { display: grid; gap: 18px; padding: 22px 26px 26px; }.archive-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }.archive-fields label { display: grid; gap: 7px; color: #425570; font-size: 12px; font-weight: 800; }.archive-fields em { color: #d64c4c; font-style: normal; }.archive-fields input { width: 100%; min-height: 43px; border: 1px solid #d5e0ee; border-radius: 10px; outline: none; background: #fbfdff; color: #132746; padding: 9px 11px; font: inherit; font-size: 14px; }.archive-fields input:focus { border-color: #3986ed; box-shadow: 0 0 0 3px rgba(23,111,229,.1); }.archive-date-field { grid-column: 1 / -1; max-width: calc(50% - 7px); }
+.archive-question-preview { border: 1px solid #dce7f4; border-radius: 15px; background: #f5f9ff; padding: 16px 18px; }.archive-question-preview > header { display: flex; align-items: center; justify-content: space-between; }.archive-question-preview header strong { font-size: 14px; }.archive-question-preview header span { color: #176fe5; font-size: 12px; font-weight: 800; }.archive-question-preview ol { display: grid; gap: 9px; margin: 14px 0 0; padding-left: 24px; color: #334966; font-size: 13px; line-height: 1.55; }.archive-question-preview p { margin: 14px 0 0; color: #7b8da5; font-size: 13px; }.archive-question-preview small { display: block; margin-top: 12px; color: #7085a1; }.archive-error { margin: 0; border-left: 3px solid #d64c4c; border-radius: 0 9px 9px 0; background: #fff1f1; color: #a43737; padding: 10px 12px; font-size: 13px; line-height: 1.55; }
+.archive-form footer, .archive-success > div { display: flex; justify-content: flex-end; gap: 10px; }.archive-form button, .archive-success button { min-height: 42px; border-radius: 10px; padding: 0 17px; font: inherit; font-size: 13px; font-weight: 800; cursor: pointer; }.archive-secondary { border: 1px solid #d4dfec; background: #fff; color: #536782; }.archive-primary { border: 1px solid #176fe5; background: #176fe5; color: white; box-shadow: 0 10px 20px rgba(23,111,229,.16); }.archive-primary:disabled { border-color: #acbcd1; background: #acbcd1; box-shadow: none; cursor: not-allowed; }
+.archive-success { display: grid; place-items: center; padding: 42px 28px 30px; text-align: center; }.archive-success > span { display: grid; width: 58px; height: 58px; place-items: center; border-radius: 50%; background: #e3f7ee; color: #19845f; font-size: 26px; font-weight: 900; }.archive-success h3 { margin: 17px 0 7px; font-size: 21px; }.archive-success p { margin: 0 0 25px; color: #6b7e99; }.archive-success > div { justify-content: center; }
 .answer-pip-card { min-height: 100vh; padding: 18px; color: #10213e; background: #edf3fb; font-family: "Microsoft YaHei", sans-serif; }.answer-pip-card > header { display: flex; align-items: center; gap: 9px; }.answer-pip-card header small { margin-left: auto; color: #61748f; }.answer-pip-card section { margin-top: 14px; padding: 18px; border-radius: 14px; background: white; }.answer-pip-card section > span { color: #176fe5; font-size: 11px; font-weight: 800; }.answer-pip-card h1 { margin: 10px 0 0; font-size: 21px; line-height: 1.45; }.answer-pip-card .pip-answer { min-height: 360px; }.answer-pip-card p { white-space: pre-wrap; line-height: 1.75; }
 @keyframes wave { 0%,100% { transform: scaleY(.55); } 50% { transform: scaleY(1); } } @keyframes breathe { 50% { opacity: .25; transform: scale(1.45); } } @keyframes progress-glint { 65%,100% { transform: translateX(100%); } }
 @media (prefers-reduced-motion: reduce) { .brand-wave i, .question-pulse span, .typing-dot, .setup-progress-track > span::after { animation: none; } }
 @media (max-width: 1050px) { .preparation-layout { grid-template-columns: 1fr; }.preparation-thesis { min-height: 48vh; }.live-layout { grid-template-columns: 280px 1fr; }.answer-grid { grid-template-columns: 1fr; } }
+@media (max-width: 680px) { .archive-backdrop { align-items: end; padding: 0; }.archive-dialog { max-height: 92dvh; border-radius: 22px 22px 0 0; }.archive-fields { grid-template-columns: 1fr; }.archive-date-field { grid-column: auto; max-width: none; }.archive-form footer { flex-direction: column-reverse; }.archive-form footer button { width: 100%; min-height: 46px; } }
 </style>

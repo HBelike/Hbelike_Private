@@ -1242,6 +1242,47 @@ class InterviewLibraryRepository:
             ).mappings().one_or_none()
         return self._to_experience(row) if row is not None else None
 
+    def get_experience_by_company_and_job_name(
+        self,
+        organization_id: UUID,
+        company_name: str,
+        job_name: str,
+    ) -> InterviewExperienceRecord | None:
+        """按面经树的唯一业务键读取正文，供追加合并而不是覆盖使用。"""
+
+        normalized_company_name = self._normalize_key(
+            self._normalize_text(company_name, "公司名称", 120)
+        )
+        normalized_job_name = self._normalize_text(job_name, "面经名称", 220)
+        with self._database.transaction() as connection:
+            row = connection.execute(
+                text(
+                    """
+                    SELECT experience.id, experience.organization_id, experience.company_id,
+                           company.display_name AS company_name, experience.job_name,
+                           experience.role_name, experience.normalized_role_name,
+                           experience.interview_date, experience.source_type,
+                           experience.source_platform, experience.source_url,
+                           experience.source_content_hash, experience.markdown_content,
+                           experience.normalized_markdown, experience.summary_text,
+                           experience.tags, experience.status, experience.chunking_version,
+                           experience.indexed_at, experience.created_at, experience.updated_at
+                    FROM career_assistant.interview_experiences AS experience
+                    INNER JOIN career_assistant.interview_companies AS company
+                        ON company.id = experience.company_id
+                    WHERE experience.organization_id = :organization_id
+                      AND company.normalized_name = :normalized_company_name
+                      AND experience.job_name = :job_name
+                    """
+                ),
+                {
+                    "organization_id": organization_id,
+                    "normalized_company_name": normalized_company_name,
+                    "job_name": normalized_job_name,
+                },
+            ).mappings().one_or_none()
+        return self._to_experience(row) if row is not None else None
+
     def search_experiences(
         self,
         organization_id: UUID,
