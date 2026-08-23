@@ -1,0 +1,29 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+
+import {
+  estimateAsrCost,
+  formatDuration,
+  isInterviewMasterPath,
+  pickInitialAnswerModel
+} from './browser-live-interview/view.js'
+
+test('interview master view recognizes its single-task route', () => {
+  assert.equal(isInterviewMasterPath('/career/interview-master'), true)
+  assert.equal(isInterviewMasterPath('/career'), false)
+})
+
+test('interview master view formats duration and Qwen estimate', () => {
+  assert.equal(formatDuration(125), '02:05')
+  assert.equal(estimateAsrCost(3600, 1), 1.188)
+  assert.equal(estimateAsrCost(3600, 2), 2.376)
+})
+
+test('interview master view inherits a ready answer model only', () => {
+  const models = [
+    { id: 'blocked', readiness: 'blocked' },
+    { id: 'ready-1', readiness: 'ready' }
+  ]
+  assert.equal(pickInitialAnswerModel(models, 'blocked'), 'ready-1')
+  assert.equal(pickInitialAnswerModel(models, 'ready-1'), 'ready-1')
+})

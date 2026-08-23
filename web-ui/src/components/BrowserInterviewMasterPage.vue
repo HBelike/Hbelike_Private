@@ -1,0 +1,465 @@
+<script setup>
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+
+import { BrowserAudioCapture, detectBrowserInterviewSupport } from '../browser-live-interview/capture.js'
+import { openAnswerPictureInPicture, supportsAnswerPictureInPicture } from '../browser-live-interview/picture-in-picture.js'
+import { createInterviewState, reduceInterviewEvent } from '../browser-live-interview/session-state.js'
+import { LiveInterviewSocket } from '../browser-live-interview/socket.js'
+import {
+  answerPreviewLines,
+  estimateAsrCost,
+  formatDuration,
+  pickInitialAnswerModel
+} from '../browser-live-interview/view.js'
+
+const setupLoading = ref(true)
+const setupOptions = ref(null)
+const selectedAnswerModelId = ref('')
+const candidateEnabled = ref(false)
+const consentAccepted = ref(false)
+const support = ref({ supported: false, missing: ['正在检查 Chrome 能力'] })
+const phase = ref('preparing')
+const message = ref('')
+const errorMessage = ref('')
+const connectionState = ref('idle')
+const state = ref(createInterviewState())
+const elapsedSeconds = ref(0)
+const allTranscripts = ref([])
+const completedHistory = ref([])
+const sessionIds = ref([])
+const pipRoot = ref(null)
+const pipWindow = ref(null)
+const latencySamples = ref([])
+
+let capture = null
+let liveSocket = null
+let timer = null
+let startedAt = 0
+const questionDetectedAt = new Map()
+const answeredVersions = new Set()
+
+const readyAnswerModels = computed(() => (
+  setupOptions.value?.answer_models?.filter((item) => item.readiness === 'ready') || []
+))
+const asrReady = computed(() => setupOptions.value?.environment_asr?.readiness === 'ready')
+const canStart = computed(() => (
+  support.value.supported
+  && asrReady.value
+  && consentAccepted.value
+  && !setupLoading.value
+  && ['preparing', 'paused', 'ended'].includes(phase.value)
+))
+const activeTrackCount = computed(() => (
+  state.value.activeChannels.includes('candidate') || (phase.value === 'starting' && candidateEnabled.value) ? 2 : 1
+))
+const costEstimate = computed(() => estimateAsrCost(elapsedSeconds.value, activeTrackCount.value).toFixed(4))
+const durationText = computed(() => formatDuration(elapsedSeconds.value))
+const quickLines = computed(() => answerPreviewLines(state.value.answerText, 5))
+const latestTranscripts = computed(() => allTranscripts.value.slice(-18))
+const interviewerPartial = computed(() => state.value.partialTranscripts.interviewer || '')
+const candidatePartial = computed(() => state.value.partialTranscripts.candidate || '')
+const phaseLabel = computed(() => ({
+  preparing: '准备采集',
+  starting: '正在连接',
+  active: connectionState.value === 'ready' ? '正在聆听' : '正在建立实时连接',
+  paused: '采集已暂停',
+  ended: '本场已结束'
+}[phase.value] || '准备采集'))
+const actionLabel = computed(() => phase.value === 'paused' ? '重新选择面试标签页' : '开始面试')
+const canOpenPip = computed(() => phase.value === 'active' && supportsAnswerPictureInPicture())
+
+async function requestJson(url, options = {}) {
+  const response = await fetch(url, {
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+    ...options
+  })
+  const payload = await response.json().catch(() => ({}))
+  if (!response.ok) throw new Error(payload.detail || payload.message || `请求失败（${response.status}）`)
+  return payload
+}
+
+async function loadSetupOptions() {
+  setupLoading.value = true
+  errorMessage.value = ''
+  try {
+    setupOptions.value = await requestJson('/api/career/live-interviews/setup-options')
+    const preferred = new URLSearchParams(window.location.search).get('answer_model_profile_id') || ''
+    selectedAnswerModelId.value = pickInitialAnswerModel(setupOptions.value.answer_models, preferred)
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '无法读取模型配置'
+  } finally {
+    setupLoading.value = false
+  }
+}
+
+function handleServerEvent(event) {
+  if (event.type === 'question.detected') questionDetectedAt.set(Number(event.question_version), performance.now())
+  if (event.type === 'answer.delta' && Number(event.delta_index) === 1) {
+    const detectedAt = questionDetectedAt.get(Number(event.question_version))
+    if (detectedAt) latencySamples.value.push(Math.max(0, performance.now() - detectedAt))
+  }
+  if (event.type === 'transcript.final') {
+    allTranscripts.value.push({
+      sessionId: sessionIds.value.at(-1),
+      channel: event.channel,
+      text: event.text,
+      sequence: event.sequence
+    })
+    allTranscripts.value = allTranscripts.value.slice(-100)
+  }
+  state.value = reduceInterviewEvent(state.value, event)
+  if (event.type === 'answer.completed') {
+    const key = `${sessionIds.value.at(-1)}:${event.question_version}:${event.attempt}`
+    if (!answeredVersions.has(key)) {
+      answeredVersions.add(key)
+      completedHistory.value.push({
+        key,
+        question: state.value.currentQuestion,
+        answer: state.value.answerText,
+        intent: state.value.questionIntent
+      })
+      completedHistory.value = completedHistory.value.slice(-50)
+    }
+  }
+  if (event.type === 'error') errorMessage.value = event.message || '实时处理出现错误'
+}
+
+function handleConnectionState(nextState) {
+  connectionState.value = nextState
+  if (nextState === 'backpressure') message.value = '网络发送稍慢，已跳过一小段音频以保持实时性。'
+  if (nextState === 'disconnected' && phase.value === 'active') void pauseCapture('实时连接已中断，请重新选择面试标签页。')
+}
+
+async function startInterview() {
+  if (!canStart.value || phase.value === 'starting') return
+  phase.value = 'starting'
+  errorMessage.value = ''
+  message.value = ''
+  state.value = createInterviewState()
+  connectionState.value = 'connecting'
+  capture = new BrowserAudioCapture()
+  try {
+    const captureResult = await capture.start({
+      candidateEnabled: candidateEnabled.value,
+      onFrame: ({ channel, sequence, pcm }) => liveSocket?.sendAudio(channel, sequence, pcm),
+      onEnded: () => void pauseCapture('标签页停止共享，回答和历史已保留。')
+    })
+    if (captureResult.warning) message.value = captureResult.warning
+    candidateEnabled.value = captureResult.candidateEnabled
+    const created = await requestJson('/api/career/live-interviews/sessions', {
+      method: 'POST',
+      body: JSON.stringify({
+        asr_model_profile_id: null,
+        answer_model_profile_id: selectedAnswerModelId.value || null,
+        client_kind: 'browser',
+        candidate_audio_enabled: captureResult.candidateEnabled
+      })
+    })
+    const sessionId = created.session.id
+    sessionIds.value.push(sessionId)
+    liveSocket = new LiveInterviewSocket({
+      sessionId,
+      onEvent: handleServerEvent,
+      onStateChange: handleConnectionState
+    })
+    liveSocket.connect()
+    phase.value = 'active'
+    startTimer()
+  } catch (error) {
+    await capture?.stop()
+    capture = null
+    phase.value = sessionIds.value.length ? 'paused' : 'preparing'
+    connectionState.value = 'idle'
+    errorMessage.value = error instanceof Error ? error.message : '无法开始浏览器面试'
+  }
+}
+
+function startTimer() {
+  if (timer) return
+  startedAt = performance.now() - elapsedSeconds.value * 1000
+  timer = window.setInterval(() => {
+    elapsedSeconds.value = Math.floor((performance.now() - startedAt) / 1000)
+    if (elapsedSeconds.value === 115 * 60) message.value = '本场将在 5 分钟后自动结束，请留意剩余时间。'
+    if (elapsedSeconds.value >= 120 * 60) void endInterview('已达到单场 120 分钟上限。')
+  }, 1000)
+}
+
+async function pauseCapture(reason) {
+  if (!['active', 'starting'].includes(phase.value)) return
+  phase.value = 'paused'
+  message.value = reason
+  const socket = liveSocket
+  liveSocket = null
+  socket?.end()
+  const currentCapture = capture
+  capture = null
+  await currentCapture?.stop()
+}
+
+async function endInterview(reason = '本场面试已结束。') {
+  if (phase.value === 'ended') return
+  phase.value = 'ended'
+  message.value = reason
+  const socket = liveSocket
+  liveSocket = null
+  socket?.end()
+  const currentCapture = capture
+  capture = null
+  await currentCapture?.stop()
+  if (timer) window.clearInterval(timer)
+  timer = null
+  closePip()
+}
+
+function answerNow() {
+  const latest = [...allTranscripts.value].reverse().find((item) => item.channel === 'interviewer')
+  if (!latest) {
+    errorMessage.value = '尚未收到可用于回答的面试官语音。'
+    return
+  }
+  errorMessage.value = ''
+  liveSocket?.requestAnswer('manual', latest.text)
+}
+
+function regenerateAnswer() {
+  if (!state.value.currentQuestion) return
+  errorMessage.value = ''
+  liveSocket?.requestAnswer('regenerate')
+}
+
+async function openPip() {
+  if (!canOpenPip.value) {
+    message.value = '当前 Chrome 不支持置顶小窗，请继续使用本独立窗口。'
+    return
+  }
+  closePip()
+  try {
+    const result = await openAnswerPictureInPicture({ onClosed: () => closePip(false) })
+    pipWindow.value = result.window
+    pipRoot.value = result.root
+    await nextTick()
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '无法打开置顶小窗'
+  }
+}
+
+function closePip(closeWindow = true) {
+  const activeWindow = pipWindow.value
+  pipRoot.value = null
+  pipWindow.value = null
+  if (closeWindow && activeWindow && !activeWindow.closed) activeWindow.close()
+}
+
+function goBack() {
+  window.location.assign('/career')
+}
+
+onMounted(() => {
+  support.value = detectBrowserInterviewSupport()
+  void loadSetupOptions()
+})
+
+onBeforeUnmount(() => {
+  if (timer) window.clearInterval(timer)
+  timer = null
+  liveSocket?.close()
+  void capture?.stop()
+  closePip()
+})
+</script>
+
+<template>
+  <main class="interview-master-shell">
+    <header class="interview-master-header">
+      <button class="back-button" type="button" @click="goBack">← 返回求职助手</button>
+      <div class="brand-mark" aria-label="面试大师">
+        <span class="brand-wave"><i></i><i></i><i></i><i></i></span>
+        <strong>面试大师</strong>
+      </div>
+      <div class="session-metrics">
+        <span>{{ durationText }}</span>
+        <span>预计 ¥{{ costEstimate }}</span>
+      </div>
+    </header>
+
+    <section v-if="phase === 'preparing' && !sessionIds.length" class="preparation-layout">
+      <article class="preparation-thesis">
+        <div class="pulse-orbit" aria-hidden="true"><span></span><span></span><span></span></div>
+        <p class="section-label">Chrome 标签页实时辅助</p>
+        <h1>听清问题，<br />把回答组织成能开口的话。</h1>
+        <p>你选择面试标签页后，Qwen 负责中英混合转写，当前文本模型把面试官的问题实时整理为中文回答。页面不读取简历、岗位或面经。</p>
+        <div class="capture-boundary">
+          <strong>本场只处理你主动授权的声音</strong>
+          <span>不保存原始音频、屏幕画面、转写半句或你的麦克风文本。</span>
+        </div>
+      </article>
+
+      <article class="preparation-panel">
+        <div>
+          <p class="section-label">开始准备</p>
+          <h2>检查模型与声音</h2>
+        </div>
+
+        <div v-if="setupLoading" class="setup-loading">正在读取模型配置…</div>
+        <template v-else>
+          <label class="field-group">
+            <span>实时转写</span>
+            <strong :class="{ blocked: !asrReady }">{{ setupOptions?.environment_asr?.display_name || '未配置' }}</strong>
+            <small>{{ setupOptions?.environment_asr?.model_id || setupOptions?.environment_asr?.blocked_reason }}</small>
+          </label>
+
+          <label class="field-group">
+            <span>回答模型</span>
+            <select v-model="selectedAnswerModelId">
+              <option value="">免费额度优先</option>
+              <option v-for="model in readyAnswerModels" :key="model.id" :value="model.id">
+                {{ model.display_name }} · {{ model.model_id }}
+              </option>
+            </select>
+          </label>
+
+          <label class="toggle-row">
+            <span><strong>同时理解我的回答</strong><small>默认关闭；仅用于理解后续追问，不触发答案、不保存文字。</small></span>
+            <input v-model="candidateEnabled" type="checkbox" />
+          </label>
+
+          <div class="browser-check" :class="{ ok: support.supported }">
+            <span class="status-dot"></span>
+            <div>
+              <strong>{{ support.supported ? '桌面 Chrome 能力正常' : '当前环境暂不可开始' }}</strong>
+              <small>{{ support.supported ? '点击开始后请选择正在面试的 Chrome 标签页，并勾选共享标签页音频。' : support.missing.join('；') }}</small>
+            </div>
+          </div>
+
+          <label class="consent-row">
+            <input v-model="consentAccepted" type="checkbox" />
+            <span>我已了解采集范围，并确认当前场景允许使用实时辅助。</span>
+          </label>
+        </template>
+
+        <p v-if="errorMessage" class="inline-error">{{ errorMessage }}</p>
+        <button class="primary-start" type="button" :disabled="!canStart" @click="startInterview">
+          开始面试
+        </button>
+      </article>
+    </section>
+
+    <section v-else class="live-layout">
+      <aside class="live-rail">
+        <div class="live-status" :class="phase">
+          <div class="question-pulse" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
+          <div><strong>{{ phaseLabel }}</strong><small>{{ connectionState }}</small></div>
+        </div>
+
+        <section class="rail-section">
+          <header><h2>实时转写</h2><span>{{ allTranscripts.length }}</span></header>
+          <div class="transcript-list">
+            <article v-for="(item, index) in latestTranscripts" :key="`${item.sessionId}-${item.channel}-${item.sequence}-${index}`" :class="item.channel">
+              <span>{{ item.channel === 'interviewer' ? '面试官' : '我' }}</span>
+              <p>{{ item.text }}</p>
+            </article>
+            <article v-if="interviewerPartial" class="interviewer partial"><span>识别中</span><p>{{ interviewerPartial }}</p></article>
+            <article v-if="candidatePartial" class="candidate partial"><span>我</span><p>{{ candidatePartial }}</p></article>
+            <p v-if="!latestTranscripts.length && !interviewerPartial" class="empty-copy">共享开始后，面试官的完整话语会出现在这里。</p>
+          </div>
+        </section>
+
+        <div class="rail-actions">
+          <button v-if="phase === 'paused' || phase === 'ended'" type="button" :disabled="!canStart" @click="startInterview">{{ actionLabel }}</button>
+          <button v-else type="button" @click="pauseCapture('已暂停采集，结果仍保留在当前窗口。')">暂停采集</button>
+          <button class="danger" type="button" @click="endInterview()">结束面试</button>
+        </div>
+      </aside>
+
+      <section class="answer-workspace">
+        <div v-if="message" class="notice-strip">{{ message }}</div>
+        <div v-if="errorMessage" class="notice-strip error">{{ errorMessage }}</div>
+
+        <article class="current-question-card">
+          <div class="question-meta"><span>当前问题</span><em>{{ state.questionIntent || '等待识别' }}</em></div>
+          <h1>{{ state.currentQuestion || '面试官的完整问题会显示在这里' }}</h1>
+          <div class="question-actions">
+            <button type="button" :disabled="phase !== 'active'" @click="answerNow">立即回答</button>
+            <button type="button" :disabled="!state.currentQuestion || phase !== 'active'" @click="regenerateAnswer">重新生成</button>
+            <button type="button" :disabled="!canOpenPip" @click="openPip">打开置顶小窗</button>
+          </div>
+        </article>
+
+        <div class="answer-grid">
+          <article class="quick-answer-card">
+            <header><span>先开口</span><small>约 30 秒提纲</small></header>
+            <ol v-if="quickLines.length">
+              <li v-for="line in quickLines" :key="line">{{ line }}</li>
+            </ol>
+            <p v-else class="empty-copy">识别到完整问题后，这里优先给出可以直接开口的结论和要点。</p>
+          </article>
+
+          <article class="full-answer-card">
+            <header>
+              <div><span>完整回答</span><small>{{ state.answerStatus === 'generating' ? '正在流式生成' : '统一中文' }}</small></div>
+              <i v-if="state.answerStatus === 'generating'" class="typing-dot"></i>
+            </header>
+            <div class="answer-text">{{ state.answerText || '等待面试官提出问题…' }}</div>
+          </article>
+        </div>
+
+        <section class="history-section">
+          <header><h2>本场问答</h2><span>{{ completedHistory.length }} 题</span></header>
+          <div v-if="completedHistory.length" class="history-list">
+            <details v-for="(item, index) in [...completedHistory].reverse()" :key="item.key" :open="index === 0">
+              <summary><span>Q{{ completedHistory.length - index }}</span>{{ item.question }}</summary>
+              <p>{{ item.answer }}</p>
+            </details>
+          </div>
+          <p v-else class="empty-copy">完整问题与最终回答会保留在这里；你的麦克风转写不会进入历史。</p>
+        </section>
+      </section>
+    </section>
+
+    <Teleport v-if="pipRoot" :to="pipRoot">
+      <main class="answer-pip-card">
+        <header><span class="status-dot"></span><strong>面试大师</strong><small>{{ phaseLabel }}</small></header>
+        <section><span>当前问题</span><h1>{{ state.currentQuestion || '等待问题' }}</h1></section>
+        <section class="pip-answer"><span>回答建议</span><p>{{ state.answerText || '正在聆听面试官…' }}</p></section>
+      </main>
+    </Teleport>
+  </main>
+</template>
+
+<style scoped>
+:global(body) { margin: 0; background: #edf3fb; }
+:global(*) { box-sizing: border-box; }
+.interview-master-shell { min-height: 100vh; color: #10213e; background: radial-gradient(circle at 18% 14%, rgba(43, 125, 255, .12), transparent 28%), #edf3fb; font-family: "Microsoft YaHei", "PingFang SC", sans-serif; }
+.interview-master-header { height: 68px; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; padding: 0 28px; background: rgba(255,255,255,.9); border-bottom: 1px solid #d9e3f2; backdrop-filter: blur(14px); }
+.back-button { justify-self: start; border: 0; background: transparent; color: #53657e; cursor: pointer; font-weight: 600; }
+.brand-mark { display: flex; align-items: center; gap: 10px; font-size: 18px; }
+.brand-wave { height: 22px; display: flex; align-items: end; gap: 3px; }
+.brand-wave i { width: 3px; border-radius: 3px; background: #1671e8; animation: wave 1.3s ease-in-out infinite; }
+.brand-wave i:nth-child(1) { height: 8px; }.brand-wave i:nth-child(2) { height: 18px; animation-delay: -.2s; }.brand-wave i:nth-child(3) { height: 13px; animation-delay: -.4s; }.brand-wave i:nth-child(4) { height: 21px; animation-delay: -.6s; }
+.session-metrics { justify-self: end; display: flex; gap: 8px; }.session-metrics span { padding: 7px 11px; border-radius: 999px; background: #f0f5fc; color: #51637c; font: 600 12px ui-monospace, Consolas, monospace; }
+.preparation-layout { min-height: calc(100vh - 68px); display: grid; grid-template-columns: minmax(420px, 1fr) minmax(520px, 1.15fr); }
+.preparation-thesis { position: relative; overflow: hidden; padding: clamp(64px, 8vw, 126px); display: flex; flex-direction: column; justify-content: center; background: #0b1d3d; color: white; }
+.preparation-thesis h1 { position: relative; margin: 16px 0 28px; max-width: 720px; font-family: "Microsoft YaHei UI", "PingFang SC", sans-serif; font-size: clamp(42px, 5.3vw, 82px); line-height: 1.12; letter-spacing: -.055em; }
+.preparation-thesis > p:not(.section-label) { max-width: 650px; color: #b8cae7; font-size: 17px; line-height: 1.9; }
+.section-label { color: #72aef7; font-size: 13px; font-weight: 800; letter-spacing: .12em; }
+.capture-boundary { margin-top: 64px; padding-top: 24px; max-width: 610px; display: grid; gap: 8px; border-top: 1px solid rgba(255,255,255,.18); }.capture-boundary span { color: #92a9cb; font-size: 14px; }
+.pulse-orbit { position: absolute; right: -110px; bottom: -120px; width: 440px; height: 440px; border: 1px solid rgba(59, 147, 255, .2); border-radius: 50%; }.pulse-orbit span { position: absolute; inset: 60px; border: 1px solid rgba(59,147,255,.15); border-radius: inherit; }.pulse-orbit span:nth-child(2) { inset: 130px; }.pulse-orbit span:nth-child(3) { inset: 205px; background: #1671e8; box-shadow: 0 0 80px rgba(22,113,232,.8); }
+.preparation-panel { padding: clamp(52px, 7vw, 110px); display: flex; flex-direction: column; justify-content: center; gap: 20px; background: #f7faff; }.preparation-panel h2 { margin: 6px 0 12px; font-size: 36px; letter-spacing: -.03em; }
+.field-group { padding: 18px 20px; display: grid; gap: 7px; border: 1px solid #d7e2f1; border-radius: 14px; background: white; }.field-group > span { color: #6a7d97; font-size: 12px; font-weight: 700; }.field-group strong { font-size: 16px; }.field-group strong.blocked { color: #b74343; }.field-group small { color: #7c8da4; }.field-group select { width: 100%; padding: 5px 0; border: 0; outline: 0; background: white; color: #10213e; font: inherit; font-weight: 700; }
+.toggle-row, .consent-row { display: flex; align-items: center; justify-content: space-between; gap: 18px; }.toggle-row { padding: 18px 20px; border: 1px solid #d7e2f1; border-radius: 14px; background: white; }.toggle-row span { display: grid; gap: 4px; }.toggle-row small { color: #7c8da4; }.toggle-row input { width: 44px; height: 24px; accent-color: #1671e8; }.consent-row { justify-content: flex-start; color: #53657e; font-size: 13px; }.consent-row input { width: 18px; height: 18px; accent-color: #1671e8; }
+.browser-check { padding: 16px 18px; display: flex; gap: 12px; border-radius: 14px; background: #fff2f1; color: #9c3838; }.browser-check.ok { background: #eaf8f3; color: #176449; }.browser-check > div { display: grid; gap: 4px; }.browser-check small { line-height: 1.5; }.status-dot { width: 9px; height: 9px; margin-top: 5px; flex: 0 0 auto; border-radius: 50%; background: currentColor; box-shadow: 0 0 0 5px currentColor; opacity: .6; }
+.primary-start { min-height: 58px; border: 0; border-radius: 14px; background: #176fe5; color: white; font-size: 17px; font-weight: 800; cursor: pointer; box-shadow: 0 14px 28px rgba(23,111,229,.22); }.primary-start:disabled { background: #aabbd2; box-shadow: none; cursor: not-allowed; }.inline-error { margin: 0; padding: 12px 14px; border-left: 3px solid #d34a4a; background: #fff1f1; color: #a63838; }
+.live-layout { min-height: calc(100vh - 68px); display: grid; grid-template-columns: 330px 1fr; }.live-rail { min-height: calc(100vh - 68px); padding: 22px; display: flex; flex-direction: column; gap: 22px; background: #0b1d3d; color: white; }
+.live-status { padding: 16px; display: flex; align-items: center; gap: 14px; border: 1px solid rgba(255,255,255,.13); border-radius: 16px; background: rgba(255,255,255,.05); }.live-status > div:last-child { display: grid; gap: 3px; }.live-status small { color: #8fa7ca; }.question-pulse { height: 34px; display: flex; align-items: center; gap: 3px; }.question-pulse span { width: 3px; height: 10px; border-radius: 3px; background: #52a4ff; }.live-status.active .question-pulse span { animation: wave 1.05s ease-in-out infinite; }.question-pulse span:nth-child(2) { height: 25px; animation-delay: -.2s; }.question-pulse span:nth-child(3) { height: 17px; animation-delay: -.4s; }.question-pulse span:nth-child(4) { height: 30px; animation-delay: -.6s; }
+.rail-section { flex: 1; min-height: 0; display: flex; flex-direction: column; }.rail-section > header, .history-section > header { display: flex; align-items: center; justify-content: space-between; }.rail-section h2, .history-section h2 { margin: 0; font-size: 14px; }.rail-section header span { color: #6f8ab2; font: 700 12px ui-monospace, monospace; }.transcript-list { margin-top: 12px; padding-right: 4px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }.transcript-list article { padding: 12px; border-radius: 12px; background: rgba(255,255,255,.06); }.transcript-list article.candidate { background: rgba(28,123,242,.14); }.transcript-list article.partial { opacity: .66; }.transcript-list span { color: #6eaefe; font-size: 11px; font-weight: 800; }.transcript-list p { margin: 5px 0 0; color: #d5e1f3; font-size: 13px; line-height: 1.55; }
+.rail-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }.rail-actions button { min-height: 40px; border: 1px solid #365173; border-radius: 10px; background: #173053; color: white; cursor: pointer; }.rail-actions .danger { color: #ffb2b2; }
+.answer-workspace { min-width: 0; padding: 26px 30px 50px; overflow-y: auto; }.notice-strip { margin-bottom: 12px; padding: 11px 14px; border-radius: 10px; background: #e3f0ff; color: #285d99; }.notice-strip.error { background: #fff0f0; color: #a93c3c; }
+.current-question-card { padding: 26px 28px; border-radius: 18px; background: #176fe5; color: white; box-shadow: 0 18px 38px rgba(32,92,172,.19); }.question-meta { display: flex; justify-content: space-between; color: #c9e0ff; font-size: 12px; font-weight: 700; }.question-meta em { font-style: normal; }.current-question-card h1 { margin: 18px 0 24px; max-width: 1100px; font-size: clamp(25px, 3vw, 40px); line-height: 1.35; letter-spacing: -.035em; }.question-actions { display: flex; gap: 8px; }.question-actions button { padding: 9px 14px; border: 1px solid rgba(255,255,255,.35); border-radius: 9px; background: rgba(255,255,255,.12); color: white; cursor: pointer; }.question-actions button:disabled { opacity: .45; cursor: not-allowed; }
+.answer-grid { margin-top: 18px; display: grid; grid-template-columns: minmax(280px, .72fr) minmax(460px, 1.45fr); gap: 18px; }.quick-answer-card, .full-answer-card, .history-section { border: 1px solid #d9e3f1; border-radius: 16px; background: white; box-shadow: 0 9px 24px rgba(34,67,107,.06); }.quick-answer-card, .full-answer-card { min-height: 330px; padding: 22px; }.quick-answer-card header, .full-answer-card header { display: flex; align-items: center; justify-content: space-between; }.quick-answer-card header span, .full-answer-card header span { font-weight: 800; }.quick-answer-card small, .full-answer-card small { color: #7a8ca4; }.quick-answer-card ol { padding-left: 25px; }.quick-answer-card li { margin: 16px 0; padding-left: 5px; line-height: 1.65; }.full-answer-card header > div { display: flex; gap: 10px; align-items: baseline; }.answer-text { margin-top: 20px; color: #263b59; font-size: 16px; line-height: 1.86; white-space: pre-wrap; }.typing-dot { width: 9px; height: 9px; border-radius: 50%; background: #176fe5; animation: breathe 1s ease-in-out infinite; }
+.history-section { margin-top: 18px; padding: 22px; }.history-section > header span { color: #7a8ca4; font-size: 12px; }.history-list { margin-top: 12px; display: grid; gap: 8px; }.history-list details { padding: 14px 16px; border-radius: 11px; background: #f4f7fb; }.history-list summary { display: flex; gap: 12px; cursor: pointer; font-weight: 700; }.history-list summary span { color: #176fe5; }.history-list p { margin: 14px 0 2px; color: #435773; line-height: 1.75; white-space: pre-wrap; }.empty-copy { color: #8292a8; line-height: 1.7; }
+.answer-pip-card { min-height: 100vh; padding: 18px; color: #10213e; background: #edf3fb; font-family: "Microsoft YaHei", sans-serif; }.answer-pip-card > header { display: flex; align-items: center; gap: 9px; }.answer-pip-card header small { margin-left: auto; color: #61748f; }.answer-pip-card section { margin-top: 14px; padding: 18px; border-radius: 14px; background: white; }.answer-pip-card section > span { color: #176fe5; font-size: 11px; font-weight: 800; }.answer-pip-card h1 { margin: 10px 0 0; font-size: 21px; line-height: 1.45; }.answer-pip-card .pip-answer { min-height: 360px; }.answer-pip-card p { white-space: pre-wrap; line-height: 1.75; }
+@keyframes wave { 0%,100% { transform: scaleY(.55); } 50% { transform: scaleY(1); } } @keyframes breathe { 50% { opacity: .25; transform: scale(1.45); } }
+@media (prefers-reduced-motion: reduce) { .brand-wave i, .question-pulse span, .typing-dot { animation: none; } }
+@media (max-width: 1050px) { .preparation-layout { grid-template-columns: 1fr; }.preparation-thesis { min-height: 48vh; }.live-layout { grid-template-columns: 280px 1fr; }.answer-grid { grid-template-columns: 1fr; } }
+</style>

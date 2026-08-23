@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import CareerAssistantPage from './components/CareerAssistantPage.vue'
+import BrowserInterviewMasterPage from './components/BrowserInterviewMasterPage.vue'
 import ResumeAssistantPage from './components/ResumeAssistantPage.vue'
 import InterviewLibraryPage from './components/InterviewLibraryPage.vue'
 import JobSearchWorkspace from './components/JobSearchWorkspace.vue'
@@ -358,6 +359,7 @@ function normalizeRoute(pathname) {
   if (!pathname || pathname === '/') return '/review'
   if (pathname === '/login' || pathname === '/register' || pathname === '/forgot-password') return pathname
   if (pathname === '/career') return '/career'
+  if (pathname === '/career/interview-master') return '/career/interview-master'
   if (pathname === '/resume-assistant' || pathname.startsWith('/resume-assistant/')) return '/resume-assistant'
   if (pathname === '/interviews/jobs') return '/interviews/jobs'
   if (pathname === '/interviews') return '/interviews'
@@ -458,6 +460,7 @@ function canAccessNavItem(item) {
 
 function navItemForRoute(route) {
   if (route.startsWith('/review')) return appNavItems.find((item) => item.moduleKey === 'workbench')
+  if (route === '/career/interview-master') return appNavItems.find((item) => item.moduleKey === 'career_assistant')
   if (route === '/interviews/jobs') return appNavItems.find((item) => item.moduleKey === 'job_library')
   if (route === '/interviews') return appNavItems.find((item) => item.moduleKey === 'interview_library')
   if (route.startsWith('/admin/')) return appNavItems.find((item) => item.moduleKey === 'admin_console')
@@ -1229,6 +1232,8 @@ onBeforeUnmount(() => {
     <span aria-hidden="true"></span>
     <p>正在加载可用模块…</p>
   </section>
+
+  <BrowserInterviewMasterPage v-else-if="currentRoute === '/career/interview-master'" />
 
   <div v-else class="shell" :class="{ 'mobile-nav-open': mobileNavOpen }">
     <button

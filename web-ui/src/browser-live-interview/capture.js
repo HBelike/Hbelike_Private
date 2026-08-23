@@ -44,13 +44,8 @@ export class BrowserAudioCapture {
   }
 
   async start({ candidateEnabled = false, onFrame, onEnded }) {
-    await this.stop()
-    this.stopping = false
-    this.onFrame = onFrame
-    this.onEnded = onEnded
-    this.sequences = { interviewer: 0, candidate: 0 }
-
-    const displayStream = await this.mediaDevices.getDisplayMedia({
+    // getDisplayMedia 必须直接发生在点击事件的瞬时用户授权中，不能先等待异步清理。
+    const displayRequest = this.mediaDevices.getDisplayMedia({
       video: true,
       audio: true,
       preferCurrentTab: false,
@@ -58,6 +53,13 @@ export class BrowserAudioCapture {
       surfaceSwitching: 'exclude',
       systemAudio: 'exclude'
     })
+    await this.stop()
+    this.stopping = false
+    this.onFrame = onFrame
+    this.onEnded = onEnded
+    this.sequences = { interviewer: 0, candidate: 0 }
+
+    const displayStream = await displayRequest
     this.streams.push(displayStream)
     for (const videoTrack of displayStream.getVideoTracks()) this._stopTrack(videoTrack)
     const interviewerTrack = displayStream.getAudioTracks()[0]
