@@ -7,6 +7,7 @@ const here = path.dirname(fileURLToPath(import.meta.url))
 let mainWindow: BrowserWindow | null = null
 let currentSocket: WebSocket | null = null
 const hasSingleInstanceLock = app.requestSingleInstanceLock()
+const defaultApiBaseUrl = 'http://127.0.0.1:8000'
 
 function requireWindows(): void {
   if (process.platform !== 'win32') {
@@ -20,6 +21,29 @@ function normalizeApiBase(value: string): URL {
   return url
 }
 
+function apiBaseFromArguments(argv: string[]): string | null {
+  const argument = argv.find((item) => item.startsWith('--api-base-url='))
+  if (!argument) return null
+  try {
+    return normalizeApiBase(argument.slice('--api-base-url='.length)).toString().replace(/\/$/, '')
+  } catch {
+    return null
+  }
+}
+
+async function loadSetupPage(apiBaseUrl: string): Promise<void> {
+  if (!mainWindow) return
+  const routeHash = `/live-interview/setup?apiBaseUrl=${encodeURIComponent(apiBaseUrl)}`
+  const devServer = process.env.VITE_DEV_SERVER_URL
+  if (devServer) {
+    const url = new URL(devServer)
+    url.hash = routeHash
+    await mainWindow.loadURL(url.toString())
+  } else {
+    await mainWindow.loadFile(path.join(here, '../dist-renderer/index.html'), { hash: routeHash })
+  }
+}
+
 async function createWindow(): Promise<void> {
   requireWindows()
   mainWindow = new BrowserWindow({
@@ -31,7 +55,9 @@ async function createWindow(): Promise<void> {
     backgroundColor: '#0b1630',
     title: '实时面试助手',
     webPreferences: {
-      preload: path.join(here, 'preload.js'),
+      // Electron 的 sandbox preload 必须使用 CommonJS；显式指向 .cjs，避免
+      // package.json 的 type=module 让 preload 在生产构建中静默加载失败。
+      preload: path.join(here, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
     },
@@ -57,9 +83,7 @@ async function createWindow(): Promise<void> {
     callback({ video: primary, audio: 'loopback' })
   })
 
-  const devServer = process.env.VITE_DEV_SERVER_URL
-  if (devServer) await mainWindow.loadURL(devServer)
-  else await mainWindow.loadFile(path.join(here, '../dist-renderer/index.html'))
+  await loadSetupPage(apiBaseFromArguments(process.argv) ?? defaultApiBaseUrl)
 }
 
 ipcMain.handle('auth:open', async (_event, apiBaseUrl: string) => {
@@ -132,8 +156,10 @@ ipcMain.on('socket:close', () => {
 if (!hasSingleInstanceLock) {
   app.quit()
 } else {
-  app.on('second-instance', () => {
+  app.on('second-instance', (_event, argv) => {
     if (!mainWindow) return
+    const apiBaseUrl = apiBaseFromArguments(argv)
+    if (apiBaseUrl) void loadSetupPage(apiBaseUrl)
     if (mainWindow.isMinimized()) mainWindow.restore()
     mainWindow.show()
     mainWindow.focus()

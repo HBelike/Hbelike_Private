@@ -22,7 +22,8 @@ async function createPipeline(
   options: CaptureOptions,
 ): Promise<Pipeline> {
   const context = new AudioContext()
-  await context.audioWorklet.addModule(new URL('/pcm-worklet.js', window.location.href).toString())
+  // 使用相对地址同时兼容 Vite 开发服务和 Electron 的 file:// 生产页面。
+  await context.audioWorklet.addModule(new URL('./pcm-worklet.js', window.location.href).toString())
   const source = context.createMediaStreamSource(stream)
   const processor = new AudioWorkletNode(context, 'pcm-capture-processor')
   const silentGain = context.createGain()

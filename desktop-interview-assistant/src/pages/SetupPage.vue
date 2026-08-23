@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { listMicrophones } from '../audio/capture'
 import { beginLiveSession } from '../runtime'
 import { resetSessionState, sessionState } from '../stores/session'
@@ -14,7 +14,9 @@ interface SetupOptions {
 }
 
 const router = useRouter()
-const apiBaseUrl = ref(localStorage.getItem('liveInterviewApiBase') || 'http://127.0.0.1:8000')
+const route = useRoute()
+const launchApiBaseUrl = typeof route.query.apiBaseUrl === 'string' ? route.query.apiBaseUrl : ''
+const apiBaseUrl = ref(launchApiBaseUrl || localStorage.getItem('liveInterviewApiBase') || 'http://127.0.0.1:8000')
 const options = ref<SetupOptions | null>(null)
 const microphones = ref<Array<{ deviceId: string; label: string }>>([])
 const candidateId = ref('')

@@ -9,7 +9,8 @@
 ## 技术取舍
 
 - 桌面端使用 Electron + Vue 3 + TypeScript。Electron 官方的 `setDisplayMediaRequestHandler` 支持在 Windows 使用 `audio: "loopback"` 捕获系统音频；麦克风继续使用独立 `getUserMedia`，因此不需要让 LLM 猜双方角色。
-- 产品入口位于现有求职助手会话顶部的“面试大师”按钮。按钮调用本地 `/api/career/live-interviews/desktop/launch`，直接启动或聚焦 Electron 采集窗口；首次 Electron 二进制尚未完成时会在后台继续准备，完成后自动打开，不要求用户手工执行 `npm start`。
+- 产品入口位于现有求职助手会话顶部的“面试大师”按钮。按钮调用本地 `/api/career/live-interviews/desktop/launch`，直接启动或聚焦 Electron 采集窗口，并把当前求职助手服务地址传给桌面端；首次 Electron 二进制尚未完成时会在无终端窗口的后台线程中准备，完成后自动打开，不要求用户手工执行 `npm start`。
+- Electron preload 生产构建固定输出为 CommonJS `preload.cjs`。这是桌面桥接能否加载的必要条件；不能在 `type=module` 项目里把 ESM `preload.js` 直接交给 sandbox preload，否则只会出现空白深色窗口。
 - 不对接腾讯会议、Teams、Zoom 等会议软件 API。系统中任何正在播放的对方声音都由 Windows loopback 捕获，用户麦克风作为另一条独立音轨。
 - 音频由 `AudioWorklet` 读取，重采样为 24 kHz 单声道 PCM16，并以 100 ms 帧发送。系统音频和麦克风分别维护 `sequence`。
 - 转文字不是由普通聊天 LLM 完成。首个 Provider 使用专门的 OpenAI Realtime transcription 语音识别模型；`AsrProvider` 接口允许以后增加 FunASR 等本地工具。普通 LLM 只负责问题理解扩展和中文回答生成。
@@ -39,7 +40,8 @@ FastAPI /api/career/live-interviews/{id}/stream
 ```text
 求职助手顶部“面试大师”
   → POST /api/career/live-interviews/desktop/launch
-  → 启动 Electron；已运行时聚焦现有窗口
+  → 携带当前 FastAPI 服务地址启动 Electron；已运行时刷新地址并聚焦现有窗口
+  → 静默加载 Electron preload.cjs 与 Vue 生产页面
   → 用户开始面试后建立双通道采集与 WebSocket
 ```
 
@@ -88,6 +90,7 @@ npm start
 - 依赖审计：0 个已知漏洞。
 - 本地视觉验收：准备页、1280×720 实时双栏页和历史页无横向溢出，界面控制台无错误。
 - Electron 43.4.1 本机启动成功，主进程确认 renderer 已加载生产 `index.html`。
+- 已在 Windows 桌面实机验收入口链路：点击/调用入口不会打开 PowerShell，Electron 能渲染准备界面，自动使用当前 `http://127.0.0.1:18080` 服务并加载真实简历、岗位、回答模型、麦克风和面经资料。
 - Alembic 只有一个 head：`20260823_18`。
 - 数据库迁移及仓储没有 PCM、WAV 或 partial 持久化字段。
 

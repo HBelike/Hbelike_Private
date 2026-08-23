@@ -65,11 +65,13 @@ def get_live_actor():
 
 
 @router.post("/desktop/launch")
-def launch_desktop(_actor=Depends(get_live_actor)) -> dict[str, str]:
+def launch_desktop(request: Request, _actor=Depends(get_live_actor)) -> dict[str, str]:
     """从求职助手页面启动本机 Windows 双路音频采集器。"""
 
     try:
-        result = launch_windows_desktop_assistant()
+        result = launch_windows_desktop_assistant(
+            api_base_url=str(request.base_url).rstrip("/"),
+        )
     except DesktopLauncherError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     return {"status": result.status, "message": result.message}

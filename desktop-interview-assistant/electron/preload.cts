@@ -1,9 +1,9 @@
-import { contextBridge, ipcRenderer } from 'electron'
+const { contextBridge, ipcRenderer } = require('electron') as typeof import('electron')
 
 contextBridge.exposeInMainWorld('interviewBridge', {
   platform: process.platform,
   openLogin: (apiBaseUrl: string) => ipcRenderer.invoke('auth:open', apiBaseUrl),
-  apiRequest: <T>(apiBaseUrl: string, path: string, init?: { method?: string; body?: unknown }) =>
+  apiRequest: <T,>(apiBaseUrl: string, path: string, init?: { method?: string; body?: unknown }) =>
     ipcRenderer.invoke('api:request', apiBaseUrl, path, init) as Promise<T>,
   openSocket: (apiBaseUrl: string, sessionId: string) =>
     ipcRenderer.invoke('socket:open', apiBaseUrl, sessionId),

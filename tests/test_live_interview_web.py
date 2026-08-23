@@ -94,7 +94,7 @@ def test_desktop_launch_endpoint_starts_windows_capture_tool() -> None:
 
     assert response.status_code == 200
     assert response.json() == {"status": "launching", "message": "面试大师正在启动"}
-    launch.assert_called_once_with()
+    launch.assert_called_once_with(api_base_url="http://testserver")
 
 
 def test_desktop_launch_endpoint_returns_actionable_error() -> None:
