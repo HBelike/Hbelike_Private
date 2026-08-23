@@ -198,6 +198,39 @@ class CareerTurnApiRouteTests(unittest.TestCase):
         self.assertEqual(response.json()["turn"]["status"], "queued")
         self.assertEqual(response.json()["turn"]["conversation_position"], 1)
 
+    def test_legacy_intake_routes_redirect_to_durable_turn_queue(self) -> None:
+        from src.career_assistant.web import router as career_router
+
+        conversation_id = uuid4()
+        app = FastAPI()
+        app.include_router(career_router.router)
+        client = TestClient(app)
+
+        for suffix in ("intake", "intake-stream"):
+            response = client.post(
+                f"/api/career/conversations/{conversation_id}/{suffix}",
+                json={"text": "继续优化项目经历"},
+                follow_redirects=False,
+            )
+            self.assertEqual(response.status_code, 307)
+            self.assertEqual(
+                response.headers["location"],
+                f"/api/career/conversations/{conversation_id}/turns",
+            )
+
+        for suffix in ("intake-with-materials", "intake-with-materials-stream"):
+            response = client.post(
+                f"/api/career/conversations/{conversation_id}/{suffix}",
+                data={"text": "分析附件"},
+                files={"resume_file": ("resume.txt", b"resume", "text/plain")},
+                follow_redirects=False,
+            )
+            self.assertEqual(response.status_code, 307)
+            self.assertEqual(
+                response.headers["location"],
+                f"/api/career/conversations/{conversation_id}/turns-with-materials",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

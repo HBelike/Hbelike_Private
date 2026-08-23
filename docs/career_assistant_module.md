@@ -1,5 +1,14 @@
 # 求职助手模块边界
 
+## 2026-08-22：简历解析进度反馈
+
+- 目标：在“补充求职资料 → 上传新简历”中明确显示简历上传与解析进度，避免用户只看到长时间不可操作的“正在读取简历”按钮。
+- 前端调用链：选择文件 → 点击“解析简历” → `XMLHttpRequest` 读取真实上传字节进度 → 上传完成后继续调用原 `POST /api/career/candidate-profiles/parse` → 接口成功后显示 100% 和现有可编辑解析预览。
+- 进度语义：文件上传占整体进度的前 32%；服务端同步提取、OCR 和简历结构识别期间采用逐渐放缓的界面估算，最多停在 92%，只有收到成功响应才进入 100%。页面用“正在上传简历 / 正在提取简历内容”标明阶段，不把估算值表述为服务端精确事件。
+- 交互与视觉：解析按钮下方新增蓝白进度卡、阶段文案、百分比、扫描式进度轨道；完成状态切换为绿色，失败状态切换为红色并保留下方具体错误。解析期间禁用文件切换、步骤切换、关闭与“暂不添加简历”，并支持键盘焦点、`progressbar` 语义和 `prefers-reduced-motion`。
+- 依赖与边界：不修改简历解析 API、后端任务模型、数据库或原文件清理策略；未引入第三方依赖，也不伪造后端内部步骤。
+- 验证：进度映射与 92% 上限 Node 回归测试通过；WebUI 全量 Node 测试和 Vite production build 通过；PC 端本地预览确认了解析中与完成状态的布局、滚动和按钮禁用状态。
+
 ## 2026-08-22：单项求职资料绑定的 PostgreSQL NULL UUID 修复
 
 - 目标：恢复“只有基准简历”或“只有目标岗位”的会话资料绑定，避免职位库已保存岗位后在会话绑定阶段返回 HTTP 500。
@@ -221,3 +230,24 @@ Career WebUI
 - PC 交互：分页器使用上下两行的紧凑布局，上方展示总数和每页数量，下方展示上一页、数字页码、省略号与下一页；会话菜单仅在悬停、选中、键盘聚焦或展开时显示。隐私边界压缩为单行说明，不再占用独立卡片高度。
 - 依赖与边界：新增 Element Plus `2.14.5`，仅按需引入 ConfigProvider、Pagination 及分页样式；侧栏在 PC 端宽度调整为 `280px/300px`，保证标准分页按钮无横向溢出。手机端继续使用既有纵向页面和列表滚动规则，不做平板专项适配。
 - 验证：22 项 Node 测试、依赖审计与 Vite production build 通过；浏览器使用 37 条模拟会话实测总数、页码、省略号、上一页/下一页和 `5/7/10/15` 下拉选项。切换到每页 10 条后列表请求与渲染数量同步更新，分页器在 `280px` PC 侧栏内无横向溢出。
+
+## 2026-08-23：求职 Turn 异步 FIFO 排队
+
+- 设计目标：一个 Conversation 可以保留多轮历史，但任意时刻只能执行一个 Turn；用户在上一轮尚未结束时继续发送，新 Turn 按提交顺序排队，不注入正在执行的上下文。不同会话仍可在全局上限内并发。
+- 调度实现：新增 `AsyncTurnCoordinator`。每个会话使用显式 FIFO ticket 队列，系统使用 `asyncio.Semaphore` 控制 `runtime.max_concurrent_turns`；显式 ticket 可保证后提交请求即使更早调用等待逻辑也不能插队。
+- 统一入口：文本/附件与流式/非流式四个聊天入口全部经过同一协调器。非流式同步 Agent 流程通过受跟踪的 `asyncio.to_thread()` 执行，不再绕过并发上限；系统满载时等待，不再直接返回 HTTP 429。
+- SSE 行为：排队中的流式请求会收到 `turn_queued` progress，取得执行权后继续既有 intake、accepted、delta、done/error 协议。同步业务事件通过 `asyncio.Queue` 投递回 FastAPI 事件循环；浏览器断开后底层 Turn 继续收口，真实处理结束前不会提前释放会话和全局名额。
+- PC 交互：回复期间输入框和发送按钮保持可用，按钮文案切换为“加入队列”；后续消息显示在“等待发送”列表，上一轮结束后自动按顺序提交。页面不会同时复用一套响应式状态消费多个 SSE，避免增量正文、临时消息 ID 和完成状态互相覆盖。
+- 部署边界：当前调度器匹配生产 Compose 的单 Uvicorn 进程，可支持多个用户在一个实例内同时操作。`asyncio` 队列和 semaphore 不是跨进程持久队列；增加 API/Worker 副本前仍需 PostgreSQL 权威队列、租约和恢复机制。岗位 Judge、面经采集等离线长任务 Worker 化不包含在本次改造中。
+- 验证：新增 9 项异步队列与 SSE 生命周期测试，覆盖同会话 FIFO、后提交不得插队、跨会话并发、全局满载等待、等待取消、同步异常释放和断线后继续执行；123 项 Python 全量回归、39 项 WebUI Node 测试、`compileall` 和 Vite production build 全部通过。
+
+## 2026-08-23：PostgreSQL 权威队列与独立 Agent Worker
+
+- 设计目标：将进程内排队升级为生产可恢复架构。API 只做身份校验、上下文准备、附件解析和持久化入队；LLM、RAG、Memory 与 Tool 主链由独立 Worker 执行。
+- 数据模型：`agent_turns` 增加全局 `queue_sequence`、可执行时间、attempt、lease、heartbeat 与取消字段；新增 `agent_turn_payloads`、`agent_turn_events`、`agent_execution_slots`。Turn、完整 Payload 和首个 queued Event 在同一事务写入。
+- 调度语义：Worker 使用 `FOR UPDATE SKIP LOCKED` 领取任务；`NOT EXISTS` 保证同一 Conversation 中更早的 queued/running Turn 未结束时后续 Turn 不可领取；PostgreSQL Slot 保证多个 Worker 仍共享一个全局并发上限。
+- 执行与恢复：单 Worker 使用 `asyncio` 控制本地并发，通过 `asyncio.to_thread` 执行现有同步 Agent 主链并定时 heartbeat。租约过期时，未进入非幂等 Tool 的任务重新排队；已经开始副作用 Tool 的任务明确失败，避免自动重放。
+- 附件边界：API 内完成材料解析，完整 extracted text 不脱敏持久化；原始 PDF、Word、图片在入队后立即删除。Worker 只读取结构化 Payload，不读取原件。
+- API 与前端：新增 Turn 入队、状态、active-turns、持久化 Event SSE 和取消接口。页面每次发送都立即创建服务端 Turn，可连续提交；刷新从 active-turns 恢复，SSE 通过 Last-Event-ID 续传。
+- 部署：生产 Compose 新增 `career-agent-worker`，默认全局并发 8、单 Worker 并发 4、租约 90 秒、20 秒 heartbeat。API 和 Worker 可独立扩容，全局并发不会随副本数倍增。
+- 验证：2 个 Worker 模拟 100 个用户、每人连续 2 个 Turn，200 个任务全部完成；峰值全局并发 8，任一会话峰值并发 1，所有会话均保持提交顺序。

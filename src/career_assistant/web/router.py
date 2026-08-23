@@ -28,7 +28,7 @@ from fastapi import (
     UploadFile,
     status,
 )
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -1185,7 +1185,13 @@ async def submit_intake(
     request_body: SubmitIntakeRequest,
     request: Request,
 ) -> dict[str, object]:
-    """提交一轮文本或职位链接输入，完成处理图后调用已选模型回复。"""
+    """旧版文本入口：使用 307 保留请求体并转入 PostgreSQL Turn 队列。"""
+
+    return RedirectResponse(
+        url=f"/api/career/conversations/{conversation_id}/turns",
+        status_code=status.HTTP_307_TEMPORARY_REDIRECT,
+        headers={"Deprecation": "true"},
+    )
 
     actor = get_request_actor()
     services = get_career_services(request)
@@ -1245,7 +1251,13 @@ async def stream_intake(
     request_body: SubmitIntakeRequest,
     request: Request,
 ) -> StreamingResponse:
-    """流式提交文本输入；状态、增量和最终持久化结果均通过 SSE 返回。"""
+    """旧版文本 SSE 入口：统一转入持久化 Turn 提交接口。"""
+
+    return RedirectResponse(
+        url=f"/api/career/conversations/{conversation_id}/turns",
+        status_code=status.HTTP_307_TEMPORARY_REDIRECT,
+        headers={"Deprecation": "true"},
+    )
 
     actor = get_request_actor()
     services = get_career_services(request)
@@ -1306,7 +1318,13 @@ async def submit_intake_with_materials(
     resume_file: UploadFile | None = File(default=None),
     job_description_file: UploadFile | None = File(default=None),
 ) -> dict[str, object]:
-    """临时接收简历或职位材料，完成解析后只持久化脱敏摘要并删除原文件。"""
+    """旧版附件入口：统一转入完整解析文本持久化接口。"""
+
+    return RedirectResponse(
+        url=f"/api/career/conversations/{conversation_id}/turns-with-materials",
+        status_code=status.HTTP_307_TEMPORARY_REDIRECT,
+        headers={"Deprecation": "true"},
+    )
 
     if len(text) > 30_000:
         raise HTTPException(status_code=422, detail="咨询文本不能超过 30000 个字符")
@@ -1423,7 +1441,13 @@ async def stream_intake_with_materials(
     resume_file: UploadFile | None = File(default=None),
     job_description_file: UploadFile | None = File(default=None),
 ) -> StreamingResponse:
-    """上传材料后先发送解析状态，再把真实模型输出以 SSE 持续推送给页面。"""
+    """旧版附件 SSE 入口：统一转入持久化 Turn 提交接口。"""
+
+    return RedirectResponse(
+        url=f"/api/career/conversations/{conversation_id}/turns-with-materials",
+        status_code=status.HTTP_307_TEMPORARY_REDIRECT,
+        headers={"Deprecation": "true"},
+    )
 
     if len(text) > 30_000:
         raise HTTPException(status_code=422, detail="咨询文本不能超过 30000 个字符")
