@@ -975,14 +975,24 @@ def create_conversation(
     """创建新会话；由 AgentLoop 而不是 Web 层直接调用仓储。"""
 
     actor = get_request_actor()
-    services = get_career_services(request)
-    conversation = services.agent_loop.open_conversation(
+    has_initial_context = bool(
+        request_body.candidate_profile_id or request_body.target_role_profile_id
+    )
+    if has_initial_context:
+        services = get_career_services(request)
+        agent_loop = services.agent_loop
+    else:
+        read_services = get_career_read_services(request)
+        services = None
+        agent_loop = CareerAgentLoop(read_services.conversation_repository)
+
+    conversation = agent_loop.open_conversation(
         actor.organization_id,
         actor.actor_id,
         request_body.title,
     )
     context = None
-    if request_body.candidate_profile_id or request_body.target_role_profile_id:
+    if services is not None:
         try:
             context = services.context_repository.bind_conversation(
                 actor.actor_id,

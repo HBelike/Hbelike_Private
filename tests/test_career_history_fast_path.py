@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import os
 import unittest
+from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from tempfile import TemporaryDirectory
 from threading import Lock
 from unittest.mock import patch
+from uuid import uuid4
 
-from fastapi import FastAPI, Request
+from fastapi import BackgroundTasks, FastAPI, Request
 
+from src.career_assistant.persistence.records import ConversationRecord
 from src.career_assistant.web import router as career_router
 
 
@@ -71,6 +75,143 @@ class CareerHistoryFastPathTests(unittest.TestCase):
         self.assertIs(first, second)
         self.assertIs(first, app.state.career_assistant_read_services)
         self.assertIsNone(app.state.career_assistant_services)
+
+    def test_empty_conversation_creation_does_not_initialize_full_agent_services(self) -> None:
+        now = datetime.now(UTC)
+        conversation = ConversationRecord(
+            id=uuid4(),
+            organization_id=career_router.DEFAULT_ORGANIZATION_ID,
+            actor_id=career_router.DEFAULT_ACTOR_ID,
+            title="新的求职咨询",
+            status="active",
+            created_at=now,
+            updated_at=now,
+            archived_at=None,
+        )
+        calls: list[tuple[object, object, str]] = []
+
+        class CreatingConversationRepository:
+            def create_conversation(self, organization_id, actor_id, title):
+                calls.append((organization_id, actor_id, title))
+                return conversation
+
+        read_services = SimpleNamespace(
+            conversation_repository=CreatingConversationRepository(),
+        )
+        request = Request({"type": "http", "app": FastAPI()})
+
+        with (
+            patch.object(career_router, "get_career_read_services", return_value=read_services),
+            patch.object(
+                career_router,
+                "get_career_services",
+                side_effect=AssertionError("空会话不应初始化完整 Agent 服务"),
+            ),
+        ):
+            payload = career_router.create_conversation(
+                career_router.CreateConversationRequest(title="新的求职咨询"),
+                request,
+                BackgroundTasks(),
+            )
+
+        self.assertEqual(
+            calls,
+            [
+                (
+                    career_router.DEFAULT_ORGANIZATION_ID,
+                    career_router.DEFAULT_ACTOR_ID,
+                    "新的求职咨询",
+                ),
+            ],
+        )
+        self.assertEqual(payload["id"], str(conversation.id))
+        self.assertIsNone(payload["context"])
+
+    def test_contextual_conversation_creation_keeps_full_service_flow(self) -> None:
+        now = datetime.now(UTC)
+        candidate_profile_id = uuid4()
+        conversation = ConversationRecord(
+            id=uuid4(),
+            organization_id=career_router.DEFAULT_ORGANIZATION_ID,
+            actor_id=career_router.DEFAULT_ACTOR_ID,
+            title="带简历的求职咨询",
+            status="active",
+            created_at=now,
+            updated_at=now,
+            archived_at=None,
+        )
+        context = object()
+        bind_calls: list[tuple[object, object, object, object]] = []
+
+        class FakeAgentLoop:
+            def open_conversation(self, organization_id, actor_id, title):
+                self.call = (organization_id, actor_id, title)
+                return conversation
+
+        class FakeContextRepository:
+            def bind_conversation(
+                self,
+                actor_id,
+                conversation_id,
+                candidate_id,
+                target_id,
+            ):
+                bind_calls.append((actor_id, conversation_id, candidate_id, target_id))
+                return context
+
+        agent_loop = FakeAgentLoop()
+        services = SimpleNamespace(
+            agent_loop=agent_loop,
+            context_repository=FakeContextRepository(),
+            conversation_repository=SimpleNamespace(),
+        )
+        request = Request({"type": "http", "app": FastAPI()})
+
+        with (
+            patch.object(career_router, "get_career_services", return_value=services),
+            patch.object(
+                career_router,
+                "get_career_read_services",
+                side_effect=AssertionError("带上下文会话必须保留完整服务流程"),
+            ),
+            patch.object(career_router, "_enqueue_job_assessment") as enqueue_assessment,
+            patch.object(career_router, "_current_job_assessment", return_value=None),
+            patch.object(
+                career_router,
+                "_conversation_context_payload",
+                return_value={"bound": True},
+            ),
+        ):
+            payload = career_router.create_conversation(
+                career_router.CreateConversationRequest(
+                    title="带简历的求职咨询",
+                    candidate_profile_id=candidate_profile_id,
+                ),
+                request,
+                BackgroundTasks(),
+            )
+
+        self.assertEqual(
+            agent_loop.call,
+            (
+                career_router.DEFAULT_ORGANIZATION_ID,
+                career_router.DEFAULT_ACTOR_ID,
+                "带简历的求职咨询",
+            ),
+        )
+        self.assertEqual(
+            bind_calls,
+            [
+                (
+                    career_router.DEFAULT_ACTOR_ID,
+                    conversation.id,
+                    candidate_profile_id,
+                    None,
+                ),
+            ],
+        )
+        enqueue_assessment.assert_called_once()
+        self.assertEqual(payload["context"], {"bound": True})
 
 
 if __name__ == "__main__":
