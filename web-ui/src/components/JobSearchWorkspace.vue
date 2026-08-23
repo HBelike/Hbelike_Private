@@ -97,7 +97,6 @@ function markBridgeAttention(error) {
     'rate_limited',
     'city_mismatch',
     'city_context_sync_failed',
-    'session_refresh_cooldown',
     'session_refresh_failed'
   ].includes(error.code)) {
     bridgeStatus.value = 'attention'

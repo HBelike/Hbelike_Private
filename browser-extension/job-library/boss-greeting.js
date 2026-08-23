@@ -8,23 +8,20 @@ export function normalizeGreetingPayload(payload = {}) {
     jobId: text(payload.jobId, 300),
     bossId: text(payload.bossId, 300),
     lid: text(payload.lid, 300),
-    message: text(payload.message, 2000),
-    defaultGreetingDisabled: payload.defaultGreetingDisabled === true
+    message: text(payload.message, 2000)
   }
   if (!normalized.securityId) throw new Error('岗位安全标识不能为空。')
   if (!normalized.jobId) throw new Error('岗位标识不能为空。')
   if (!normalized.bossId) throw new Error('招聘者标识不能为空。')
   if (!normalized.lid) throw new Error('岗位来源标识不能为空。')
   if (!normalized.message) throw new Error('招呼语不能为空。')
-  if (!normalized.defaultGreetingDisabled) throw new Error('请先确认已关闭 BOSS 默认招呼语。')
   return normalized
 }
 
 export function buildBossChatUrl(job = {}) {
   const normalized = normalizeGreetingPayload({
     ...job,
-    message: job.message || 'preflight',
-    defaultGreetingDisabled: true
+    message: job.message || 'preflight'
   })
   const url = new URL('https://www.zhipin.com/web/geek/chat')
   url.search = new URLSearchParams({
@@ -50,11 +47,7 @@ export function classifyFriendAddResponse(response) {
   const code = Number(response?.code)
   const message = responseMessage(response)
   if (code === 0 && response?.zpData?.showGreeting === true) {
-    return {
-      code: 'default_greeting_sent',
-      message: 'BOSS 已自动发送默认招呼语，已停止本批，避免继续发送重复消息。',
-      stopBatch: true
-    }
+    return { ok: true, defaultGreetingSent: true }
   }
   if (code === 0) return { ok: true }
   if (code === 37) return { code: 'login_required', message: 'BOSS 登录状态已失效。', stopBatch: true }
@@ -78,7 +71,6 @@ export function shouldStopGreetingBatch(code) {
     'verification_required',
     'rate_limited',
     'login_required',
-    'default_greeting_sent',
     'send_unknown',
     'extension_error',
     'boss_api_error'

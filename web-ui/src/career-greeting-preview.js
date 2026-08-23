@@ -103,8 +103,21 @@ export function stopGreetingItems(items) {
   }))
 }
 
-export function updateGreetingItemStatus(items, id, status, error = '') {
+export function updateGreetingItemStatus(items, id, status, error = '', details = {}) {
   return (Array.isArray(items) ? items : []).map((item) => item.id === id
-    ? { ...item, status, error }
+    ? { ...item, status, error, ...details }
     : item)
+}
+
+export function retryGreetingItems(items, id) {
+  const currentItems = Array.isArray(items) ? items : []
+  const retryIndex = currentItems.findIndex((item) => item.id === id && item.status === 'failed' && item.retryable)
+  if (retryIndex < 0) return currentItems.map((item) => ({ ...item }))
+  return currentItems.map((item, index) => {
+    if (index === retryIndex) return { ...item, status: 'queued', error: '', errorCode: '', retryable: false }
+    if (index > retryIndex && item.included && item.status === 'stopped') {
+      return { ...item, status: 'queued', error: '', errorCode: '', retryable: false }
+    }
+    return { ...item }
+  })
 }

@@ -60,14 +60,13 @@ test('createGreetingRequestPayload 只发送单个岗位标识和最终文案', 
     lid: 'lid-1',
     description: '完整 JD 不应发送',
     resume: '简历正文不应发送'
-  }, '您好，期待沟通。', true)
+  }, '您好，期待沟通。')
 
   assert.deepEqual(payload, {
     securityId: 'security-1',
     jobId: 'job-1',
     bossId: 'boss-1',
     lid: 'lid-1',
-    message: '您好，期待沟通。',
-    defaultGreetingDisabled: true
+    message: '您好，期待沟通。'
   })
 })

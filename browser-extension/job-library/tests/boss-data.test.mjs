@@ -6,7 +6,6 @@ import {
   buildDetailEndpoint,
   buildSearchEndpoint,
   classifyBossFailure,
-  isBossSessionRefreshCoolingDown,
   normalizeDetailResponse,
   normalizeCityResponse,
   normalizeSearchResponse,
@@ -159,14 +158,4 @@ test('classifyBossFailure distinguishes refreshable session state from real rate
   assert.equal(httpRateLimited.code, 'rate_limited')
   assert.equal(shouldRefreshBossSession(httpRateLimited), false)
   assert.equal(classifyBossFailure({ kind: 'api', response: { code: 0, zpData: {} } }), null)
-})
-
-test('session refresh cooldown prevents repeated automatic refreshes', () => {
-  const now = 1_000_000
-  const cooldown = 120_000
-
-  assert.equal(isBossSessionRefreshCoolingDown(0, now, cooldown), false)
-  assert.equal(isBossSessionRefreshCoolingDown(now - 30_000, now, cooldown), true)
-  assert.equal(isBossSessionRefreshCoolingDown(now - cooldown, now, cooldown), false)
-  assert.equal(isBossSessionRefreshCoolingDown(now + 1_000, now, cooldown), true)
 })

@@ -6,6 +6,7 @@ import {
   needsGreetingRiskWarning,
   normalizeGreetingLimit,
   regenerateGreetingItem,
+  retryGreetingItems,
   stopGreetingItems,
   updateGreetingItemStatus,
   toggleGreetingJob
@@ -95,4 +96,21 @@ test('停止批次会停止未发送和预检中的岗位，但不篡改已提�
     status: ['sending', 'preflighting', 'queued'][index]
   }))
   assert.deepEqual(stopGreetingItems(items).map((item) => item.status), ['sending', 'stopped', 'stopped'])
+})
+
+test('安全失败可重试当前项并恢复后续串行队列', () => {
+  const items = createGreetingItems([job('1'), job('2'), job('3')]).map((item, index) => ({
+    ...item,
+    status: ['sent', 'failed', 'stopped'][index],
+    retryable: index === 1
+  }))
+  const retried = retryGreetingItems(items, items[1].id)
+  assert.deepEqual(retried.map((item) => item.status), ['sent', 'queued', 'queued'])
+  assert.equal(retried[1].retryable, false)
+})
+
+test('结果未知的失败项不会进入重试队列', () => {
+  const [item] = createGreetingItems([job('1')])
+  const retried = retryGreetingItems([{ ...item, status: 'failed', retryable: false }], item.id)
+  assert.equal(retried[0].status, 'failed')
 })

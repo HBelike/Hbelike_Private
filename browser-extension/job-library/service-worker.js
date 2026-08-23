@@ -4,7 +4,6 @@ import {
   buildDetailEndpoint,
   buildSearchEndpoint,
   classifyBossFailure,
-  isBossSessionRefreshCoolingDown,
   normalizeDetailResponse,
   normalizeCityResponse,
   normalizeSearchResponse,
@@ -21,12 +20,9 @@ const WEB_CHANNEL = 'find-job-job-library-web-v1'
 const ALLOWED_APP_HOSTS = new Set(['127.0.0.1', 'localhost', 'xingxingtech.cn', 'www.xingxingtech.cn'])
 const BOSS_HOME = 'https://www.zhipin.com/web/geek/jobs?city=101020100&ka=open_joblist'
 const REQUEST_GAP_MS = 1000
-const SESSION_REFRESH_COOLDOWN_MS = 2 * 60 * 1000
 const SESSION_SETTLE_MS = 1500
-const SESSION_REFRESH_STORAGE_KEY = 'bossLastSessionRefreshAt'
 let requestQueue = Promise.resolve()
 let lastRequestAt = 0
-let lastSessionRefreshAt = 0
 let greetingTabId = null
 
 function isAllowedSender(sender) {
@@ -146,8 +142,6 @@ async function syncBossSearchContext(tab, payload) {
     await wait(SESSION_SETTLE_MS)
   }
 
-  // 城市切换已经完成一次正常页面加载，避免紧接着因 code=37 再次自动刷新。
-  await rememberSessionRefreshAt(Date.now())
   return syncedTab
 }
 
@@ -184,26 +178,6 @@ async function reloadBossTab(tabId, timeoutMs = 20000) {
 async function respectRequestGap() {
   const elapsed = Date.now() - lastRequestAt
   if (elapsed < REQUEST_GAP_MS) await wait(REQUEST_GAP_MS - elapsed)
-}
-
-async function readLastSessionRefreshAt() {
-  try {
-    const stored = await chrome.storage.session.get(SESSION_REFRESH_STORAGE_KEY)
-    const value = Number(stored?.[SESSION_REFRESH_STORAGE_KEY])
-    if (Number.isFinite(value) && value > 0) lastSessionRefreshAt = value
-  } catch {
-    // 存储不可用时仍保留当前 Service Worker 生命周期内的冷却限制。
-  }
-  return lastSessionRefreshAt
-}
-
-async function rememberSessionRefreshAt(value) {
-  lastSessionRefreshAt = value
-  try {
-    await chrome.storage.session.set({ [SESSION_REFRESH_STORAGE_KEY]: value })
-  } catch {
-    // 单次重试边界不依赖存储；存储仅用于跨 Service Worker 生命周期延续冷却时间。
-  }
 }
 
 async function runBossFetch(tabId, endpoint) {
@@ -251,6 +225,45 @@ async function runBossFetch(tabId, endpoint) {
     }
   })
   return result
+}
+
+async function runBossReadWithSingleRefresh(tabId, endpoint, action) {
+  await respectRequestGap()
+  let result = await runBossFetch(tabId, endpoint)
+  lastRequestAt = Date.now()
+  let failure = classifyBossFailure(result)
+  if (!shouldRefreshBossSession(failure, action)) return { result, failure, refreshed: false }
+
+  try {
+    await reloadBossTab(tabId)
+  } catch {
+    return {
+      result: null,
+      failure: {
+        code: 'session_refresh_failed',
+        message: 'BOSS 页面自动刷新未完成，本次未执行发送或写入，可安全重试。',
+        retryable: true
+      },
+      refreshed: true
+    }
+  }
+
+  await respectRequestGap()
+  result = await runBossFetch(tabId, endpoint)
+  lastRequestAt = Date.now()
+  failure = classifyBossFailure(result)
+  if (shouldRefreshBossSession(failure, action)) {
+    return {
+      result,
+      failure: {
+        code: 'session_refresh_failed',
+        message: 'BOSS 页面已自动刷新一次，但会话状态仍未更新；本次未执行发送或写入，可安全重试。',
+        retryable: true
+      },
+      refreshed: true
+    }
+  }
+  return { result, failure, refreshed: true }
 }
 
 async function runFriendAdd(tabId, payload) {
@@ -456,10 +469,13 @@ async function handleGreetingOperation(action, rawPayload) {
     return { ok: false, error: { code: 'login_or_verification_required', message: '请检查 BOSS 登录或安全验证状态。', stopBatch: true } }
   }
 
-  await respectRequestGap()
-  const detailResult = await runBossFetch(bossTab.id, buildDetailEndpoint(payload.securityId))
-  lastRequestAt = Date.now()
-  const detailFailure = classifyBossFailure(detailResult)
+  const detailRead = await runBossReadWithSingleRefresh(
+    bossTab.id,
+    buildDetailEndpoint(payload.securityId),
+    'get_job_detail'
+  )
+  const detailResult = detailRead.result
+  const detailFailure = detailRead.failure
   if (detailFailure) return { ok: false, error: { ...detailFailure, stopBatch: true } }
   const detail = normalizeDetailResponse(detailResult.response, payload)
   if (!detail.jobId || !detail.bossId || !detail.lid) {
@@ -485,11 +501,17 @@ async function handleGreetingOperation(action, rawPayload) {
   const chatTab = await getGreetingTab(buildBossChatUrl({ ...detail, message: payload.message }))
   const sendResult = await runChatSend(chatTab.id, payload.message)
   if (!sendResult?.ok) return { ok: false, error: sendResult || { code: 'send_unknown', message: '发送结果未知。', stopBatch: true } }
-  return { ok: true, data: { status: sendResult.status, sentAt: new Date().toISOString() } }
+  return {
+    ok: true,
+    data: {
+      status: sendResult.status,
+      defaultGreetingSent: friendFailure.defaultGreetingSent === true,
+      sentAt: new Date().toISOString()
+    }
+  }
 }
 
 async function handleBossOperation(action, payload) {
-  await respectRequestGap()
   const endpoint = action === 'search_jobs'
     ? buildSearchEndpoint(payload.query, payload.page, payload.cityCode)
     : action === 'list_cities'
@@ -512,50 +534,8 @@ async function handleBossOperation(action, payload) {
       }
     }
   }
-  let result = await runBossFetch(tab.id, endpoint)
-  lastRequestAt = Date.now()
-  let failure = classifyBossFailure(result)
-
-  if (shouldRefreshBossSession(failure, action)) {
-    const now = Date.now()
-    const previousRefreshAt = await readLastSessionRefreshAt()
-    if (isBossSessionRefreshCoolingDown(previousRefreshAt, now, SESSION_REFRESH_COOLDOWN_MS)) {
-      return {
-        ok: false,
-        error: {
-          code: 'session_refresh_cooldown',
-          message: 'BOSS 页面刚刚已自动刷新过。为保护账号，本次不会再次刷新或重试，请稍后再试。'
-        }
-      }
-    }
-
-    await rememberSessionRefreshAt(now)
-    try {
-      await reloadBossTab(tab.id)
-    } catch {
-      return {
-        ok: false,
-        error: {
-          code: 'session_refresh_failed',
-          message: 'BOSS 页面自动刷新未完成。为保护账号，助手不会继续重试，请打开 BOSS 页面检查状态。'
-        }
-      }
-    }
-
-    await respectRequestGap()
-    result = await runBossFetch(tab.id, endpoint)
-    lastRequestAt = Date.now()
-    failure = classifyBossFailure(result)
-    if (shouldRefreshBossSession(failure)) {
-      return {
-        ok: false,
-        error: {
-          code: 'session_refresh_failed',
-          message: 'BOSS 页面已自动刷新一次，但仍限制访问。为保护账号，助手不会继续重试，请稍后再试或打开 BOSS 页面处理。'
-        }
-      }
-    }
-  }
+  const read = await runBossReadWithSingleRefresh(tab.id, endpoint, action)
+  const { result, failure } = read
 
   if (failure) return { ok: false, error: failure }
 

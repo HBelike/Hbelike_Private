@@ -52,22 +52,23 @@ export function createJobDetailPayload(job = {}) {
   }
 }
 
-export function createGreetingRequestPayload(job = {}, message = '', defaultGreetingDisabled = false) {
+export function createGreetingRequestPayload(job = {}, message = '') {
   return {
     securityId: cloneString(job?.securityId),
     jobId: cloneString(job?.jobId),
     bossId: cloneString(job?.bossId),
     lid: cloneString(job?.lid),
-    message: cloneString(message),
-    defaultGreetingDisabled: defaultGreetingDisabled === true
+    message: cloneString(message)
   }
 }
 
 export class JobLibraryBridgeError extends Error {
-  constructor(code, message) {
+  constructor(code, message, details = {}) {
     super(message)
     this.name = 'JobLibraryBridgeError'
     this.code = code
+    this.retryable = details.retryable === true
+    this.stopBatch = details.stopBatch === true
   }
 }
 
@@ -96,7 +97,8 @@ function requestExtension(action, payload = {}, timeoutMs = DEFAULT_TIMEOUT_MS) 
       }
       reject(new JobLibraryBridgeError(
         message.error?.code ?? 'extension_error',
-        message.error?.message ?? '职位库助手调用失败。'
+        message.error?.message ?? '职位库助手调用失败。',
+        message.error ?? {}
       ))
     }
 
@@ -123,18 +125,10 @@ export const jobLibraryBridge = {
   getJobDetail(job) {
     return requestExtension('get_job_detail', createJobDetailPayload(job))
   },
-  preflightGreeting(job, message, options = {}) {
-    return requestExtension('preflight_greeting', createGreetingRequestPayload(
-      job,
-      message,
-      options.defaultGreetingDisabled
-    ))
+  preflightGreeting(job, message) {
+    return requestExtension('preflight_greeting', createGreetingRequestPayload(job, message))
   },
-  sendGreeting(job, message, options = {}) {
-    return requestExtension('send_greeting', createGreetingRequestPayload(
-      job,
-      message,
-      options.defaultGreetingDisabled
-    ), 60000)
+  sendGreeting(job, message) {
+    return requestExtension('send_greeting', createGreetingRequestPayload(job, message), 60000)
   }
 }

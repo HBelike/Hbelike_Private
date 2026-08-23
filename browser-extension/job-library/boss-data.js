@@ -275,11 +275,3 @@ export function shouldRefreshBossSession(failure, action = '') {
   if (normalizedAction && !['search_jobs', 'get_job_detail'].includes(normalizedAction)) return false
   return failure?.code === 'session_stale' && failure?.recoverableByRefresh === true
 }
-
-export function isBossSessionRefreshCoolingDown(lastRefreshAt, now, cooldownMs) {
-  const previous = Number(lastRefreshAt)
-  const current = Number(now)
-  const duration = Math.max(0, Number(cooldownMs) || 0)
-  if (!Number.isFinite(previous) || previous <= 0 || !Number.isFinite(current)) return false
-  return current - previous < duration
-}

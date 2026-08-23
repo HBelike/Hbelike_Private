@@ -4,7 +4,7 @@
 
 **Goal:** 在不部署线上服务的前提下，让求职助手通过本地 Chrome 扩展把用户逐条审核后的 1–10 条招呼语真实、串行发送到对应 BOSS 岗位。
 
-**Architecture:** WebUI 只负责选择、审核和串行调度；MV3 扩展复用用户现有 BOSS 登录态，单条执行预检、建立沟通关系、打开聊天页、填入消息、点击发送并识别回执。任何验证码、限流、登录失效、默认招呼语自动发送或未知结果都会停止整个批次，POST 和发送点击都不自动重试。
+**Architecture:** WebUI 只负责选择、审核和串行调度；MV3 扩展复用用户现有 BOSS 登录态，单条执行预检、建立沟通关系、打开聊天页、填入消息、点击发送并识别回执。任何验证码、限流、登录失效或未知结果都会停止整个批次，POST 和发送点击都不自动重试。
 
 **Tech Stack:** Vue 3、Vite、Chrome MV3、`chrome.tabs`、`chrome.scripting`、Node test runner。
 
@@ -18,7 +18,7 @@
 - 不保存、返回或记录 BOSS Cookie、Token、密码和完整聊天记录。
 - 不绕过验证码、安全验证、限流或沟通额度提示。
 - `friend/add`、页面“发送”点击均不盲目重试；结果未知时停止批次。
-- 用户必须确认已关闭 BOSS 默认招呼语；若接口仍报告默认招呼语已自动发送，则停止批次。
+- BOSS 默认招呼语已自动发送时继续发送定制文案，定制文案作为第二条消息。
 - 只在本地更新，不部署、不自动执行真人账号验收发送。
 
 ---
@@ -92,7 +92,7 @@ send_greeting
 
 - [ ] **Step 3: Implement preflight**
 
-检查登录、安全验证、岗位详情可用性、四个聊天标识和用户的默认招呼语关闭确认。预检不执行 `friend/add`，不产生外部沟通。
+检查登录、安全验证、岗位详情可用性和四个聊天标识。预检不执行 `friend/add`，不产生外部沟通。
 
 - [ ] **Step 4: Implement one-item send**
 
@@ -100,7 +100,7 @@ send_greeting
 
 - [ ] **Step 5: Fail closed**
 
-验证码、限流、登录失效、默认招呼语已发送、DOM 不完整、回执超时均返回 `stopBatch: true`。不自动确认额度弹窗，不重试 POST 或发送点击。
+验证码、限流、登录失效、DOM 不完整、回执超时均返回 `stopBatch: true`。默认招呼语已发送时继续发送定制文案。不自动确认额度弹窗，不重试 POST 或发送点击。
 
 - [ ] **Step 6: Run extension tests**
 
@@ -130,7 +130,7 @@ git commit -m "feat: send one BOSS greeting through local extension"
 - [ ] **Step 2: Implement bridge methods**
 
 ```js
-preflightGreeting(job, { defaultGreetingDisabled: true })
+preflightGreeting(job, message)
 sendGreeting(job, message)
 ```
 
@@ -166,9 +166,9 @@ git commit -m "feat: bridge BOSS greeting send actions"
 
 将 `setTimeout` 模拟替换为单一 `for...of` 异步循环。每次只调用一次预检和一次发送，收到结果后才推进下一条。
 
-- [ ] **Step 3: Add default greeting acknowledgement**
+- [ ] **Step 3: Handle default greeting**
 
-审核页增加必选项“我已在 BOSS 关闭默认招呼语”。未勾选时禁止开始真实发送。
+默认招呼语不作为发送门槛；平台先发送默认招呼语时，继续发送本次定制文案。
 
 - [ ] **Step 4: Update real-send copy**
 

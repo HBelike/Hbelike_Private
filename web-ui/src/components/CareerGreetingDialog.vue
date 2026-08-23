@@ -8,6 +8,7 @@ import {
   normalizeGreetingLimit,
   queueGreetingItems,
   regenerateGreetingItem,
+  retryGreetingItems,
   stopGreetingItems,
   updateGreetingItemStatus
 } from '../career-greeting-preview.js'
@@ -28,7 +29,6 @@ const items = ref([])
 const activeItemId = ref('')
 const riskOpen = ref(false)
 const riskAcknowledged = ref(false)
-const defaultGreetingDisabled = ref(false)
 const sending = ref(false)
 const stopped = ref(false)
 const stopRequested = ref(false)
@@ -63,7 +63,6 @@ watch(() => props.open, (open) => {
   activeItemId.value = items.value[0]?.id ?? ''
   riskOpen.value = false
   riskAcknowledged.value = false
-  defaultGreetingDisabled.value = props.simulationMode
   sending.value = false
   stopped.value = false
   stopRequested.value = false
@@ -146,7 +145,6 @@ function regenerateActive() {
 
 function requestSend() {
   if (!includedItems.value.length) return
-  if (!props.simulationMode && !defaultGreetingDisabled.value) return
   if (needsGreetingRiskWarning(includedItems.value.length)) {
     riskAcknowledged.value = false
     riskOpen.value = true
@@ -184,15 +182,11 @@ async function runSerialQueue() {
         continue
       }
 
-      await jobLibraryBridge.preflightGreeting(nextItem.job, nextItem.message, {
-        defaultGreetingDisabled: true
-      })
+      await jobLibraryBridge.preflightGreeting(nextItem.job, nextItem.message)
       if (stopRequested.value) break
 
       items.value = updateGreetingItemStatus(items.value, nextItem.id, 'sending')
-      const result = await jobLibraryBridge.sendGreeting(nextItem.job, nextItem.message, {
-        defaultGreetingDisabled: true
-      })
+      const result = await jobLibraryBridge.sendGreeting(nextItem.job, nextItem.message)
       const nextStatus = result?.status === 'skipped' ? 'skipped' : 'sent'
       items.value = updateGreetingItemStatus(items.value, nextItem.id, nextStatus, result?.reason ?? '')
     } catch (error) {
@@ -202,7 +196,11 @@ async function runSerialQueue() {
         items.value = updateGreetingItemStatus(items.value, nextItem.id, 'skipped', message)
         continue
       }
-      items.value = updateGreetingItemStatus(items.value, nextItem.id, 'failed', message)
+      const retryable = error instanceof JobLibraryBridgeError && error.retryable
+      items.value = updateGreetingItemStatus(items.value, nextItem.id, 'failed', message, {
+        errorCode: code,
+        retryable
+      })
       sendError.value = message
       stopRequested.value = true
       break
@@ -214,6 +212,17 @@ async function runSerialQueue() {
     stopped.value = true
   }
   sending.value = false
+}
+
+async function retryFailedItem(item) {
+  if (sending.value || !item?.retryable) return
+  items.value = retryGreetingItems(items.value, item.id)
+  activeItemId.value = item.id
+  sending.value = true
+  stopped.value = false
+  stopRequested.value = false
+  sendError.value = ''
+  await runSerialQueue()
 }
 
 function stopSending() {
@@ -394,6 +403,12 @@ function statusLabel(status) {
               <p v-else>{{ simulationMode ? '所有已纳入本批的岗位均已完成本地状态演示。' : '所有已纳入本批的岗位均已完成处理。' }}</p>
 
               <p v-if="sendError" class="send-error" role="alert">{{ sendError }}</p>
+              <button
+                v-if="activeItem?.status === 'failed' && activeItem.retryable"
+                type="button"
+                class="retry-send-button"
+                @click="retryFailedItem(activeItem)"
+              >刷新 BOSS 状态，重试这一条并继续</button>
 
               <div class="progress-rail" role="progressbar" :aria-valuenow="finishedCount" :aria-valuemax="includedItems.length">
                 <i :style="{ width: `${includedItems.length ? (finishedCount / includedItems.length) * 100 : 0}%` }"></i>
@@ -411,7 +426,7 @@ function statusLabel(status) {
               <h4>{{ simulationMode ? '不会执行真实发送' : '真实串行发送' }}</h4>
               <p>{{ simulationMode ? '本页未调用浏览器扩展的发送动作，也不会向 BOSS 提交消息。' : '发送前检查登录、验证与岗位状态；遇到平台异常立即停止。' }}</p>
               <ul v-if="simulationMode"><li>登录与验证码状态未检查</li><li>账号额度未读取</li><li>所有结果仅保存在当前页面</li></ul>
-              <ul v-else><li>同一时间只发送一条</li><li>不重试失败消息</li><li>不绕过验证码或平台限制</li></ul>
+              <ul v-else><li>同一时间只发送一条</li><li>会话失效时自动刷新一次</li><li>不绕过验证码或平台限制</li></ul>
             </aside>
           </section>
         </main>
@@ -423,10 +438,7 @@ function statusLabel(status) {
             <span>最多 10 个，当前已选 <strong>{{ selectedJobs.length }}</strong> 个</span>
           </div>
           <div v-else class="local-boundary" :class="{ live: !simulationMode }">
-            <template v-if="stage === 'review' && !simulationMode">
-              <label class="default-greeting-check"><input v-model="defaultGreetingDisabled" type="checkbox" /><span>我已在 BOSS 关闭默认招呼语</span></label>
-            </template>
-            <template v-else><i aria-hidden="true"></i><span>{{ simulationMode ? '安全预览，不会发送到 BOSS' : '真实发送：逐条预检、逐条确认结果' }}</span></template>
+            <i aria-hidden="true"></i><span>{{ simulationMode ? '安全预览，不会发送到 BOSS' : '真实发送：逐条预检、逐条确认结果' }}</span>
           </div>
 
           <div class="footer-actions">
@@ -434,7 +446,7 @@ function statusLabel(status) {
             <button v-if="stage === 'sending' && sending" type="button" class="danger-button" @click="stopSending">停止剩余发送</button>
             <button type="button" class="secondary-button" @click="close">{{ sendComplete || stopped ? '关闭' : '取消' }}</button>
             <button v-if="stage === 'select'" type="button" class="primary-button" :disabled="!selectedJobs.length" @click="startReview">生成 {{ selectedJobs.length || '' }} 条招呼语</button>
-            <button v-else-if="stage === 'review'" type="button" class="primary-button" :disabled="!includedItems.length || (!simulationMode && !defaultGreetingDisabled)" @click="requestSend">确认并{{ simulationMode ? '模拟' : '真实' }}发送 {{ includedItems.length }} 条</button>
+            <button v-else-if="stage === 'review'" type="button" class="primary-button" :disabled="!includedItems.length" @click="requestSend">确认并{{ simulationMode ? '模拟' : '真实' }}发送 {{ includedItems.length }} 条</button>
           </div>
         </footer>
 
@@ -598,6 +610,8 @@ function statusLabel(status) {
 .progress-board h3 { margin: 12px 0 0; font: 880 28px/1.2 var(--ui-font-display, "Segoe UI Variable Display", sans-serif); letter-spacing: -.035em; }
 .progress-board > p { margin: 9px 0 0; color: var(--greeting-muted); font-size: 12px; }
 .progress-board > .send-error { border-left: 3px solid var(--greeting-risk); border-radius: 0 8px 8px 0; background: #fff3f4; color: #a93c47; padding: 9px 11px; line-height: 1.55; }
+.retry-send-button { margin-top: 10px; border: 1px solid var(--greeting-blue); border-radius: 9px; background: #fff; color: var(--greeting-blue-ink); padding: 9px 12px; cursor: pointer; font-size: 10px; font-weight: 850; }
+.retry-send-button:hover,.retry-send-button:focus-visible { outline: 0; background: var(--greeting-blue-soft); box-shadow: 0 0 0 3px var(--ui-focus,rgba(8,105,216,.14)); }
 .progress-rail { height: 8px; overflow: hidden; margin-top: 34px; border-radius: 999px; background: var(--greeting-blue-soft); }
 .progress-rail i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg,var(--greeting-blue),var(--greeting-teal)); transition: width .35s ease; }
 .progress-numbers { display: grid; grid-template-columns: auto auto auto auto 1fr; align-items: baseline; gap: 7px; margin-top: 12px; }
@@ -628,8 +642,6 @@ function statusLabel(status) {
 .batch-limit-control strong { color: var(--greeting-blue-ink); }
 .local-boundary { gap: 8px; color: #087d7d; font-size: 10px; font-weight: 800; }
 .local-boundary.live { color: var(--greeting-blue-ink); }
-.default-greeting-check { display: flex; align-items: center; gap: 7px; cursor: pointer; }
-.default-greeting-check input { margin: 0; accent-color: var(--greeting-blue); }
 .footer-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
 .primary-button,.secondary-button,.danger-button,.risk-confirm-button { min-height: 40px; border-radius: 10px; padding: 8px 14px; cursor: pointer; font-size: 11px; font-weight: 850; }
 .primary-button { min-width: 148px; border: 1px solid var(--greeting-blue); background: var(--greeting-blue); color: #fff; box-shadow: 0 8px 20px rgba(8,105,216,.17); }
