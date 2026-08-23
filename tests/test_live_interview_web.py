@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
@@ -15,6 +16,9 @@ from src.career_assistant.live_interview.contracts import ServerEvent
 from src.career_assistant.live_interview.persistence import session_payload
 from src.career_assistant.live_interview import web as live_web
 from src.career_assistant.live_interview.contracts import LiveInterviewStatus
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 class FakeRepository:
@@ -228,6 +232,17 @@ def test_environment_asr_prefers_dashscope_and_hides_key() -> None:
     assert config["provider_key"] == "dashscope"
     assert config["model_id"] == "qwen-audio-3.0-asr-flash-streaming"
     assert "secret-value" not in str(config)
+
+
+def test_browser_live_interview_proxy_and_permissions_are_enabled() -> None:
+    caddyfile = (PROJECT_ROOT / "docker" / "caddy" / "Caddyfile").read_text(encoding="utf-8")
+    nginx_config = (PROJECT_ROOT / "docker" / "nginx" / "default.conf").read_text(encoding="utf-8")
+    vite_config = (PROJECT_ROOT / "web-ui" / "vite.config.js").read_text(encoding="utf-8")
+
+    assert "microphone=(self)" in caddyfile
+    assert "proxy_set_header Upgrade $http_upgrade;" in nginx_config
+    assert "proxy_set_header Connection $connection_upgrade;" in nginx_config
+    assert "ws: true" in vite_config
 
 
 def test_desktop_launch_endpoint_starts_windows_capture_tool() -> None:

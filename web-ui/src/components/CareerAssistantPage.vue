@@ -11,6 +11,7 @@ import CareerJobSearchDialog from './CareerJobSearchDialog.vue'
 import CareerMessageContent from './CareerMessageContent.vue'
 import { toTargetRolePayload } from '../job-library-target-role.js'
 import { isAssessmentPending } from '../career-assessment-view.js'
+import { openBrowserInterviewMaster } from '../browser-interview-launcher.js'
 import {
   firstServerTurn,
   removeServerTurn,
@@ -82,7 +83,6 @@ const contextSetupInitial = ref(null)
 const showJobSearch = ref(false)
 const showGreetingDialog = ref(false)
 const savingJobSearch = ref(false)
-const launchingInterviewMaster = ref(false)
 const jobSearchError = ref('')
 const pendingJobLibraryTarget = ref(null)
 const jobSearchButton = ref(null)
@@ -1062,21 +1062,12 @@ function closeContextSetup() {
   contextSetupInitial.value = null
 }
 
-async function launchInterviewMaster() {
-  if (launchingInterviewMaster.value) return
-  launchingInterviewMaster.value = true
-  errorMessage.value = ''
-  feedback.value = ''
-  try {
-    const payload = await requestJson('/api/career/live-interviews/desktop/launch', {
-      method: 'POST'
-    })
-    feedback.value = payload.message || '面试大师正在启动。'
-  } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '面试大师启动失败，请稍后重试。'
-  } finally {
-    launchingInterviewMaster.value = false
-  }
+function launchInterviewMaster() {
+  const selected = modelSelectionValue.value
+  const opened = openBrowserInterviewMaster({
+    answerModelProfileId: selected === 'free_quota_first' ? '' : selected
+  })
+  feedback.value = opened ? '面试大师已在独立浏览器窗口打开。' : '弹窗被拦截，已改为在新标签页打开。'
 }
 
 function openGreetingDialog() {
@@ -1983,12 +1974,11 @@ onMounted(() => {
           <button
             type="button"
             class="chat-material-button interview-master"
-            title="捕捉系统播放声与麦克风，实时识别问题并生成中文解题思路"
-            :disabled="launchingInterviewMaster"
+            title="选择面试标签页音频，实时识别问题并生成中文回答建议"
             @click="launchInterviewMaster"
           >
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13a8 8 0 0 1 16 0"/><path d="M4 13v5h3v-5zM17 13v5h3v-5z"/><path d="M9 19h6"/></svg>
-            <span>{{ launchingInterviewMaster ? '启动中…' : '面试大师' }}</span>
+            <span>面试大师</span>
           </button>
           <button
             ref="greetingButton"
