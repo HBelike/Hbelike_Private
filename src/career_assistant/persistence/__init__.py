@@ -27,6 +27,12 @@ from src.career_assistant.persistence.records import (
     MessageRole,
     SessionSummaryRecord,
 )
+from src.career_assistant.persistence.turn_job_repository import (
+    CareerTurnJobRepository,
+    ClaimedTurnRecord,
+    TurnEventRecord,
+    TurnPayloadRecord,
+)
 
 __all__ = [
     "CareerConversationRepository",
@@ -42,4 +48,8 @@ __all__ = [
     "MessageRecord",
     "MessageRole",
     "SessionSummaryRecord",
+    "CareerTurnJobRepository",
+    "ClaimedTurnRecord",
+    "TurnEventRecord",
+    "TurnPayloadRecord",
 ]
