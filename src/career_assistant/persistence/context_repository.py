@@ -174,6 +174,23 @@ class CareerContextRepository:
             ).mappings().one_or_none()
         return _target_role(row) if row is not None else None
 
+    def list_target_roles(self, actor_id: UUID, *, limit: int = 20) -> list[TargetRoleRecord]:
+        """列出当前 Actor 最近确认的目标岗位，供实时面试开场选择。"""
+
+        with self._database.transaction() as connection:
+            rows = connection.execute(
+                text(
+                    """
+                    SELECT * FROM career_assistant.target_role_profiles
+                    WHERE actor_id = :actor_id
+                    ORDER BY created_at DESC
+                    LIMIT :limit
+                    """
+                ),
+                {"actor_id": actor_id, "limit": limit},
+            ).mappings().all()
+        return [_target_role(row) for row in rows]
+
     def bind_conversation(
         self,
         actor_id: UUID,
