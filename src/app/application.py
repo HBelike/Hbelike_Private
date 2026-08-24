@@ -13,6 +13,7 @@ from src.observability.langsmith_runtime import trace_operation
 from src.repositories.error_event_repository import ErrorEventRepository
 from src.repositories.task_run_repository import TaskRunRepository
 from src.scheduler.scheduler_manager import SchedulerManager
+from src.services.skill_library_service import SkillLibraryService
 from src.tasks.article_layout_task import ArticleLayoutTask
 from src.tasks.audio_task import AudioTask
 from src.tasks.base_task import BaseTask
@@ -172,6 +173,7 @@ class Application:
         """在已持有流水线锁的前提下执行周五 08:00 内容生产。"""
 
         assert self.config is not None
+        self._refresh_skill_stars()
         self._run_task(SearchTask)
         self._run_task(SummaryTask)
         if self.config.video_submit_enabled:
@@ -220,11 +222,30 @@ class Application:
     def _run_scheduler_forever(self) -> None:
         """进入常驻调度模式。"""
         assert self.scheduler_manager is not None
+        self._refresh_skill_stars()
         self.scheduler_manager.run_forever(
             handlers={
                 "weekly_content_production": self._run_weekly_content_production_job,
                 "weekly_draft_creation": self._run_weekly_draft_creation_job,
             }
+        )
+
+    def _refresh_skill_stars(self) -> None:
+        """刷新已过期的 Skill Star 快照；失败不阻断内容 Scheduler。"""
+
+        assert self.config is not None
+        assert self.logger is not None
+        try:
+            summary = SkillLibraryService(self.config).refresh_stale_star_snapshots()
+        except Exception:
+            self.logger.exception("Skill Star 快照刷新失败")
+            return
+        self.logger.info(
+            "Skill Star 快照刷新完成：repositories=%s refreshed=%s unchanged=%s failed=%s",
+            summary["repositories"],
+            summary["refreshed"],
+            summary["unchanged"],
+            summary["failed"],
         )
 
     def _run_startup_self_check(self) -> None:

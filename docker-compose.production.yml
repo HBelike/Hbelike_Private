@@ -210,6 +210,8 @@ services:
       - application_data:/app/data
       - application_outputs:/app/outputs
       - application_logs:/app/logs
+      # Star 刷新与 WebUI 必须扫描同一份持久 Skill 目录。
+      - application_skills:/app/.agents
     depends_on:
       career-migrate:
         condition: service_completed_successfully

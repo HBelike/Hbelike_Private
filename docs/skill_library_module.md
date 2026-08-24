@@ -26,3 +26,11 @@
 - `SkillToolRegistry` 以通用能力而不是 Skill 名称绑定工具：skills.sh 实时搜索、GitHub Skill 仓库检查、项目级完整目录安装。仓库检查优先识别标准 `skills/`、`.agents/skills/`、`.claude/skills/`，避免把仓库维护用内部 Skill 与公开分发目录混装。
 - 项目安装从 GitHub 默认分支归档中只提取选中的完整 Skill 目录，单次上限 2000 个文件、80 MB，目标固定为 `.agents/skills/<name>`；已有目录跳过，不覆盖用户本地修改。新目录会被 `SkillLibraryService.list_skills()` 立即扫描，无需另一套缓存刷新。
 - 最终响应中的 `activated_skills[].status = mounted` 表示文件已真实进入本轮模型上下文；会话继承轮次的 `invocation_source` 为 `session`。`skill_executions` 则证明模型通过 Agent Loop 实际执行了哪些工具、状态和结果数。挂载或安装不等于执行新 Skill 自带脚本。
+
+## 2026-08-25：GitHub Star 快照恢复
+
+- Star 仓库识别优先读取 `SKILL.md` 的 `repository_full_name`、`github_repository`、`repository`、`homepage` 等字段；缺失时读取项目或用户目录下 `.agents/.skill-lock.json`、`.codex/.skill-lock.json` 的 GitHub 安装来源。
+- 列表和详情接口仍只读取 `data/skill_star_cache.json`，不会因打开技能库而同步等待 GitHub。首次快照会立即展示总 Star 数；积累下一期快照后再计算新增量和增长率。
+- 生产 `pipeline-scheduler` 与 API 共用 `application_skills` 和 `application_data`：Scheduler 启动时刷新一次过期快照，周五内容任务开始时再次检查；七天内的新快照直接复用，不重复请求 GitHub。
+- 无法关联公开 GitHub 仓库的项目自建或本地 Skill 明确显示“本地 Skill”，不再显示“暂无 Star”圆环；这类 Skill 不伪造仓库和 Star 数据。
+- `scripts/refresh_skill_stars.py` 继续保留为独立手动诊断入口，使用同一服务方法和七天有效期规则。

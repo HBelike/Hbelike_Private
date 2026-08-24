@@ -31,7 +31,7 @@ pipeline-scheduler（唯一副本）
 - **执行互斥**：Scheduler 与管理台手动运行共享同一个原子文件锁；发生冲突时 Scheduler 记录跳过，手动执行得到明确失败记录。锁的保守过期时间为六小时，防止容器崩溃留下永久阻塞。
 - **双数据库过渡**：Career/账号/RAG 使用 PostgreSQL + pgvector；原公众号工作流继续使用 SQLite。此次上线不改变旧业务数据模型，优先确保稳定发布。
 - **媒体与附件**：周榜产物使用 Docker 命名卷持久化；原始简历附件使用 API tmpfs，在 Turn 完成后删除。生产环境必须保持 `CAREER_REDACTION_ENABLED=true`。
-- **Skill 持久化**：`deploy/skill-seeds` 是随镜像发布、经过审查的 `SKILL.md` 快照；一次性 `skill-seed` 容器会先将缺失种子复制到独立 `application_skills` 卷并授予 API 进程写入权限。之后 WebUI 的保存结果优先且永不被重新部署覆盖，容器重建后仍可继续查看、编辑与每周刷新 Star。生产服务器不依赖开发电脑的 `~/.agents`、`~/.codex` 或插件缓存。
+- **Skill 持久化**：`deploy/skill-seeds` 是随镜像发布、经过审查的 `SKILL.md` 快照；一次性 `skill-seed` 容器会先将缺失种子复制到独立 `application_skills` 卷并授予 API 进程写入权限。API 与单一 Scheduler 共用该卷和 `application_data`，Scheduler 启动及每周内容任务会刷新已过期的 GitHub Star 快照。之后 WebUI 的保存结果优先且永不被重新部署覆盖；生产服务器不依赖开发电脑的 `~/.agents`、`~/.codex` 或插件缓存。
 - **认证边界**：生产设 `PLATFORM_AUTH_REQUIRED=true` 与 `PLATFORM_CLOSED_OPERATOR_MODE=true`。登录通过 HttpOnly Cookie，认证中间件会把真实平台用户映射为 Career Actor，避免所有登录用户共用默认对话身份。
 
 ## 部署前置条件

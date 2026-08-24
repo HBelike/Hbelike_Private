@@ -1436,10 +1436,12 @@ onBeforeUnmount(() => {
                   </span>
                   <span>{{ skillDescription(skill) }}</span>
                   <small>{{ skill.source_label }} · {{ skill.repository_full_name || skill.path_hint }}</small>
-                  <small class="skill-star-line">{{ formatStars(skill.stars) }}</small>
+                  <small v-if="skill.repository_full_name" class="skill-star-line">{{ formatStars(skill.stars) }}</small>
+                  <small v-else class="skill-local-line">本地 Skill</small>
                 </button>
 
                 <button
+                  v-if="skill.repository_full_name"
                   type="button"
                   class="star-stat-trigger"
                   :class="{ empty: typeof skill.stars !== 'number' || weeklyStarDelta(skill) === null }"

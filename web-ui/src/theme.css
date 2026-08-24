@@ -441,6 +441,78 @@ html[data-ui-theme="blue"] :is(.skill-editor-panel .panel-header, .skill-detail-
   border-color: var(--ui-line);
 }
 
+/* Skill Star 统计：列表圆环与 Teleport 浮层统一接入蓝白主题。 */
+html[data-ui-theme="blue"] .skill-local-line {
+  color: var(--ui-text-muted) !important;
+}
+
+html[data-ui-theme="blue"] .star-stat-trigger:hover,
+html[data-ui-theme="blue"] .star-stat-trigger:focus-visible {
+  background: var(--ui-surface-active);
+}
+
+html[data-ui-theme="blue"] .star-ring {
+  background:
+    radial-gradient(circle at center, var(--ui-surface-soft) 49%, transparent 51%),
+    conic-gradient(var(--ui-accent) var(--star-ring-percent, 0%), var(--ui-line) 0);
+  box-shadow: 0 0 0 1px var(--ui-focus);
+}
+
+html[data-ui-theme="blue"] .star-stat-trigger.empty .star-ring {
+  background:
+    radial-gradient(circle at center, var(--ui-surface-soft) 49%, transparent 51%),
+    conic-gradient(var(--ui-line-strong) 8%, var(--ui-line) 0);
+}
+
+html[data-ui-theme="blue"] body .skill-star-popover {
+  border-color: var(--ui-line-strong);
+  background: var(--ui-surface);
+  box-shadow: 0 18px 44px rgba(18, 43, 78, 0.2);
+  color: var(--ui-text-secondary);
+}
+
+html[data-ui-theme="blue"] body .skill-star-popover-heading {
+  border-color: var(--ui-line);
+  background: linear-gradient(135deg, var(--ui-surface-active), var(--ui-surface));
+}
+
+html[data-ui-theme="blue"] body .skill-star-popover-heading p {
+  color: var(--ui-accent-ink);
+}
+
+html[data-ui-theme="blue"] body .skill-star-popover-heading strong {
+  color: var(--ui-text);
+}
+
+html[data-ui-theme="blue"] body .skill-star-popover-heading > span,
+html[data-ui-theme="blue"] body .skill-star-popover-ring small,
+html[data-ui-theme="blue"] body .skill-star-metrics small {
+  color: var(--ui-text-muted);
+}
+
+html[data-ui-theme="blue"] body .skill-star-popover-ring {
+  background:
+    radial-gradient(circle at center, var(--ui-surface) 58%, transparent 59%),
+    conic-gradient(var(--ui-accent) var(--star-ring-percent, 0%), var(--ui-line) 0);
+}
+
+html[data-ui-theme="blue"] body .skill-star-popover-ring.empty {
+  background:
+    radial-gradient(circle at center, var(--ui-surface) 58%, transparent 59%),
+    conic-gradient(var(--ui-line-strong) 8%, var(--ui-line) 0);
+}
+
+html[data-ui-theme="blue"] body .skill-star-popover-ring strong,
+html[data-ui-theme="blue"] body .skill-star-metrics strong:not(.negative) {
+  color: var(--ui-accent-ink);
+}
+
+html[data-ui-theme="blue"] body .skill-star-popover-note {
+  border-color: var(--ui-line);
+  background: var(--ui-surface-soft);
+  color: var(--ui-text-muted);
+}
+
 /* 求职对话页 */
 html[data-ui-theme="blue"] .career-workspace {
   gap: 12px;
@@ -1292,6 +1364,380 @@ html[data-ui-theme="blue"] body .interview-library-shell :is(.reading-paragraph,
 
 html[data-ui-theme="blue"] body .interview-library-shell .reading-divider {
   background: linear-gradient(90deg, var(--ui-line-strong), var(--ui-line) 70%, transparent);
+}
+
+/* 面经文件导入弹窗：上传、解析与确认阶段统一使用蓝白主题。 */
+html[data-ui-theme="blue"] body .import-backdrop {
+  background: rgba(15, 32, 57, 0.44);
+}
+
+html[data-ui-theme="blue"] body .import-dialog {
+  border-color: var(--ui-line);
+  background: var(--ui-surface);
+  box-shadow: 0 28px 80px rgba(18, 43, 78, 0.24);
+  color: var(--ui-text);
+}
+
+html[data-ui-theme="blue"] body .import-dialog > header,
+html[data-ui-theme="blue"] body .import-tabs {
+  border-color: var(--ui-line);
+}
+
+html[data-ui-theme="blue"] body .import-dialog h2 {
+  color: var(--ui-text);
+}
+
+html[data-ui-theme="blue"] body .import-dialog .library-kicker {
+  color: var(--ui-accent-ink);
+}
+
+html[data-ui-theme="blue"] body .import-dialog header p:not(.library-kicker),
+html[data-ui-theme="blue"] body .file-intake-intro p,
+html[data-ui-theme="blue"] body .file-import-strategy p,
+html[data-ui-theme="blue"] body .recognition-card p,
+html[data-ui-theme="blue"] body .file-parse-progress-card p,
+html[data-ui-theme="blue"] body .file-progress-context,
+html[data-ui-theme="blue"] body .file-progress-list em {
+  color: var(--ui-text-muted);
+}
+
+html[data-ui-theme="blue"] body .import-tabs button {
+  color: var(--ui-text-muted);
+}
+
+html[data-ui-theme="blue"] body .import-tabs button.active {
+  border-bottom-color: var(--ui-accent);
+  background: var(--ui-surface-active);
+  color: var(--ui-accent-ink);
+}
+
+html[data-ui-theme="blue"] body .import-form label,
+html[data-ui-theme="blue"] body .file-import-strategy legend,
+html[data-ui-theme="blue"] body .file-import-strategy label {
+  color: var(--ui-text-secondary);
+}
+
+html[data-ui-theme="blue"] body .import-form input,
+html[data-ui-theme="blue"] body .import-form textarea {
+  border-color: var(--ui-line);
+  background: var(--ui-surface);
+  color: var(--ui-text);
+}
+
+html[data-ui-theme="blue"] body .import-form input:focus,
+html[data-ui-theme="blue"] body .import-form textarea:focus {
+  border-color: var(--ui-accent);
+  box-shadow: 0 0 0 3px var(--ui-focus);
+  outline: 0;
+}
+
+html[data-ui-theme="blue"] body .file-intake-intro {
+  border-left-color: var(--ui-accent);
+  background: var(--ui-surface-active);
+}
+
+html[data-ui-theme="blue"] body .file-intake-intro strong,
+html[data-ui-theme="blue"] body .file-picker span,
+html[data-ui-theme="blue"] body .recognition-card strong,
+html[data-ui-theme="blue"] body .progress-heading strong {
+  color: var(--ui-accent-ink);
+}
+
+html[data-ui-theme="blue"] body .file-picker {
+  border-color: var(--ui-accent-mid);
+  background: var(--ui-surface-soft);
+}
+
+html[data-ui-theme="blue"] body .file-picker:hover {
+  border-color: var(--ui-accent);
+  background: var(--ui-surface-active);
+}
+
+html[data-ui-theme="blue"] body .file-import-strategy,
+html[data-ui-theme="blue"] body .recognition-card {
+  border-color: var(--ui-line);
+  background: var(--ui-surface-soft);
+}
+
+html[data-ui-theme="blue"] body .file-import-strategy input {
+  accent-color: var(--ui-accent);
+}
+
+html[data-ui-theme="blue"] body .recognition-card span {
+  background: var(--ui-surface-active);
+  color: var(--ui-accent-ink);
+}
+
+html[data-ui-theme="blue"] body .file-parse-overlay {
+  background: color-mix(in srgb, var(--ui-surface) 80%, transparent);
+}
+
+html[data-ui-theme="blue"] body .file-parse-progress-card {
+  border-color: var(--ui-line-strong);
+  background: color-mix(in srgb, var(--ui-surface) 96%, transparent);
+  box-shadow: 0 18px 48px rgba(18, 43, 78, 0.18);
+}
+
+html[data-ui-theme="blue"] body .progress-heading,
+html[data-ui-theme="blue"] body .progress-phase,
+html[data-ui-theme="blue"] body .file-progress-context strong,
+html[data-ui-theme="blue"] body .file-progress-list strong {
+  color: var(--ui-text-secondary);
+}
+
+html[data-ui-theme="blue"] body .progress-track {
+  background: var(--ui-line);
+}
+
+html[data-ui-theme="blue"] body .progress-track i {
+  background: linear-gradient(90deg, var(--ui-accent), var(--ui-accent-mid));
+  box-shadow: 0 0 14px var(--ui-focus);
+}
+
+html[data-ui-theme="blue"] body .file-progress-list li {
+  background: var(--ui-surface-soft);
+  color: var(--ui-text-muted);
+}
+
+html[data-ui-theme="blue"] body .file-progress-list li > span,
+html[data-ui-theme="blue"] body .file-progress-list .is-completed > span {
+  background: var(--ui-surface-active);
+  color: var(--ui-accent-ink);
+}
+
+html[data-ui-theme="blue"] body .file-progress-list .is-parsing {
+  background: var(--ui-surface-active);
+}
+
+/* 面经采集弹窗：Teleport 到 body 后仍完整继承蓝白主题，避免组件默认绿色泄漏。 */
+html[data-ui-theme="blue"] body .collection-backdrop {
+  background: rgba(15, 32, 57, 0.44);
+}
+
+html[data-ui-theme="blue"] body .collection-dialog {
+  border-color: var(--ui-line);
+  background: var(--ui-surface);
+  box-shadow: 0 28px 80px rgba(18, 43, 78, 0.24);
+  color: var(--ui-text);
+}
+
+html[data-ui-theme="blue"] body .collection-dialog-header,
+html[data-ui-theme="blue"] body .collection-tabs {
+  border-color: var(--ui-line);
+}
+
+html[data-ui-theme="blue"] body .collection-dialog-header h2,
+html[data-ui-theme="blue"] body .collection-section h3,
+html[data-ui-theme="blue"] body .candidate-card h3,
+html[data-ui-theme="blue"] body .candidate-list-header h3 {
+  color: var(--ui-text);
+}
+
+html[data-ui-theme="blue"] body .collection-dialog .library-kicker,
+html[data-ui-theme="blue"] body .collection-dialog .section-label {
+  color: var(--ui-accent-ink);
+}
+
+html[data-ui-theme="blue"] body .collection-dialog-header p:not(.library-kicker),
+html[data-ui-theme="blue"] body .collection-section-heading p,
+html[data-ui-theme="blue"] body .candidate-list-header > span,
+html[data-ui-theme="blue"] body .candidate-evidence {
+  color: var(--ui-text-muted);
+}
+
+html[data-ui-theme="blue"] body .collection-tabs,
+html[data-ui-theme="blue"] body .collection-form {
+  background: var(--ui-surface-soft);
+}
+
+html[data-ui-theme="blue"] body .collection-tabs button {
+  color: var(--ui-text-muted);
+}
+
+html[data-ui-theme="blue"] body .collection-tabs button.active {
+  border-bottom-color: var(--ui-accent);
+  background: var(--ui-surface-active);
+  color: var(--ui-accent-ink);
+}
+
+html[data-ui-theme="blue"] body .dialog-success {
+  border: 1px solid var(--ui-line-strong);
+  background: var(--ui-surface-active);
+  color: var(--ui-accent-ink);
+}
+
+html[data-ui-theme="blue"] body .collection-section,
+html[data-ui-theme="blue"] body .candidate-card {
+  border-color: var(--ui-line);
+  background: var(--ui-surface);
+}
+
+html[data-ui-theme="blue"] body .xiaohongshu-source-section {
+  background: linear-gradient(135deg, var(--ui-surface) 0%, var(--ui-surface-soft) 100%);
+}
+
+html[data-ui-theme="blue"] body .collection-loading {
+  background: var(--ui-surface-active);
+  color: var(--ui-accent-ink);
+}
+
+html[data-ui-theme="blue"] body .collection-field,
+html[data-ui-theme="blue"] body .candidate-meta-grid label,
+html[data-ui-theme="blue"] body .candidate-import-meta label,
+html[data-ui-theme="blue"] body .candidate-extra-fields label,
+html[data-ui-theme="blue"] body .candidate-body-field {
+  color: var(--ui-text-secondary);
+}
+
+html[data-ui-theme="blue"] body .collection-field input,
+html[data-ui-theme="blue"] body .candidate-meta-grid input,
+html[data-ui-theme="blue"] body .candidate-import-meta input,
+html[data-ui-theme="blue"] body .candidate-extra-fields input,
+html[data-ui-theme="blue"] body .candidate-body-field textarea {
+  border-color: var(--ui-line);
+  background: var(--ui-surface);
+  color: var(--ui-text);
+}
+
+html[data-ui-theme="blue"] body .collection-field input:focus,
+html[data-ui-theme="blue"] body .candidate-meta-grid input:focus,
+html[data-ui-theme="blue"] body .candidate-import-meta input:focus,
+html[data-ui-theme="blue"] body .candidate-extra-fields input:focus,
+html[data-ui-theme="blue"] body .candidate-body-field textarea:focus {
+  border-color: var(--ui-accent);
+  box-shadow: 0 0 0 3px var(--ui-focus);
+  outline: 0;
+}
+
+html[data-ui-theme="blue"] body .collection-option-toggle {
+  border-color: var(--ui-line);
+  background: var(--ui-surface);
+}
+
+html[data-ui-theme="blue"] body .collection-option-toggle input {
+  accent-color: var(--ui-accent);
+}
+
+html[data-ui-theme="blue"] body .collection-option-toggle strong {
+  color: var(--ui-text-secondary);
+}
+
+html[data-ui-theme="blue"] body .collection-option-toggle small {
+  color: var(--ui-text-muted);
+}
+
+html[data-ui-theme="blue"] body .collection-human-review-note {
+  border-color: var(--ui-line);
+  border-left-color: var(--ui-accent);
+  background: var(--ui-surface-soft);
+  color: var(--ui-text-secondary);
+}
+
+html[data-ui-theme="blue"] body .xiaohongshu-job-card {
+  border-color: var(--ui-line-strong);
+  background: color-mix(in srgb, var(--ui-surface) 96%, var(--ui-surface-active));
+  box-shadow: 0 10px 22px rgba(33, 75, 128, 0.08);
+}
+
+html[data-ui-theme="blue"] body .collection-job-card span,
+html[data-ui-theme="blue"] body .collection-job-card p {
+  color: var(--ui-text-muted);
+}
+
+html[data-ui-theme="blue"] body .collection-job-card strong {
+  color: var(--ui-accent-ink);
+}
+
+html[data-ui-theme="blue"] body .collection-job-heading em {
+  background: var(--ui-surface-active);
+  color: var(--ui-accent-ink);
+}
+
+html[data-ui-theme="blue"] body .collection-stage-track span {
+  color: var(--ui-text-muted);
+}
+
+html[data-ui-theme="blue"] body .collection-stage-track i {
+  border-color: var(--ui-line);
+  background: var(--ui-surface);
+  color: var(--ui-text-muted);
+}
+
+html[data-ui-theme="blue"] body .collection-stage-track span.active {
+  color: var(--ui-accent-ink);
+}
+
+html[data-ui-theme="blue"] body .collection-stage-track span.active i {
+  border-color: var(--ui-accent-mid);
+  background: var(--ui-surface-active);
+  color: var(--ui-accent-ink);
+}
+
+html[data-ui-theme="blue"] body .collection-stage-track span.current i {
+  box-shadow: 0 0 0 4px var(--ui-focus);
+}
+
+html[data-ui-theme="blue"] body .collection-progress-line {
+  background: var(--ui-line);
+}
+
+html[data-ui-theme="blue"] body .collection-progress-line i {
+  background: linear-gradient(90deg, var(--ui-accent), var(--ui-accent-mid));
+}
+
+html[data-ui-theme="blue"] body .collection-summary-grid > div {
+  border-color: var(--ui-line);
+  background: var(--ui-surface);
+}
+
+html[data-ui-theme="blue"] body .collection-summary-grid span {
+  color: var(--ui-text-muted);
+}
+
+html[data-ui-theme="blue"] body .collection-summary-grid strong {
+  color: var(--ui-accent-ink);
+}
+
+html[data-ui-theme="blue"] body .candidate-card a,
+html[data-ui-theme="blue"] body .candidate-review-heading strong {
+  color: var(--ui-accent-ink);
+}
+
+html[data-ui-theme="blue"] body .candidate-excerpt {
+  color: var(--ui-text-secondary);
+}
+
+html[data-ui-theme="blue"] body .candidate-markdown,
+html[data-ui-theme="blue"] body .candidate-extra-fields {
+  border-color: var(--ui-line);
+  background: var(--ui-surface-soft);
+  color: var(--ui-text-secondary);
+}
+
+html[data-ui-theme="blue"] body .candidate-markdown pre,
+html[data-ui-theme="blue"] body .candidate-review {
+  border-color: var(--ui-line);
+  color: var(--ui-text-secondary);
+}
+
+html[data-ui-theme="blue"] body .candidate-card header > .candidate-status.is-valid,
+html[data-ui-theme="blue"] body .candidate-card header > .candidate-status.is-imported,
+html[data-ui-theme="blue"] body .candidate-status.is-valid,
+html[data-ui-theme="blue"] body .candidate-status.is-imported,
+html[data-ui-theme="blue"] body .candidate-analysis-meta span,
+html[data-ui-theme="blue"] body .candidate-review-heading em {
+  background: var(--ui-surface-active);
+  color: var(--ui-accent-ink);
+}
+
+html[data-ui-theme="blue"] body .collection-waiting-card {
+  border-color: var(--ui-line-strong);
+  background: var(--ui-surface-soft);
+  color: var(--ui-text-muted);
+}
+
+html[data-ui-theme="blue"] body .collection-waiting-card strong {
+  color: var(--ui-text-secondary);
 }
 
 /* 登录页在蓝白主题下移除深色舞台与多余装饰。 */

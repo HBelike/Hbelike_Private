@@ -1123,7 +1123,6 @@ onBeforeUnmount(() => {
       <div class="library-actions">
         <button type="button" class="quiet-action collection-action" @click="openCollection('xiaohongshu')">小红书公开内容导入</button>
         <button type="button" class="quiet-action" @click="openImport('text')">粘贴正文</button>
-        <button type="button" class="primary-action" @click="openImport('file')">导入材料</button>
       </div>
     </header>
 

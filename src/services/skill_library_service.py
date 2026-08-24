@@ -170,6 +170,7 @@ class SkillLibraryService:
         """扫描当前可读的 Skill 目录，并返回去重后的摘要列表。"""
 
         summaries: dict[str, SkillSummary] = {}
+        repository_by_name = self._repository_full_names_from_install_locks()
         for skill_path, source, source_label in self._iter_skill_files():
             try:
                 markdown = self._read_text(skill_path)
@@ -179,10 +180,12 @@ class SkillLibraryService:
             name, description = self._parse_frontmatter(markdown, fallback_name=skill_path.parent.name)
             author = self._frontmatter_field(markdown, ["author", "authors", "maintainer"]) or source_label
             homepage_url = self._frontmatter_field(markdown, ["homepage", "url", "repo", "repository", "link"])
-            repository_full_name = self._repository_full_name_from_metadata(
+            repository_full_name = self._repository_full_name_for_skill(
+                name=name,
                 homepage_url=homepage_url,
                 path_hint=self._path_hint(skill_path),
                 markdown=markdown,
+                repository_by_name=repository_by_name,
             )
             # 列表页必须只读本地缓存。Star 的周期刷新不能阻塞首次进入技能库。
             star_snapshot = self._repository_star_snapshot(repository_full_name, refresh_if_stale=False)
@@ -228,10 +231,12 @@ class SkillLibraryService:
         source_label = self._source_label_for_path(skill_path)
         homepage_url = self._frontmatter_field(markdown, ["homepage", "url", "repo", "repository", "link"])
         path_hint = self._path_hint(skill_path)
-        repository_full_name = self._repository_full_name_from_metadata(
+        repository_full_name = self._repository_full_name_for_skill(
+            name=name,
             homepage_url=homepage_url,
             path_hint=path_hint,
             markdown=markdown,
+            repository_by_name=self._repository_full_names_from_install_locks(),
         )
         star_snapshot = self._repository_star_snapshot(repository_full_name, refresh_if_stale=False)
         summary = SkillSummary(
@@ -263,16 +268,20 @@ class SkillLibraryService:
         """
 
         repositories: set[str] = set()
+        repository_by_name = self._repository_full_names_from_install_locks()
         for skill_path, _source, _source_label in self._iter_skill_files():
             try:
                 markdown = self._read_text(skill_path)
             except OSError:
                 continue
+            name, _description = self._parse_frontmatter(markdown, fallback_name=skill_path.parent.name)
             homepage_url = self._frontmatter_field(markdown, ["homepage", "url", "repo", "repository", "link"])
-            repository = self._repository_full_name_from_metadata(
+            repository = self._repository_full_name_for_skill(
+                name=name,
                 homepage_url=homepage_url,
                 path_hint=self._path_hint(skill_path),
                 markdown=markdown,
+                repository_by_name=repository_by_name,
             )
             if repository:
                 repositories.add(repository)
@@ -1311,6 +1320,64 @@ GitHub Skill 候选：
                 )
             )
         return localized_items
+
+    def _repository_full_name_for_skill(
+        self,
+        *,
+        name: str,
+        homepage_url: str | None,
+        path_hint: str,
+        markdown: str,
+        repository_by_name: dict[str, str],
+    ) -> str | None:
+        """优先读取 Skill 自带元数据，缺失时回退到安装器锁文件。"""
+
+        repository = self._repository_full_name_from_metadata(
+            homepage_url=homepage_url,
+            path_hint=path_hint,
+            markdown=markdown,
+        )
+        if repository:
+            return repository
+        return repository_by_name.get(name)
+
+    def _repository_full_names_from_install_locks(self) -> dict[str, str]:
+        """读取本机或项目安装器记录的 Skill → GitHub 仓库映射。"""
+
+        home = Path.home()
+        candidates = [
+            self.config.project_root / ".agents" / ".skill-lock.json",
+            self.config.project_root / ".codex" / ".skill-lock.json",
+            home / ".agents" / ".skill-lock.json",
+            home / ".codex" / ".skill-lock.json",
+        ]
+        repositories: dict[str, str] = {}
+        seen_paths: set[Path] = set()
+        for candidate in candidates:
+            resolved_candidate = candidate.resolve()
+            if resolved_candidate in seen_paths:
+                continue
+            seen_paths.add(resolved_candidate)
+            try:
+                payload = json.loads(resolved_candidate.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            skills = payload.get("skills") if isinstance(payload, dict) else None
+            if not isinstance(skills, dict):
+                continue
+            for raw_name, raw_entry in skills.items():
+                name = str(raw_name).strip()
+                if not name or name in repositories or not isinstance(raw_entry, dict):
+                    continue
+                source_type = str(raw_entry.get("sourceType", "")).strip().lower()
+                if source_type and source_type != "github":
+                    continue
+                for key in ("sourceUrl", "source"):
+                    repository = self._extract_github_repository_full_name(str(raw_entry.get(key, "")))
+                    if repository:
+                        repositories[name] = repository
+                        break
+        return repositories
 
     def _repository_full_name_from_metadata(
         self,
