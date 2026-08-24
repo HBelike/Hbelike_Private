@@ -2,14 +2,15 @@
 
 该 Chrome MV3 扩展是职位库与用户已登录 BOSS 直聘页面之间的本地通道。日常使用时，扩展返回城市、职位列表与职位详情；只有用户逐条审核文案并最终确认后，才会在后台聊天页执行真实发送。
 
-## 首次安装
+## 首次安装（生产用户）
 
-1. 在 Chrome 地址栏打开 `chrome://extensions`。
-2. 打开右上角“开发者模式”。
-3. 点击“加载已解压的扩展程序”。
-4. 选择本目录：`browser-extension/job-library`。
-5. 在同一 Chrome 中打开并登录 `https://www.zhipin.com/`。
-6. 回到平台左侧一级菜单“职位库”，点击右上角连接状态重新检查。
+1. 在职位库或一键打招呼的安装拦截弹窗中下载版本化 ZIP，并解压到一个不会删除的固定目录。
+2. Chrome 打开 `chrome://extensions`，Edge 打开 `edge://extensions`。
+3. 开启“开发者模式”，点击“加载已解压的扩展程序”，选择刚才解压出的目录。
+4. 在同一浏览器中打开并登录 `https://www.zhipin.com/`。
+5. 回到平台刷新页面；右上角显示“助手已连接”后再继续搜索或打招呼。
+
+生产页面同时提供独立图文教程 `/boss-extension-guide.html`。开发人员也可以直接加载本仓库的 `browser-extension/job-library` 目录。
 
 扩展更新后，在扩展管理页点击本扩展的“重新加载”即可。
 
@@ -64,9 +65,13 @@ BOSS 职位与沟通链路来自其网页当前使用的内部接口和 DOM，�
 
 `0.2.2` 修复了 BOSS 已接收消息但页面未渲染 `status-delivery` / `status-read` 时被误判为 `send_unknown` 的问题。该兼容逻辑不会把历史同文案或仍留在输入框中的文案判为成功，也不会重试已经点击过的消息。
 
+生产下载包由仓库根目录的 `scripts/package_boss_extension.py` 生成，输出到 `web-ui/public/downloads/find-job-boss-helper-v{version}.zip`。网页的下载版本、ZIP 文件名和 `manifest.json` 必须一致。安装状态不写数据库：页面每次进入依赖 BOSS 的区域时都通过 `ping` 检查当前浏览器，因为同一用户换电脑、换浏览器或停用扩展后，用户级数据库标记都会失真。
+
 验证命令：
 
 ```powershell
+.\.venv\Scripts\python.exe scripts\package_boss_extension.py
+
 cd browser-extension/job-library
 npm test
 node --check service-worker.js

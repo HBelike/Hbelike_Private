@@ -1,6 +1,7 @@
 <script setup>
 import { computed, nextTick, onMounted, ref } from 'vue'
 import { JobLibraryBridgeError, jobLibraryBridge } from '../job-library-bridge.js'
+import { normalizeBossExtensionConnection } from '../boss-extension-onboarding.js'
 import {
   greetingJobKey,
   normalizeGreetingLimit,
@@ -12,6 +13,7 @@ import {
   normalizeHotJobCities
 } from '../job-city-catalog.js'
 import JobCityPicker from './JobCityPicker.vue'
+import BossExtensionInstallDialog from './BossExtensionInstallDialog.vue'
 
 const CITY_STORAGE_KEY = 'find-job-job-city-v1'
 
@@ -51,6 +53,8 @@ const detailError = ref('')
 const selectedJobs = ref([])
 const multiSelectionError = ref('')
 const bridgeStatus = ref('checking')
+const bridgeVersion = ref('')
+const installDialogOpen = ref(false)
 const searchInput = ref(null)
 const selectedCity = ref(readStoredCity())
 const submittedCity = ref({ ...selectedCity.value })
@@ -62,7 +66,7 @@ let detailSequence = 0
 
 const bridgeStatusText = computed(() => ({
   checking: '正在连接助手',
-  ready: '助手已连接',
+  ready: bridgeVersion.value ? `助手已连接 · v${bridgeVersion.value}` : '助手已连接',
   missing: '需要安装助手',
   attention: '需要处理 BOSS 页面'
 }[bridgeStatus.value]))
@@ -173,22 +177,41 @@ async function loadCities() {
   }
 }
 
-async function checkBridge() {
+async function checkBridge({ loadCatalog = true } = {}) {
   bridgeStatus.value = 'checking'
   try {
-    await jobLibraryBridge.ping()
-    bridgeStatus.value = 'ready'
-    searchError.value = ''
-    void loadCities()
+    const connection = normalizeBossExtensionConnection(await jobLibraryBridge.ping())
+    bridgeStatus.value = connection.status
+    bridgeVersion.value = connection.version
+    installDialogOpen.value = connection.status !== 'ready'
+    searchError.value = connection.status === 'ready' ? '' : '未检测到职位库浏览器助手。'
+    if (connection.status === 'ready' && loadCatalog) void loadCities()
+    return connection.status === 'ready'
   } catch (error) {
     bridgeStatus.value = 'missing'
+    bridgeVersion.value = ''
+    installDialogOpen.value = true
     searchError.value = readableBridgeError(error, '未检测到职位库浏览器助手。')
+    return false
   }
+}
+
+function handleConnectionBadge() {
+  if (bridgeStatus.value === 'missing') {
+    installDialogOpen.value = true
+    return
+  }
+  void checkBridge()
+}
+
+function refreshForExtensionCheck() {
+  window.location.reload()
 }
 
 async function submitSearch() {
   const nextQuery = query.value.trim()
   if (!nextQuery || searching.value) return
+  if (!await checkBridge({ loadCatalog: false })) return
   const sequence = ++searchSequence
   searching.value = true
   searchError.value = ''
@@ -199,8 +222,6 @@ async function submitSearch() {
   hasSearched.value = true
 
   try {
-    if (bridgeStatus.value !== 'ready') await jobLibraryBridge.ping()
-    bridgeStatus.value = 'ready'
     const result = await jobLibraryBridge.searchJobs(nextQuery, 1, submittedCity.value)
     if (sequence !== searchSequence) return
     jobs.value = result.jobs ?? []
@@ -295,7 +316,7 @@ onMounted(() => {
           class="connection-badge"
           :class="`is-${bridgeStatus}`"
           :disabled="bridgeStatus === 'checking'"
-          @click="checkBridge"
+          @click="handleConnectionBadge"
         >
           <i aria-hidden="true"></i>
           {{ bridgeStatusText }}
@@ -339,10 +360,10 @@ onMounted(() => {
         <strong>{{ bridgeStatus === 'missing' ? '连接职位库助手后即可搜索' : '本次没有获取到岗位' }}</strong>
         <p>{{ searchError }}</p>
         <p v-if="bridgeStatus === 'missing'" class="setup-path">
-          首次使用：打开 Chrome 扩展管理页，加载项目中的 <code>browser-extension/job-library</code>，然后登录 BOSS 直聘。
+          当前浏览器尚未连接助手。下载 ZIP 后可按照 Chrome 或 Edge 图文教程完成安装。
         </p>
       </div>
-      <button type="button" @click="checkBridge">重新检查</button>
+      <button type="button" @click="installDialogOpen = true">查看安装说明</button>
     </section>
 
     <p v-if="multiSelectionError" class="multi-selection-error" role="alert">
@@ -503,6 +524,13 @@ onMounted(() => {
       </section>
     </div>
   </section>
+
+  <BossExtensionInstallDialog
+    :open="installDialogOpen"
+    :error="bridgeStatus === 'missing' ? searchError : ''"
+    @close="installDialogOpen = false"
+    @refresh="refreshForExtensionCheck"
+  />
 </template>
 
 <style scoped>

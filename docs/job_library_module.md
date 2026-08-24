@@ -4,7 +4,7 @@
 
 职位库是左侧导航中的独立一级模块，固定路由为 `/interviews/jobs`，位于“面经库”之后。用户进入“职位库”后，选择工作城市并输入岗位名称，即可查看 BOSS 直聘当前会话返回的真实岗位卡片和完整职位详情。
 
-页面不要求用户复制职位 URL，不显示扩展执行过程，也不保存 BOSS 登录凭据。首次安装浏览器助手并登录后，日常操作保持为“输入岗位名称 → 搜索 → 点击岗位”。
+页面不要求用户复制职位 URL，不显示扩展执行过程，也不保存 BOSS 登录凭据。首次安装浏览器助手并登录后，日常操作保持为“输入岗位名称 → 搜索 → 点击岗位”。未安装助手时，职位搜索和一键打招呼共用同一前置拦截，用户可直接下载 ZIP，并查看 Chrome 或 Edge 图文教程。
 
 职位库使用独立模块键 `job_library`。管理员可在管理台单独控制其启用状态；关闭职位库不会影响面经库，关闭面经库也不会影响职位库。原有 `/interviews/jobs` 地址保持不变，历史书签可继续使用。
 
@@ -22,6 +22,19 @@
   -> /wapi/zpgeek/job/detail.json
   -> boss-data.js 归一化
   -> 职位卡片 / 详情阅读区
+```
+
+浏览器助手安装拦截链路：
+
+```text
+进入职位库 / 打开职位检索 / 进入一键打招呼选岗
+  -> JobSearchWorkspace.vue 挂载并调用 ping
+  -> 当前浏览器未响应
+  -> BossExtensionInstallDialog.vue 阻止本次搜索
+  -> 下载版本化 ZIP / 打开 Chrome 或 Edge 教程
+  -> 用户安装并刷新
+  -> ping 返回 connected + version
+  -> 解锁真实职位搜索和后续打招呼流程
 ```
 
 ## 交互语义
@@ -67,10 +80,12 @@
 - 城市目录与平台代码分层：`v-region` 只负责开源城市选择交互，`list_cities` 返回的 BOSS 九位城市代码才进入真实搜索请求；两者按规范化城市名映射，无法映射时明确提示，不猜测代码。
 - 城市选择器按需加载：进入职位库时不下载完整行政区数据，只有用户打开城市面板时才加载，避免增加首次打开耗时。
 - 不引入本地 Python、Patchright 或新增后端服务，降低安装与运行负担。
+- 不用数据库记录“已安装”：扩展属于浏览器实例而非用户账号；用户更换电脑、浏览器、浏览器配置或手动停用扩展后，数据库标记无法代表当前设备。页面以当前浏览器实时 `ping` 为唯一判定依据。
+- 下载包走现有前端静态资源链路，文件名携带 `manifest.json` 版本号；当前不引入应用商店审核流程，也不做旧版本兼容或最低版本拦截。
 
 ## 访问限制处理
 
-- 没有扩展：页面给出一次性“加载已解压扩展”说明。
+- 没有扩展：首次进入依赖 BOSS 的页面时显示安装拦截弹窗；关闭弹窗会取消当前动作，页面保留固定的黄色“需要安装助手”入口，避免换电脑或换浏览器后没有恢复路径。
 - 未登录：提示用户在已打开的 BOSS 页面完成登录。
 - 验证码或安全验证：立即停止本次调用，提示人工处理，不自动重试或绕过。
 - `code=37`：用户搜索、读取岗位详情或执行发送前预检时，普通刷新所选 BOSS 标签页一次，并只重试原只读请求一次。刷新失败或重试仍异常时立即停止；发送进度页对尚未提交消息的失败项提供手动重试。
@@ -93,6 +108,10 @@
 - `src/platform_access/navigation_config.py`：职位库一级模块目录、默认启用状态和角色访问能力。
 - `web-ui/src/App.vue`：职位库左侧菜单、路由归属、页面标题和独立高亮。
 - `web-ui/src/components/JobSearchWorkspace.vue`：职位库 UI、请求状态、分页、详情竞态处理。
+- `web-ui/src/components/BossExtensionInstallDialog.vue`：未连接扩展时的前置拦截、ZIP 下载和 Chrome/Edge 教程入口。
+- `web-ui/src/boss-extension-onboarding.js`：扩展版本、静态下载地址、教程锚点和连接状态归一化。
+- `web-ui/public/boss-extension-guide.html`：无需登录即可查看的 Chrome/Edge 图文安装教程。
+- `scripts/package_boss_extension.py`：依据扩展 `manifest.json` 生成确定性的版本化 ZIP。
 - `web-ui/src/components/JobCityPicker.vue`：共用城市选择器、`v-region` 适配、热门城市入口与 BOSS 城市代码映射。
 - `web-ui/src/job-city-catalog.js`：常用城市代码兜底、BOSS 城市目录合并与校验。
 - `web-ui/src/components/CareerJobSearchDialog.vue`：求职助手内的职位库弹窗和固定确认区。
@@ -108,6 +127,9 @@
 ## 验证
 
 ```powershell
+.\.venv\Scripts\python.exe scripts\package_boss_extension.py
+.\.venv\Scripts\python.exe -m pytest tests/test_boss_extension_distribution.py -q
+
 .\.venv\Scripts\python.exe -m unittest tests.test_navigation_config -v
 
 cd browser-extension/job-library
@@ -119,6 +141,8 @@ cd ../../web-ui
 npm test
 npm run build
 ```
+
+2026-08-24 扩展安装引导验证：生产下载包版本与 `manifest.json` 保持一致，ZIP 根目录可直接作为“加载已解压的扩展程序”的目标；Chrome、Edge 教程和职位库返回路径均包含在前端静态构建中。连接判定使用当前浏览器实时 `ping`，没有新增数据库字段或迁移。
 
 2026-08-21 回归验证：修复点击岗位时直接把 Vue Proxy 传给 `window.postMessage` 导致的 `DataCloneError`。详情请求仍在每次选中卡片时触发，扩展协议与 BOSS 详情端点不变。
 
