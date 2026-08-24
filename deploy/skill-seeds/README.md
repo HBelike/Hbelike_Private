@@ -1,7 +1,8 @@
 # 生产 Skill 种子
 
 本目录是部署镜像中唯一允许携带的 Skill 快照来源。生产服务器不会读取开发电脑的
-`~/.agents`、`~/.codex` 或 Codex 插件缓存。
+`~/.agents`、`~/.codex` 或 Codex 插件缓存。`.skill-lock.json` 只保存已经核验的公开
+GitHub 仓库来源，供 Star 周快照使用；来源不明确的本地 Skill 不建立仓库映射。
 
 当前快照包含开发机可见的 **56 个去重 Skill**。每项仅携带 `SKILL.md`，目录名称按
 frontmatter 的 `name` 规整；详情见 `catalog.manifest.json`。其中包括项目正在使用的

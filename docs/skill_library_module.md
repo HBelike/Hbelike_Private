@@ -29,7 +29,7 @@
 
 ## 2026-08-25：GitHub Star 快照恢复
 
-- Star 仓库识别优先读取 `SKILL.md` 的 `repository_full_name`、`github_repository`、`repository`、`homepage` 等字段；缺失时读取项目或用户目录下 `.agents/.skill-lock.json`、`.codex/.skill-lock.json` 的 GitHub 安装来源。
+- Star 仓库识别优先读取 `SKILL.md` 的 `repository_full_name`、`github_repository`、`repository`、`homepage` 等字段；缺失时读取项目、用户目录或 `deploy/skill-seeds/.skill-lock.json` 中经过核验的 GitHub 安装来源。生产种子只记录公开仓库地址，不携带凭据。
 - 列表和详情接口仍只读取 `data/skill_star_cache.json`，不会因打开技能库而同步等待 GitHub。首次快照会立即展示总 Star 数；积累下一期快照后再计算新增量和增长率。
 - 生产 `pipeline-scheduler` 与 API 共用 `application_skills` 和 `application_data`：Scheduler 启动时刷新一次过期快照，周五内容任务开始时再次检查；七天内的新快照直接复用，不重复请求 GitHub。
 - 无法关联公开 GitHub 仓库的项目自建或本地 Skill 明确显示“本地 Skill”，不再显示“暂无 Star”圆环；这类 Skill 不伪造仓库和 Star 数据。

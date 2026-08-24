@@ -1348,6 +1348,7 @@ GitHub Skill 候选：
         candidates = [
             self.config.project_root / ".agents" / ".skill-lock.json",
             self.config.project_root / ".codex" / ".skill-lock.json",
+            self.config.project_root / "deploy" / "skill-seeds" / ".skill-lock.json",
             home / ".agents" / ".skill-lock.json",
             home / ".codex" / ".skill-lock.json",
         ]

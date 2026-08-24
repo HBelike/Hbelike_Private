@@ -49,6 +49,37 @@ class SkillStarRepositoryResolutionTests(unittest.TestCase):
 
             self.assertEqual(summary.repository_full_name, "example/demo-skills")
 
+    def test_bundled_seed_lock_supplies_repository_in_production(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            project_root = Path(temporary_directory)
+            skill_root = project_root / ".agents" / "skills" / "demo-skill"
+            skill_root.mkdir(parents=True)
+            (skill_root / "SKILL.md").write_text(
+                "---\nname: demo-skill\ndescription: 演示技能\n---\n\n正文。\n",
+                encoding="utf-8",
+            )
+            seed_root = project_root / "deploy" / "skill-seeds"
+            seed_root.mkdir(parents=True)
+            (seed_root / ".skill-lock.json").write_text(
+                json.dumps(
+                    {
+                        "version": 3,
+                        "skills": {
+                            "demo-skill": {
+                                "source": "example/production-skills",
+                                "sourceType": "github",
+                                "sourceUrl": "https://github.com/example/production-skills.git",
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            summary = next(item for item in self._service(project_root).list_skills() if item.name == "demo-skill")
+
+            self.assertEqual(summary.repository_full_name, "example/production-skills")
+
     def test_refresh_writes_first_snapshot_and_skips_it_within_seven_days(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             project_root = Path(temporary_directory)
