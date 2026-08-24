@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Find Job 职位库助手",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "通过用户已登录的 BOSS 页面读取职位，并在用户确认后逐条发送岗位招呼语。",
   "permissions": [
     "tabs",

@@ -43,6 +43,33 @@ function responseMessage(response) {
   )
 }
 
+export const CHAT_DELIVERY_EVIDENCE = Object.freeze({
+  stableMs: 2000,
+  successClassPattern: '(?:^|\\s)(?:status-delivery|status-read|status-success|status-sent)(?:\\s|$)',
+  failureClassPattern: '(?:^|\\s)(?:status-fail|status-failed|status-error|send-fail)(?:\\s|$)',
+  successTextPattern: '已送达|已读|发送成功',
+  failureTextPattern: '发送失败|发送异常|重新发送|点击重试'
+})
+
+export function classifyOutgoingMessageEvidence(evidence = {}, rules = CHAT_DELIVERY_EVIDENCE) {
+  const statusClasses = text(evidence.statusClasses, 800)
+  const statusText = text(evidence.statusText, 300)
+  if (new RegExp(rules.failureClassPattern, 'i').test(statusClasses)
+    || new RegExp(rules.failureTextPattern).test(statusText)) {
+    return 'failed'
+  }
+  if (new RegExp(rules.successClassPattern, 'i').test(statusClasses)
+    || new RegExp(rules.successTextPattern).test(statusText)) {
+    return 'sent'
+  }
+  if (evidence.isNew === true
+    && evidence.inputCleared === true
+    && Number(evidence.stableForMs) >= Number(rules.stableMs)) {
+    return 'sent'
+  }
+  return 'pending'
+}
+
 export function classifyFriendAddResponse(response) {
   const code = Number(response?.code)
   const message = responseMessage(response)

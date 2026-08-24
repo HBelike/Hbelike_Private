@@ -12,6 +12,7 @@ import {
 } from './boss-data.js'
 import {
   buildBossChatUrl,
+  CHAT_DELIVERY_EVIDENCE,
   classifyFriendAddResponse,
   normalizeGreetingPayload
 } from './boss-greeting.js'
@@ -345,10 +346,28 @@ async function runChatSend(tabId, message) {
   const [{ result } = {}] = await chrome.scripting.executeScript({
     target: { tabId },
     world: 'MAIN',
-    args: [message],
-    func: async (finalMessage) => {
+    args: [message, CHAT_DELIVERY_EVIDENCE],
+    func: async (finalMessage, evidenceRules) => {
       const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds))
       const normalized = String(finalMessage ?? '').trim()
+      const classifyEvidence = (evidence = {}) => {
+        const statusClasses = String(evidence.statusClasses ?? '').trim().slice(0, 800)
+        const statusText = String(evidence.statusText ?? '').trim().slice(0, 300)
+        if (new RegExp(evidenceRules.failureClassPattern, 'i').test(statusClasses)
+          || new RegExp(evidenceRules.failureTextPattern).test(statusText)) {
+          return 'failed'
+        }
+        if (new RegExp(evidenceRules.successClassPattern, 'i').test(statusClasses)
+          || new RegExp(evidenceRules.successTextPattern).test(statusText)) {
+          return 'sent'
+        }
+        if (evidence.isNew === true
+          && evidence.inputCleared === true
+          && Number(evidence.stableForMs) >= Number(evidenceRules.stableMs)) {
+          return 'sent'
+        }
+        return 'pending'
+      }
       const pageState = () => {
         const pageText = document.body?.innerText ?? ''
         if (/安全验证|环境存在异常|请稍候/.test(pageText) || /verify|security-check/i.test(location.pathname)) {
@@ -383,11 +402,18 @@ async function runChatSend(tabId, message) {
       const outgoingMessages = () => [...document.querySelectorAll('.item-myself .message-text')]
         .filter((element) => element.textContent?.trim() === normalized)
       if (outgoingMessages().some((element) => {
-        const status = element.closest('.item-myself')?.querySelector('.status')
-        return status?.classList.contains('status-delivery') || status?.classList.contains('status-read')
+        const row = element.closest('.item-myself')
+        const status = row?.querySelector('.status,[class*="status-"]')
+        return classifyEvidence({
+          statusClasses: `${row?.className ?? ''} ${status?.className ?? ''}`,
+          statusText: status?.textContent ?? ''
+        }) === 'sent'
       })) {
         return { ok: true, status: 'already_sent' }
       }
+
+      const existingOutgoingMessages = new Set(outgoingMessages())
+      const firstSeenAt = new WeakMap()
 
       chatInput.focus()
       const selection = window.getSelection()
@@ -423,11 +449,21 @@ async function runChatSend(tabId, message) {
         const blocked = pageState()
         if (blocked) return blocked
         for (const element of outgoingMessages()) {
-          const status = element.closest('.item-myself')?.querySelector('.status')
-          if (status?.classList.contains('status-delivery') || status?.classList.contains('status-read')) {
+          const row = element.closest('.item-myself')
+          const status = row?.querySelector('.status,[class*="status-"]')
+          const isNew = !existingOutgoingMessages.has(element)
+          if (isNew && !firstSeenAt.has(element)) firstSeenAt.set(element, Date.now())
+          const evidence = classifyEvidence({
+            isNew,
+            inputCleared: !chatInput.textContent?.trim(),
+            stableForMs: isNew ? Date.now() - firstSeenAt.get(element) : 0,
+            statusClasses: `${row?.className ?? ''} ${status?.className ?? ''}`,
+            statusText: status?.textContent ?? ''
+          })
+          if (evidence === 'sent') {
             return { ok: true, status: 'sent' }
           }
-          if (status?.classList.contains('status-fail')) {
+          if (evidence === 'failed') {
             return { code: 'send_failed', message: 'BOSS 明确返回发送失败。', stopBatch: true }
           }
         }

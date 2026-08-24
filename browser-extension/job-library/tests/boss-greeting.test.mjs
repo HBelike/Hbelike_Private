@@ -3,6 +3,7 @@ import test from 'node:test'
 
 import {
   buildBossChatUrl,
+  classifyOutgoingMessageEvidence,
   classifyFriendAddResponse,
   normalizeGreetingPayload,
   shouldStopGreetingBatch
@@ -46,6 +47,39 @@ test('建立沟通结果严格区分限流、验证和正常继续', () => {
   assert.equal(classifyFriendAddResponse({ code: 1, message: '职位已下线' }).code, 'job_unavailable')
   assert.equal(classifyFriendAddResponse({ code: 1, message: '已经沟通过该招聘者' }).code, 'already_contacted')
   assert.equal(classifyFriendAddResponse({ code: 37 }).code, 'login_required')
+})
+
+test('聊天回执优先识别明确送达与明确失败状态', () => {
+  assert.equal(classifyOutgoingMessageEvidence({ statusClasses: 'status status-delivery' }), 'sent')
+  assert.equal(classifyOutgoingMessageEvidence({ statusText: '已读' }), 'sent')
+  assert.equal(classifyOutgoingMessageEvidence({ statusClasses: 'status status-fail' }), 'failed')
+  assert.equal(classifyOutgoingMessageEvidence({ statusText: '发送失败，请重试' }), 'failed')
+})
+
+test('BOSS 不显示旧送达 class 时以稳定的新本人消息确认提交', () => {
+  assert.equal(classifyOutgoingMessageEvidence({
+    isNew: true,
+    inputCleared: true,
+    stableForMs: 1999
+  }), 'pending')
+  assert.equal(classifyOutgoingMessageEvidence({
+    isNew: true,
+    inputCleared: true,
+    stableForMs: 2000
+  }), 'sent')
+})
+
+test('历史同文案和未清空输入框不能伪造新发送成功', () => {
+  assert.equal(classifyOutgoingMessageEvidence({
+    isNew: false,
+    inputCleared: true,
+    stableForMs: 5000
+  }), 'pending')
+  assert.equal(classifyOutgoingMessageEvidence({
+    isNew: true,
+    inputCleared: false,
+    stableForMs: 5000
+  }), 'pending')
 })
 
 test('安全状态与未知发送结果会停止整个批次', () => {
