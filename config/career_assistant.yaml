@@ -121,7 +121,8 @@ career_assistant:
 
   model_policy:
     default_selection_mode: free_quota_first
-    allow_paid_profiles: false
+    # 生产默认关闭；本地需要使用 DeepSeek 等付费档案时由环境变量显式开启。
+    allow_paid_profiles: ${CAREER_ALLOW_PAID_PROFILES:-false}
     enable_local_ollama_profile: false
     fallback_on_rate_limit: true
     fallback_on_provider_unavailable: true
@@ -136,6 +137,7 @@ career_assistant:
       baidu-qianfan: BAIDU_QIANFAN_API_KEY
       hunyuan: HUNYUAN_API_KEY
       qwen: DASHSCOPE_API_KEY
+      deepseek: DEEPSEEK_API_KEY
       nvidia: NVIDIA_API_KEY
       tokenhub: TOKENHUB_API_KEY
       siliconflow: SILICONFLOW_API_KEY

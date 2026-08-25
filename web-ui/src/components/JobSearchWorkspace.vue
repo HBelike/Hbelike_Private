@@ -18,6 +18,10 @@ import {
   resetSelectionIntents
 } from '../job-search-multi-selection.js'
 import {
+  createJobDetailLoader,
+  prefetchJobDetails
+} from '../job-detail-prefetch.js'
+import {
   DEFAULT_JOB_CITY,
   mergeJobCityCatalog,
   normalizeHotJobCities
@@ -75,8 +79,13 @@ const hotCities = ref(normalizeHotJobCities())
 const cityLoading = ref(false)
 let searchSequence = 0
 let detailSequence = 0
+let prefetchSequence = 0
 let selectionClosed = false
 const selectionIntents = createSelectionIntentState()
+const detailLoader = createJobDetailLoader({
+  keyOf: greetingJobKey,
+  fetchDetail: (job) => jobLibraryBridge.getJobDetail(job)
+})
 
 const bridgeStatusText = computed(() => ({
   checking: '正在连接助手',
@@ -172,6 +181,72 @@ function mergeJobDetail(detail) {
   if (selectedJob.value && greetingJobKey(selectedJob.value) === greetingJobKey(detail)) {
     selectedJob.value = { ...selectedJob.value, ...detail }
   }
+  let selectionChanged = false
+  selectedJobs.value = selectedJobs.value.map((item) => {
+    if (greetingJobKey(item) !== greetingJobKey(detail)) return item
+    selectionChanged = true
+    return { ...item, ...detail }
+  })
+  if (selectionChanged) publishSelectionList()
+}
+
+function shouldStopDetailPrefetch(error) {
+  return error instanceof JobLibraryBridgeError && [
+    'login_required',
+    'verification_required',
+    'rate_limited',
+    'session_refresh_failed'
+  ].includes(error.code)
+}
+
+function prefetchCurrentJobs(jobList, searchToken) {
+  const sequence = ++prefetchSequence
+  const selectedKeys = new Set(selectedJobs.value.map(greetingJobKey))
+  const prioritized = [...jobList].sort((left, right) => (
+    Number(selectedKeys.has(greetingJobKey(right))) - Number(selectedKeys.has(greetingJobKey(left)))
+  ))
+  void prefetchJobDetails(prioritized, detailLoader, {
+    concurrency: 2,
+    onResolved: (detail) => {
+      if (selectionClosed || sequence !== prefetchSequence || searchToken !== searchSequence) return
+      mergeJobDetail(detail)
+      clearSelectionError(greetingJobKey(detail))
+    },
+    onRejected: (error, job) => {
+      if (selectionClosed || sequence !== prefetchSequence || searchToken !== searchSequence) return
+      markBridgeAttention(error)
+      if (isJobInSelection(job)) {
+        selectionErrors.value = {
+          ...selectionErrors.value,
+          [greetingJobKey(job)]: readableBridgeError(error, '岗位详情预取失败，点击卡片可重试。')
+        }
+      }
+    },
+    shouldStop: shouldStopDetailPrefetch
+  })
+}
+
+async function hydrateSelectedJob(job, token) {
+  const key = greetingJobKey(job)
+  setSelectionLoading(key, true)
+  try {
+    const detail = await detailLoader.load(job)
+    if (selectionClosed || !isCurrentSelectionIntent(selectionIntents, key, token)) return
+    mergeJobDetail(detail)
+    clearSelectionError(key)
+  } catch (error) {
+    if (selectionClosed || !isCurrentSelectionIntent(selectionIntents, key, token)) return
+    markBridgeAttention(error)
+    selectionErrors.value = {
+      ...selectionErrors.value,
+      [key]: readableBridgeError(error, '岗位详情获取失败，点击卡片可重试。')
+    }
+  } finally {
+    if (isCurrentSelectionIntent(selectionIntents, key, token)) {
+      cancelSelectionIntent(selectionIntents, key)
+      setSelectionLoading(key, false)
+    }
+  }
 }
 
 async function toggleJobFromCard(job) {
@@ -197,38 +272,32 @@ async function toggleJobFromCard(job) {
   }
 
   const token = beginSelectionIntent(selectionIntents, key)
-  setSelectionLoading(key, true)
-  try {
-    const detail = job.description ? job : await jobLibraryBridge.getJobDetail(job)
-    if (selectionClosed || !isCurrentSelectionIntent(selectionIntents, key, token)) return
-    mergeJobDetail(detail)
-    if (isJobInSelection(detail)) return
-    const result = toggleGreetingJob(
-      selectedJobs.value,
-      detail,
-      normalizedSelectionLimit.value
-    )
-    selectedJobs.value = result.jobs
-    multiSelectionError.value = result.error
-    if (!result.error) publishSelectionList()
-  } catch (error) {
-    if (selectionClosed || !isCurrentSelectionIntent(selectionIntents, key, token)) return
-    markBridgeAttention(error)
-    selectionErrors.value = {
-      ...selectionErrors.value,
-      [key]: readableBridgeError(error, '岗位详情获取失败，请重试。')
-    }
-  } finally {
-    if (isCurrentSelectionIntent(selectionIntents, key, token)) {
-      cancelSelectionIntent(selectionIntents, key)
-      setSelectionLoading(key, false)
-    }
+  const cached = detailLoader.peek(job)
+  const result = toggleGreetingJob(
+    selectedJobs.value,
+    cached ?? job,
+    normalizedSelectionLimit.value
+  )
+  selectedJobs.value = result.jobs
+  multiSelectionError.value = result.error
+  if (result.error) {
+    cancelSelectionIntent(selectionIntents, key)
+    return
   }
+  publishSelectionList()
+  if (cached) {
+    mergeJobDetail(cached)
+    cancelSelectionIntent(selectionIntents, key)
+    return
+  }
+  void hydrateSelectedJob(job, token)
 }
 
 function resetJobResults() {
   searchSequence += 1
   detailSequence += 1
+  prefetchSequence += 1
+  detailLoader.clear()
   jobs.value = []
   selectedJobId.value = ''
   selectedJob.value = null
@@ -310,6 +379,8 @@ async function submitSearch() {
   if (!nextQuery || searching.value) return
   if (!await checkBridge({ loadCatalog: false, interactive: true })) return
   const sequence = ++searchSequence
+  prefetchSequence += 1
+  detailLoader.clear()
   searching.value = true
   searchError.value = ''
   detailError.value = ''
@@ -326,7 +397,10 @@ async function submitSearch() {
     hasMore.value = Boolean(result.hasMore)
     selectedJobId.value = ''
     selectedJob.value = null
-    if (jobs.value.length) void selectJob(jobs.value[0])
+    if (jobs.value.length) {
+      void selectJob(jobs.value[0])
+      prefetchCurrentJobs(jobs.value, sequence)
+    }
   } catch (error) {
     if (sequence !== searchSequence) return
     jobs.value = []
@@ -344,20 +418,23 @@ async function selectJob(job) {
   const sequence = ++detailSequence
   publishSelection(null)
   selectedJobId.value = job.id
-  selectedJob.value = job
+  const cached = detailLoader.peek(job)
+  selectedJob.value = cached ?? job
+  if (cached) {
+    mergeJobDetail(cached)
+    bridgeStatus.value = 'ready'
+    publishSelection(cached)
+    detailLoading.value = false
+    detailError.value = ''
+    return
+  }
   detailLoading.value = true
   detailError.value = ''
   try {
-    const detail = await jobLibraryBridge.getJobDetail(job)
+    const detail = await detailLoader.load(job)
     if (sequence !== detailSequence) return
     selectedJob.value = detail
     mergeJobDetail(detail)
-    if (isJobInSelection(detail)) {
-      selectedJobs.value = selectedJobs.value.map((item) => (
-        greetingJobKey(item) === greetingJobKey(detail) ? detail : item
-      ))
-      publishSelectionList()
-    }
     bridgeStatus.value = 'ready'
     publishSelection(detail)
   } catch (error) {
@@ -383,6 +460,7 @@ async function loadMore() {
     page.value = nextPage
     hasMore.value = Boolean(result.hasMore) && additions.length > 0
     bridgeStatus.value = 'ready'
+    if (additions.length) prefetchCurrentJobs(additions, searchSequence)
   } catch (error) {
     markBridgeAttention(error)
     searchError.value = readableBridgeError(error, '更多岗位获取失败，请稍后重试。')
@@ -516,8 +594,8 @@ onBeforeUnmount(() => {
               :aria-label="`${isJobInSelection(job) ? '移除' : '选择'}岗位：${job.title}`"
               @click.stop="toggleJobFromCard(job)"
             >
-              <span v-if="isSelectionLoading(job)" class="button-loader" aria-hidden="true"></span>
-              <span v-else aria-hidden="true">{{ isJobInSelection(job) ? '✓' : '' }}</span>
+              <span aria-hidden="true">{{ isJobInSelection(job) ? '✓' : '' }}</span>
+              <i v-if="isSelectionLoading(job)" class="selection-detail-loader" aria-hidden="true"></i>
             </button>
             <span class="job-card-topline">
               <strong>{{ job.title }}</strong>
@@ -728,8 +806,8 @@ onBeforeUnmount(() => {
 .job-selection-checkbox { position: absolute; z-index: 2; top: 14px; left: 13px; display: grid; width: 22px; height: 22px; place-items: center; border: 1px solid var(--job-line-strong); border-radius: 7px; background: var(--job-paper); color: #fff; padding: 0; cursor: pointer; }
 .job-selection-checkbox:hover,.job-selection-checkbox:focus-visible { border-color: var(--job-blue); outline: 0; box-shadow: 0 0 0 3px var(--ui-focus, rgba(8,105,216,.13)); }
 .job-selection-checkbox.checked { border-color: var(--job-teal); background: var(--job-teal); font-size: 13px; font-weight: 900; }
-.job-selection-checkbox.loading { cursor: wait; }
-.job-selection-checkbox .button-loader { width: 11px; height: 11px; border-width: 2px; border-color: color-mix(in srgb, var(--job-blue) 30%, transparent); border-top-color: var(--job-blue); }
+.job-selection-checkbox.loading { cursor: progress; }
+.selection-detail-loader { position: absolute; right: -4px; bottom: -4px; width: 8px; height: 8px; border: 2px solid var(--job-paper); border-top-color: var(--job-blue); border-radius: 50%; background: var(--job-paper); animation: jobSpin .8s linear infinite; }
 .job-selection-error { border-radius: 7px; background: #fff3f4; color: #a33b46; padding: 6px 8px; font-size: 10px; line-height: 1.45; }
 .job-card-topline { display: flex; min-width: 0; align-items: start; justify-content: space-between; gap: 12px; }
 .job-card.selected .job-card-topline { padding-right: 38px; }
@@ -748,7 +826,6 @@ onBeforeUnmount(() => {
 .result-end { margin: 4px 0 18px; color: var(--job-muted); font-size: 10px; text-align: center; }
 
 .job-detail { position: relative; min-width: 0; overflow: hidden; background: var(--job-paper); transition: opacity .18s ease; }
-.job-detail.refreshing > :not(.detail-refreshing) { opacity: .66; }
 .detail-hero-actions { display: flex; flex: none; align-items: center; gap: 12px; }
 .detail-refreshing { position: absolute; z-index: 5; top: 14px; right: 20px; display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--job-line); border-radius: 999px; background: var(--job-paper); color: var(--job-blue-ink); padding: 6px 10px; font-size: 10px; font-weight: 750; box-shadow: 0 8px 22px rgba(20, 33, 61, .08); }
 .detail-hero { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 24px; border-bottom: 1px solid var(--job-line); padding: 22px 28px 18px; }

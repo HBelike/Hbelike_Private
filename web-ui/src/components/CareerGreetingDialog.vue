@@ -74,6 +74,8 @@ const finishedCount = computed(() => items.value.filter((item) => ['sent', 'skip
 const sendComplete = computed(() => stage.value === 'sending' && !sending.value && waitingCount.value === 0 && finishedCount.value > 0)
 const failureAction = computed(() => findGreetingFailureAction(items.value))
 const failureActionItem = computed(() => items.value.find((item) => item.id === failureAction.value?.itemId) ?? null)
+const pendingDetailCount = computed(() => selectedJobs.value.filter((job) => !job?.description).length)
+const selectedJobsReady = computed(() => selectedJobs.value.length > 0 && pendingDetailCount.value === 0)
 
 watch(() => props.open, (open) => {
   invalidateGeneration()
@@ -127,7 +129,7 @@ function updateSelectionLimit(event) {
 }
 
 async function startReview() {
-  if (!selectedJobs.value.length || !props.candidateProfile?.id || generationRunning.value) return
+  if (!selectedJobsReady.value || !props.candidateProfile?.id || generationRunning.value) return
   items.value = createGreetingItems(selectedJobs.value)
   activeItemId.value = items.value[0]?.id ?? ''
   stage.value = 'review'
@@ -607,7 +609,9 @@ function formatStatusTime(value) {
             <button v-if="stage === 'review'" type="button" class="secondary-button" @click="returnToSelection">返回选岗</button>
             <button v-if="stage === 'sending' && sending" type="button" class="danger-button" @click="stopSending">停止剩余发送</button>
             <button type="button" class="secondary-button" @click="close">{{ sendComplete || stopped ? '关闭' : '取消' }}</button>
-            <button v-if="stage === 'select'" type="button" class="primary-button" :disabled="!selectedJobs.length || !candidateProfile?.id || generationRunning" @click="startReview">生成 {{ selectedJobs.length || '' }} 条招呼语</button>
+            <button v-if="stage === 'select'" type="button" class="primary-button" :disabled="!selectedJobsReady || !candidateProfile?.id || generationRunning" @click="startReview">
+              {{ pendingDetailCount ? `正在准备 ${pendingDetailCount} 个岗位详情` : `生成 ${selectedJobs.length || ''} 条招呼语` }}
+            </button>
             <button v-else-if="stage === 'review'" type="button" class="primary-button" :disabled="!includedItems.length || generationRunning" @click="requestSend">确认并{{ simulationMode ? '模拟' : '真实' }}发送 {{ includedItems.length }} 条</button>
           </div>
         </footer>

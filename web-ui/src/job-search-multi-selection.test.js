@@ -41,3 +41,19 @@ test('多选岗位卡包含独立复选框且不再依赖右侧加入按钮', as
   assert.match(source, /role="checkbox"/)
   assert.doesNotMatch(source, /加入本批|移出本批/)
 })
+
+test('勾选立即更新批次并在后台补齐详情', async () => {
+  const source = await readFile(
+    new URL('./components/JobSearchWorkspace.vue', import.meta.url),
+    'utf8'
+  )
+  const toggleStart = source.indexOf('async function toggleJobFromCard')
+  const toggleEnd = source.indexOf('\nfunction resetJobResults', toggleStart)
+  const toggleSource = source.slice(toggleStart, toggleEnd)
+  assert.ok(toggleSource.indexOf('toggleGreetingJob(') < toggleSource.indexOf('void hydrateSelectedJob(job, token)'))
+  assert.match(toggleSource, /void hydrateSelectedJob\(job, token\)/)
+  assert.match(source, /async function hydrateSelectedJob[\s\S]*?detailLoader\.load\(job\)/)
+  assert.match(source, /prefetchCurrentJobs\(jobs\.value, sequence\)/)
+  assert.match(source, /detailLoader\.load\(job\)/)
+  assert.doesNotMatch(source, /\.job-detail\.refreshing[^\n]*opacity/)
+})
