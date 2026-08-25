@@ -2,12 +2,15 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   advanceGreetingSend,
+  applyGreetingFailure,
+  applyGreetingResult,
   createGreetingItems,
   findGreetingFailureAction,
   needsGreetingRiskWarning,
   normalizeGreetingLimit,
+  markGreetingGenerating,
+  queueGreetingItems,
   recordGreetingAttempt,
-  regenerateGreetingItem,
   retryGreetingItems,
   stopGreetingItems,
   updateGreetingItemStatus,
@@ -45,15 +48,37 @@ test('选满十条后仍可移除已有岗位', () => {
   assert.equal(removed.error, '')
 })
 
-test('创建每岗一条招呼语并支持单条重新生成', () => {
+test('创建每岗一条待生成记录并应用真实模型结果', () => {
   const items = createGreetingItems([job('1'), job('2')])
   assert.equal(items.length, 2)
-  assert.equal(items[0].revision, 1)
-  assert.equal(items[0].status, 'ready')
-  assert.match(items[0].message, /3年平安银行全栈开发经验/)
-  const regenerated = regenerateGreetingItem(items[0])
-  assert.equal(regenerated.revision, 2)
-  assert.notEqual(regenerated.message, items[0].message)
+  assert.equal(items[0].revision, 0)
+  assert.equal(items[0].status, 'generating')
+  assert.equal(items[0].message, '')
+  const generated = applyGreetingResult(items, items[0].id, {
+    message: '根据简历和 JD 生成的招呼语',
+    resume_evidence: [{ id: 'CV-001', summary: '真实简历证据' }],
+    jd_highlights: [{ id: 'JD-001', summary: '岗位关注点' }],
+    model: { model_id: 'deepseek-v4-pro' }
+  })
+  assert.equal(generated[0].revision, 1)
+  assert.equal(generated[0].status, 'ready')
+  assert.equal(generated[0].message, '根据简历和 JD 生成的招呼语')
+  assert.deepEqual(generated[0].evidence, ['真实简历证据'])
+  assert.equal(generated[0].generatedModel, 'deepseek-v4-pro')
+})
+
+test('初次生成失败可重试，重新生成失败保留上一版', () => {
+  const [pending] = createGreetingItems([job('1')])
+  const failed = applyGreetingFailure([pending], pending.id, new Error('模型不可用'))
+  assert.equal(failed[0].status, 'generation_failed')
+  assert.equal(failed[0].generationError, '模型不可用')
+
+  const [ready] = applyGreetingResult([pending], pending.id, { message: '上一版招呼语' })
+  const generating = markGreetingGenerating([ready], ready.id)
+  assert.equal(generating[0].status, 'generating')
+  const preserved = applyGreetingFailure(generating, ready.id, new Error('重新生成失败'))
+  assert.equal(preserved[0].status, 'ready')
+  assert.equal(preserved[0].message, '上一版招呼语')
 })
 
 test('超过五条需要风险确认', () => {
@@ -80,6 +105,13 @@ test('取消项不会进入本地发送队列', () => {
   const sent = advanceGreetingSend(queued)
   assert.equal(sent[0].status, 'sent')
   assert.equal(sent[1].status, 'excluded')
+})
+
+test('没有生成成功的岗位不会进入发送队列', () => {
+  const [pending] = createGreetingItems([job('1')])
+  const [failed] = applyGreetingFailure([pending], pending.id, new Error('生成失败'))
+  const queued = queueGreetingItems([failed])
+  assert.equal(queued[0].status, 'excluded')
 })
 
 test('串行发送状态按预检、发送、完成推进', () => {

@@ -1,17 +1,3 @@
-const PREVIEW_EVIDENCE = [
-  '211 本科学历',
-  '3 年平安银行全栈开发经验',
-  '微服务与分布式项目落地经验',
-  '从 0 到 1 完整投产上线经历',
-  'xingxingtech.cn 已部署上线'
-]
-
-const GREETING_ENDINGS = [
-  '如方便，期待进一步沟通。',
-  '想进一步了解岗位，期待沟通。',
-  '希望有机会和您进一步交流。'
-]
-
 export function normalizeGreetingLimit(value) {
   const parsed = Number(value)
   if (!Number.isFinite(parsed)) return 5
@@ -44,52 +30,71 @@ export function needsGreetingRiskWarning(count) {
   return Number(count) > 5
 }
 
-function previewGreeting(job, revision) {
-  const role = String(job?.title || '当前').trim()
-  const ending = GREETING_ENDINGS[(Math.max(1, revision) - 1) % GREETING_ENDINGS.length]
-  const salutation = job?.recruiter ? `${String(job.recruiter).split('·')[0].trim()}您好` : '您好'
-  const focus = Array.isArray(job?.skills) && job.skills.length
-    ? `，岗位关注${job.skills.slice(0, 2).join('、')}`
-    : ''
-  return `${salutation}，我是211本科，3年平安银行全栈开发经验，做过微服务、分布式项目及0到1投产。xingxingtech.cn 已上线，含技术热点抓取 workflow 和求职简历分析 Agent${focus}。我对${role}很感兴趣。${ending}`
-}
-
 export function createGreetingItems(jobs) {
   return (Array.isArray(jobs) ? jobs : []).map((job, index) => ({
     id: greetingJobKey(job),
     order: index + 1,
     job,
-    message: previewGreeting(job, 1),
-    revision: 1,
+    message: '',
+    revision: 0,
     included: true,
-    status: 'ready',
+    status: 'generating',
     attemptCount: 0,
     lastAttemptAt: '',
     sentAt: '',
     retryMode: '',
     nextAttemptMode: 'full',
     defaultGreetingSent: false,
-    evidence: [...PREVIEW_EVIDENCE],
-    jdHighlights: Array.isArray(job?.skills) && job.skills.length
-      ? job.skills.slice(0, 4)
-      : ['岗位职责', '项目交付']
+    evidence: [],
+    jdHighlights: [],
+    generationError: '',
+    generatedModel: '',
+    warnings: []
   }))
 }
 
-export function regenerateGreetingItem(item) {
-  const revision = Number(item?.revision || 1) + 1
-  return {
-    ...item,
-    revision,
-    message: previewGreeting(item?.job, revision),
-    status: 'ready'
-  }
+export function markGreetingGenerating(items, id) {
+  return (Array.isArray(items) ? items : []).map((item) => item.id === id
+    ? { ...item, status: 'generating', generationError: '' }
+    : item)
+}
+
+export function applyGreetingResult(items, id, payload) {
+  return (Array.isArray(items) ? items : []).map((item) => item.id === id
+    ? {
+        ...item,
+        message: String(payload?.message || ''),
+        revision: Number(item.revision || 0) + 1,
+        status: 'ready',
+        generationError: '',
+        evidence: Array.isArray(payload?.resume_evidence)
+          ? payload.resume_evidence.map((entry) => String(entry?.summary || '')).filter(Boolean)
+          : [],
+        jdHighlights: Array.isArray(payload?.jd_highlights)
+          ? payload.jd_highlights.map((entry) => String(entry?.summary || '')).filter(Boolean)
+          : [],
+        generatedModel: String(payload?.model?.model_id || ''),
+        warnings: Array.isArray(payload?.warnings) ? payload.warnings.map(String) : []
+      }
+    : item)
+}
+
+export function applyGreetingFailure(items, id, error, { preserveMessage = true } = {}) {
+  return (Array.isArray(items) ? items : []).map((item) => item.id === id
+    ? {
+        ...item,
+        status: preserveMessage && item.message ? 'ready' : 'generation_failed',
+        generationError: error instanceof Error ? error.message : String(error || '招呼语生成失败')
+      }
+    : item)
 }
 
 export function queueGreetingItems(items) {
   return (Array.isArray(items) ? items : []).map((item) => ({
     ...item,
-    status: item.included ? 'queued' : 'excluded',
+    status: item.included && item.message && item.status !== 'generation_failed'
+      ? 'queued'
+      : 'excluded',
     nextAttemptMode: 'full'
   }))
 }
