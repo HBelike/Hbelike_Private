@@ -89,6 +89,7 @@ CareerGreetingDialog
 
 ## 验证结果
 
+- 2026-08-26 全量生产发布：生产仓库从 `da66bb8` 快进到 `681dd25`，完成 WebUI/API/Worker/Scheduler 镜像重建；Alembic 已升级至 `20260825_21 (head)`，API、WebUI、PostgreSQL 均为 healthy，公网 `https://xingxingtech.cn/api/health` 返回 200。生产环境已显式启用 `CAREER_ALLOW_PAID_PROFILES=true`，DeepSeek API Key 已配置，`deepseek-v4-pro` 与 `deepseek-v4-flash` 档案均为 paid 且启用；线上 JS/CSS 资源已确认包含“简历证据 / 岗位关注点”双分区和独立滚动样式。发布前 Python 全量 236 项、WebUI 全量 127 项、扩展 22 项测试通过，Vite production build 通过。未主动触发付费模型调用，也未使用真人账号向 BOSS 发送消息。
 - 2026-08-26 写作依据面板优化：PC 审核页右栏改为“简历证据 / 岗位关注点”双分区，两个长列表分别使用独立细滚动条，并支持键盘聚焦滚动；保留 `activeItem.evidence` 与 `activeItem.jdHighlights` 数据链路，没有新增依赖或后端接口。WebUI 全量 127 项测试通过，Vite production build 通过（仅保留项目原有的大包体积提示）；在 1280×720 本地预览中确认两个分区同屏可见且滚动容器尺寸独立。本次仅本地修改与验证，未部署生产。
 - 2026-08-26 智能生成与左侧多选：岗位卡支持直接勾选并按需补齐完整 JD；招呼语改由固定 `deepseek-v4-pro` 生成，`temperature=0.2`，支持逐条重新生成、最多 3 路并发和单项失败隔离。服务端覆盖固定模型选择、Prompt 证据边界、JSON/长度/事实/相似度校验及一次纠正；生成失败的空文案不会进入真实发送队列。Python 全量 232 项、WebUI 全量 120 项通过，Vite production build 通过（仅保留项目原有的大包体积提示）。本次未调用真人账号发送，未部署生产。
 - 2026-08-26 岗位详情预取与 DeepSeek 本地连通：搜索后的 15 条摘要不再等到点击才各自发起孤立请求，而是低并发后台预取；同一岗位的勾选、预览和预取会复用一个 Promise，点击缓存岗位可立即展示，详情加载时也不再把整个右栏变灰。DeepSeek Provider 已映射到 `DEEPSEEK_API_KEY`，付费档案通过本地 `CAREER_ALLOW_PAID_PROFILES=true` 显式开启，生产默认仍关闭。真实 `deepseek-v4-pro` JSON 调用成功；完整招呼语链路生成 132 字文案，证据校验通过且无 warning。Python 全量 234 项、WebUI 全量 126 项和 Vite production build 通过；API Key 仅保存在 Git 忽略的本地环境文件中，未部署生产、未真实发送。
