@@ -197,6 +197,17 @@ Career WebUI
 - `src/tasks/summary_task.py`
 - `web-ui/src/App.vue` 中已完成的技能库与审核台功能
 
+## 2026-08-26：BOSS 智能招呼语与左侧多选
+
+- 设计目标：把“一键打招呼”的选岗过程改为左侧岗位卡直接多选，并让每条开场白真正基于当前简历、完整 Job Description 和招聘者信息生成，替代前端固定句式拼接。
+- 前端交互：`JobSearchWorkspace` 在岗位卡左侧提供独立多选框；点击卡片正文仍用于预览。勾选时按需补齐完整 JD，单项显示加载/失败状态，批次上限保持 1–10。`CareerGreetingDialog` 最多并发生成 3 条，逐条展示生成、成功、失败和重新生成状态；失败且没有文案的项目不会进入发送队列。
+- 模型取舍：生成模型精确固定为 READY 的 `deepseek / deepseek-v4-pro` 文本档案，不跟随聊天模型、不跨 Provider 猜测、不降级。调用 OpenAI-compatible Chat Completions JSON Output，参数固定为 `temperature=0.2`、`max_tokens=800`、`thinking=false`。
+- Prompt 与证据：服务端将简历和 JD 编号为 `CV-xxx`、`JD-xxx`，要求模型先选择证据再写 80–150 字自然开场白。Prompt 内置求职证据重组和去模板腔原则；重新生成会参考上一版避免近似复述，但上一版不能作为事实来源。
+- 调用链：`CareerGreetingDialog → POST /api/career/greetings/generate → CareerGreetingService → CandidateProfileRepository + ModelGateway → DeepSeek Chat Completions → 服务端校验/一次纠正 → 审核队列 → 既有扩展串行发送`。
+- 服务端校验：限制最终长度为 60–180 字，验证所有 `CV/JD` 引用、数字、URL、邮箱和英文标识均存在于输入证据；重新生成还需低于上一版相似度阈值。两次仍不合格时明确失败，不回退到硬编码模板。
+- 依赖与边界：复用现有 FastAPI、模型档案、OpenAI-compatible 客户端和 BOSS 扩展，没有新增运行时依赖；不向前端返回完整简历/JD、原始模型响应或 API Key。本轮只实现 PC 端，不执行真人账号发送，不部署生产。
+- 验证：招呼语专项 16 项、Python 全量 232 项、WebUI 全量 120 项通过，Vite production build 通过；构建仅保留项目原有的大包体积提示。
+
 ## 2026-08-20：`/命令`确定性挂载 SKILL.md
 
 - 目标：在求职助手输入框中使用 `/skill-name` 调用技能库中已经安装的 Skill；`@` 仅用于引用面经资料。
