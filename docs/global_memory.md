@@ -12,5 +12,5 @@
 8. **技能库**：57 个 `SKILL.md` 已作为 `deploy/skill-seeds` 种子；持久卷中的已编辑 Skill 不会被重新部署覆盖。生产种子另带已核验的公开仓库来源，当前可为 `ai-image-generation`、`baoyu-url-to-markdown`、`grill-me`、`og-image-design` 刷新真实 Star，其余来源不明的项目 Skill 显示“本地 Skill”。
 9. **调度边界**：周五 08:00 生产、09:00 建微信草稿；Scheduler 与人工流水线共享文件锁，生产只能单实例运行。本地默认保持音视频关闭；生产已显式设置 `VIDEO_SUBMIT_ENABLED=true`、`AUDIO_ENABLED=true`，会运行 Seedance、视觉质检、豆包 TTS 与最终视频装配并产生相应调用。
 10. **上线修复**：`eba2f08` 为生产 Nginx 增加静态 `root /usr/share/nginx/html` 与 `index index.html`；服务器已通过标准 Git 拉取、重建 Web/Caddy，`career-web` 健康检查恢复正常。
-11. **当前生产版本**：2026-08-25 已部署生产代码提交 `5869dc1`，面经采集、文件导入与 Skill Star 统一为蓝白主题，面经库删除重复的顶部“导入材料”入口；Star Scheduler 已识别 4 个公开仓库并成功刷新 4 份真实快照。正式页面与健康接口返回 200，API/Web/PostgreSQL/Scheduler/Worker 正常；PostgreSQL 仍为 `20260823_19`。
-12. **当前边界**：登录页支持邮箱验证码、邮箱密码、显式注册和找回密码；生产保持 `PLATFORM_AUTH_REQUIRED=true`、`PLATFORM_CLOSED_OPERATOR_MODE=true`、`PLATFORM_PUBLIC_REGISTRATION_ENABLED=true`、`PLATFORM_CLI_BOOTSTRAP_ONLY=true` 与 `CAREER_REDACTION_ENABLED=true`。唯一 admin 为 `2963613812@qq.com`；角色收敛与旧总闸移除尚未部署。求职助手模型选择器只展示真实可用模型；前端仅维护电脑端与手机端。
+11. **当前生产版本**：2026-08-25 已全量部署生产代码提交 `0e97a14`，API/Web/PostgreSQL/Scheduler/Worker 均正常，正式页面、健康接口与浏览器扩展下载返回 200；PostgreSQL 已迁移到 `20260825_20`，求职助手右侧岗位视口恢复鼠标拖动和键盘调宽能力。
+12. **当前边界**：平台角色仅保留 `admin` 与 `user`；生产数据库已核验只有 `2963613812@qq.com` 这 1 个 admin，其余 3 个账号均为 user，且数据库约束会阻止其他邮箱成为 admin。登录页支持邮箱验证码、邮箱密码、显式注册和找回密码；生产保持登录强制、公开注册、CLI 首管理员模式与内容脱敏，旧角色总闸已从应用权限链路移除。前端仅维护电脑端与手机端。
