@@ -226,9 +226,7 @@ def _resolve_greeting_profile(self, organization_id: UUID) -> ModelResolution:
         if item.profile.provider_key == "deepseek"
         and item.profile.model_id == "deepseek-v4-pro"
         and item.readiness is ModelReadiness.READY
-        and {ModelCapability.TEXT, ModelCapability.STRUCTURED_OUTPUT}.issubset(
-            item.profile.capabilities
-        )
+        and ModelCapability.TEXT in item.profile.capabilities
     ]
     if not candidates:
         raise GreetingModelUnavailableError("DeepSeek V4 Pro 尚未配置或不可用")
@@ -238,7 +236,7 @@ def _resolve_greeting_profile(self, organization_id: UUID) -> ModelResolution:
         ModelSelectionRequest(
             mode=ModelSelectionMode.SPECIFIC_PROFILE,
             profile_id=profile.id,
-            required_capabilities=frozenset({ModelCapability.TEXT, ModelCapability.STRUCTURED_OUTPUT}),
+            required_capabilities=frozenset({ModelCapability.TEXT}),
         ),
     )
 ```

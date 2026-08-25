@@ -108,8 +108,10 @@ provider_key == "deepseek"
 model_id == "deepseek-v4-pro"
 enabled == true
 readiness == ModelReadiness.READY
-capabilities 包含 TEXT 和 STRUCTURED_OUTPUT
+capabilities 包含 TEXT
 ```
+
+模型设置页当前不提供 `STRUCTURED_OUTPUT` 独立能力开关，历史 DeepSeek 档案通常只声明 `TEXT`。`deepseek-v4-pro` 的 JSON Output 由官方协议和服务端结果 Schema 校验保证，因此不能因缺少一个不可配置的能力标签而拒绝现有可调用档案。
 
 存在多个匹配档案时，沿用模型档案优先级排序并选择第一项。没有匹配档案、凭证不可用或测试状态不是 ready 时，返回 `greeting_model_unavailable`，前端提示用户前往模型配置处理。不得回退到 `deepseek-v4-flash`、免费模型或聊天框当前模型。
 
