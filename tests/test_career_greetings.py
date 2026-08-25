@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from src.career_assistant import greetings as greeting_module
 from src.career_assistant.context_profiles import CandidateProfileRecord
 from src.career_assistant.contracts import ModelCapability, ModelSelectionMode
 from src.career_assistant.greetings import (
@@ -199,6 +200,28 @@ def build_service(
         model_client=client,
     )
     return service, repository, gateway, client
+
+
+def test_prompt_prioritizes_supported_candidate_advantages_without_becoming_a_template() -> None:
+    prompt = greeting_module._SYSTEM_PROMPT
+
+    assert "候选人优势扫描" in prompt
+    assert all(category in prompt for category in ("学历", "工作经验", "奖项", "个人项目"))
+    assert "某类没有简历证据时必须彻底省略" in prompt
+    assert "不得只用同一段工作或同一个项目的多个技术细节占满全文" in prompt
+    assert "仅示范选材思路和信息密度，不是固定模板" in prompt
+    assert "示例中的学校层次、年限、公司、项目、网址、技术和成果" in prompt
+    assert "禁止迁移到真实输出" in prompt
+
+
+def test_user_prompt_requires_a_full_resume_scan_before_jd_matching() -> None:
+    cv_evidence = CareerGreetingService._number_evidence(candidate().resume_outline, "CV")
+    jd_evidence = CareerGreetingService._number_evidence(job().description, "JD")
+
+    prompt = CareerGreetingService._user_prompt(job(), cv_evidence, jd_evidence, "")
+
+    assert "先完整阅读全部 CV 证据" in prompt
+    assert "不要只选择与 JD 最接近的单一工作或项目技术片段" in prompt
 
 
 def test_generate_uses_actor_resume_and_exact_deepseek_profile() -> None:

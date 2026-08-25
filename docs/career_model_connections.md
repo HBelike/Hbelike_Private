@@ -52,7 +52,7 @@ CAREER_CREDENTIAL_MASTER_KEY=<Fernet.generate_key() 生成的 URL-safe Base64 �
 
 ## 官方免费模型选择
 
-聊天输入框旁的模型下拉只展示 `readiness=ready` 的真实可调用连接；免费连接额外以“【免费】”标记。尚未接入的候选模型不会再混入聊天下拉，而是统一放在“申请免费模型”目录中。管理员可从目录打开 API Key 申请、官方接入文档和费用说明，并一键预填连接参数；只有完成真实连通性测试并保存后，连接才会进入聊天下拉。免费不代表匿名调用：云端 API 仍需由平台管理员注册账号并申请 API Key。
+聊天输入框旁的模型下拉只展示 `readiness=ready` 的真实可调用连接；免费连接额外以“【免费】”标记。尚未接入的候选模型不会再混入聊天下拉，而是统一放在“申请免费模型”目录中。每张候选模型卡片都提供对应服务商的“获取 API Key”官方入口，管理员也可从服务商卡片底部打开官方接入文档和费用说明，再一键预填连接参数；只有完成真实连通性测试并保存后，连接才会进入聊天下拉。免费不代表匿名调用：云端 API 仍需由平台管理员注册账号并申请 API Key。
 
 模型主标签统一使用“`Provider · Model ID`”，连接的自定义显示名称仅作为辅助说明。因此，即使两个连接都被命名为“DeepSeek 模型连接”，`deepseek-v4-pro` 与 `deepseek-v4-flash` 也会被明确区分。免费目录请求失败时会单独提示并支持重试，不会阻断会话历史和已配置连接的加载。
 
@@ -87,6 +87,14 @@ CAREER_CREDENTIAL_MASTER_KEY=<Fernet.generate_key() 生成的 URL-safe Base64 �
 百炼的免费额度具有账户、区域、模型准入和有效期条件，不能被标注为“永久免费”。系统只会在真实连接测试成功后，将其标记为平台可用。
 
 DeepSeek、Groq、腾讯云 TokenHub、腾讯混元、百度千帆、阿里云百炼、火山方舟与 MiniMax 都保留在“模型与连接”的手动配置项中。它们可能提供新用户赠送、免费体验或限时 Token 包，但并不等同于平台可持续的免费模型，因此不会被自动免费路由选中，也不会显示为“【免费】”。
+
+### 2026-08-25：DeepSeek 付费分类纠正
+
+- 设计目标：DeepSeek API 模型统一按付费模型展示和路由，不能因为旧版手动连接表单的默认值而显示“【免费】”或进入免费自动选择。
+- 技术取舍：费用属性在服务端仓储边界统一规范化，而不是只在 WebUI 改字。`normalize_model_cost_tier()` 会把 DeepSeek 的新写入和旧记录读取都纠正为 `paid`；迁移 `20260825_21` 同步把 PostgreSQL 中已有的 DeepSeek 错误记录更新为 `paid`。
+- 调用链：`模型连接保存/读取 → CareerModelProfileRepository → normalize_model_cost_tier() → ModelGateway 策略检查 → WebUI 按 cost_tier 分组`。免费自动选择仍只接收 `free_quota`；付费连接显示在“已接入的付费模型”下，并使用“【付费】”前缀。
+- 权限边界：本次修正不修改 `allow_paid_profiles`。如果当前环境禁用付费模型，DeepSeek 会在“模型连接”中显示“策略已拦截”和付费属性，不会为了维持可用状态而绕过费用策略。
+- 依赖与验证：没有新增运行时依赖；后端通过 `tests/test_model_profile_cost_tier.py` 覆盖分类函数、写入规范化与旧记录读取兜底。2026-08-25 本地验证结果为后端 `232 passed`、前端 `109 passed`、Vite 构建成功，Alembic head 为 `20260825_21`；未执行数据库迁移，也未连接生产环境。
 
 科大讯飞 Spark Lite 使用 WebSocket 鉴权（AppID、APIKey、APISecret），不属于当前统一的 OpenAI-compatible 调用器；在专用 Spark 客户端完成前，不会把它伪装成可用的通用模型连接。
 

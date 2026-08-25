@@ -1080,7 +1080,7 @@ html[data-ui-theme="blue"] body :is(
   .free-provider-card > header small,
   .free-provider-card > p,
   .free-model-template code,
-  .free-model-template > small
+  .free-model-template-meta small
 ) {
   color: var(--ui-text-muted);
 }
@@ -1257,6 +1257,7 @@ html[data-ui-theme="blue"] body .free-model-template button:hover {
 }
 
 html[data-ui-theme="blue"] body .free-provider-card > footer a,
+html[data-ui-theme="blue"] body .free-model-template-meta a,
 html[data-ui-theme="blue"] body .test-connection-button {
   color: var(--ui-accent-ink);
 }

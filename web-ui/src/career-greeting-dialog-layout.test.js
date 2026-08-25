@@ -36,3 +36,17 @@ test('审核弹窗调用真实招呼语接口并移除虚假 humanizer 标签', 
   assert.match(source, /DeepSeek V4 Pro/)
   assert.doesNotMatch(source, /humanizer 已检查|<strong>humanizer<\/strong>/)
 })
+
+test('写作依据同时展示两类证据并让长列表独立滚动', async () => {
+  const source = await readFile(componentUrl, 'utf8')
+
+  assert.match(source, /class="evidence-groups"/)
+  assert.match(source, /class="evidence-section resume-evidence"/)
+  assert.match(source, /class="evidence-section job-highlights"/)
+  assert.match(source, /简历证据/)
+  assert.match(source, /岗位关注点/)
+  assert.match(source, /activeItem\.evidence\.length/)
+  assert.match(source, /activeItem\.jdHighlights\.length/)
+  assert.match(source, /\.evidence-scroll\s*\{[^}]*overflow-y:\s*auto/s)
+  assert.match(source, /grid-template-rows:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/)
+})

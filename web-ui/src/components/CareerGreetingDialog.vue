@@ -510,14 +510,32 @@ function formatStatusTime(value) {
 
             <aside v-if="activeItem" class="evidence-panel">
               <header><span>写作依据</span><small>不补写经历</small></header>
-              <section>
-                <h4>简历证据</h4>
-                <ul><li v-for="evidence in activeItem.evidence" :key="evidence">{{ evidence }}</li></ul>
-              </section>
-              <section>
-                <h4>岗位关注点</h4>
-                <div class="highlight-list"><span v-for="highlight in activeItem.jdHighlights" :key="highlight">{{ highlight }}</span></div>
-              </section>
+              <div class="evidence-groups">
+                <section class="evidence-section resume-evidence">
+                  <header class="evidence-section-header">
+                    <h4 id="resume-evidence-title">简历证据</h4>
+                    <span>{{ activeItem.evidence.length }} 条</span>
+                  </header>
+                  <div class="evidence-scroll" role="region" aria-labelledby="resume-evidence-title" tabindex="0">
+                    <ul v-if="activeItem.evidence.length">
+                      <li v-for="evidence in activeItem.evidence" :key="evidence">{{ evidence }}</li>
+                    </ul>
+                    <p v-else class="evidence-empty">本条招呼语未引用简历证据</p>
+                  </div>
+                </section>
+                <section class="evidence-section job-highlights">
+                  <header class="evidence-section-header">
+                    <h4 id="job-highlights-title">岗位关注点</h4>
+                    <span>{{ activeItem.jdHighlights.length }} 条</span>
+                  </header>
+                  <div class="evidence-scroll" role="region" aria-labelledby="job-highlights-title" tabindex="0">
+                    <ul v-if="activeItem.jdHighlights.length" class="highlight-list">
+                      <li v-for="highlight in activeItem.jdHighlights" :key="highlight">{{ highlight }}</li>
+                    </ul>
+                    <p v-else class="evidence-empty">暂未提取岗位关注点</p>
+                  </div>
+                </section>
+              </div>
               <footer><strong>DeepSeek V4 Pro</strong><span>基于简历与完整 JD 生成，固定 temperature=0.2。</span></footer>
             </aside>
           </section>
@@ -765,18 +783,28 @@ function formatStatusTime(value) {
 .quality-note strong { color: #146f70; font-size: 11px; }
 .quality-note p { margin: 3px 0 0; color: #5b7e7d; font-size: 10px; }
 
-.evidence-panel { min-width: 0; overflow-y: auto; border-left: 1px solid var(--greeting-line); background: #fbfdff; padding: 18px 17px; }
+.evidence-panel { display: grid; min-width: 0; min-height: 0; grid-template-rows: auto minmax(0,1fr) auto; gap: 12px; overflow: hidden; border-left: 1px solid var(--greeting-line); background: #fbfdff; padding: 18px 14px 14px; }
 .evidence-panel > header { display: flex; align-items: center; justify-content: space-between; gap: 10px; border-bottom: 1px solid var(--greeting-line); padding-bottom: 12px; }
 .evidence-panel > header span { font-size: 12px; font-weight: 850; }
 .evidence-panel > header small { color: var(--greeting-muted); font-size: 9px; }
-.evidence-panel section { margin-top: 17px; }
-.evidence-panel h4 { margin: 0 0 9px; color: var(--greeting-copy); font-size: 10px; }
-.evidence-panel ul { display: grid; gap: 7px; margin: 0; padding: 0; list-style: none; }
-.evidence-panel li { position: relative; border: 1px solid var(--greeting-line); border-radius: 9px; background: #fff; color: var(--greeting-copy); padding: 8px 8px 8px 23px; font-size: 10px; line-height: 1.45; }
-.evidence-panel li::before { position: absolute; top: 11px; left: 9px; width: 6px; height: 6px; border-radius: 50%; background: var(--greeting-teal); content: ""; }
-.highlight-list { display: flex; flex-wrap: wrap; gap: 6px; }
-.highlight-list span { border-radius: 999px; background: var(--greeting-blue-soft); color: var(--greeting-blue-ink); padding: 5px 7px; font-size: 9px; font-weight: 800; }
-.evidence-panel > footer { margin-top: 22px; border-top: 1px solid var(--greeting-line); padding-top: 13px; }
+.evidence-groups { display: grid; min-height: 0; grid-template-rows: repeat(2,minmax(0,1fr)); gap: 12px; }
+.evidence-section { display: grid; min-height: 0; grid-template-rows: auto minmax(0,1fr); overflow: hidden; border: 1px solid var(--greeting-line); border-radius: 11px; background: #fff; box-shadow: 0 5px 14px rgba(8,65,133,.035); }
+.evidence-section-header { display: flex; min-height: 38px; align-items: center; justify-content: space-between; gap: 8px; border-bottom: 1px solid var(--greeting-line); padding: 0 10px 0 12px; }
+.evidence-section h4 { margin: 0; color: var(--greeting-ink); font-size: 10px; }
+.evidence-section-header > span { border-radius: 999px; background: var(--greeting-canvas); color: var(--greeting-muted); padding: 4px 7px; font: 800 8px/1 var(--ui-font-utility, Consolas, monospace); }
+.resume-evidence .evidence-section-header { box-shadow: inset 3px 0 0 var(--greeting-teal); }
+.job-highlights .evidence-section-header { box-shadow: inset 3px 0 0 var(--greeting-blue); }
+.evidence-scroll { min-height: 0; overflow-y: auto; padding: 9px 6px 9px 9px; scrollbar-color: var(--greeting-line-strong) transparent; scrollbar-gutter: stable; scrollbar-width: thin; }
+.evidence-scroll::-webkit-scrollbar { width: 6px; }
+.evidence-scroll::-webkit-scrollbar-track { background: transparent; }
+.evidence-scroll::-webkit-scrollbar-thumb { border: 1px solid transparent; border-radius: 999px; background: var(--greeting-line-strong); background-clip: padding-box; }
+.evidence-scroll:focus-visible { outline: 2px solid var(--greeting-blue); outline-offset: -2px; }
+.evidence-scroll ul { display: grid; gap: 7px; margin: 0; padding: 0; list-style: none; }
+.resume-evidence li { position: relative; border: 1px solid var(--greeting-line); border-radius: 9px; background: #fff; color: var(--greeting-copy); padding: 8px 8px 8px 23px; font-size: 10px; line-height: 1.45; }
+.resume-evidence li::before { position: absolute; top: 11px; left: 9px; width: 6px; height: 6px; border-radius: 50%; background: var(--greeting-teal); content: ""; }
+.highlight-list li { border-radius: 8px; background: var(--greeting-blue-soft); color: var(--greeting-blue-ink); padding: 7px 9px; font-size: 9px; font-weight: 800; line-height: 1.45; }
+.evidence-empty { margin: 0; color: var(--greeting-muted); padding: 9px 5px; font-size: 9px; line-height: 1.5; }
+.evidence-panel > footer { border-top: 1px solid var(--greeting-line); padding: 11px 2px 0; }
 .evidence-panel > footer strong,.evidence-panel > footer span { display: block; }
 .evidence-panel > footer strong { color: var(--greeting-blue-ink); font: 850 10px/1 var(--ui-font-utility, Consolas, monospace); }
 .evidence-panel > footer span { margin-top: 5px; color: var(--greeting-muted); font-size: 9px; line-height: 1.55; }

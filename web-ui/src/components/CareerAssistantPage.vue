@@ -127,7 +127,7 @@ const hasCandidateContext = computed(() => Boolean(conversationContext.value?.ca
 const hasTargetContext = computed(() => Boolean(conversationContext.value?.target_role))
 const contextButtonLabel = computed(() => {
   const completed = Number(hasCandidateContext.value) + Number(hasTargetContext.value)
-  return completed ? `求职资料：已添加 ${completed}/2` : '补充求职资料（可选）'
+  return completed ? `简历上传 ${completed}/2` : '简历上传'
 })
 const composerPlaceholder = computed(() => (
   selectedConversation.value ? '输入你想咨询的问题…' : '请先开启一个对话'
@@ -469,8 +469,11 @@ const readyModelProfiles = computed(() =>
 const readyFreeModelProfiles = computed(() =>
   readyModelProfiles.value.filter((item) => item.profile.cost_tier === 'free_quota')
 )
-const readyOtherModelProfiles = computed(() =>
-  readyModelProfiles.value.filter((item) => item.profile.cost_tier !== 'free_quota')
+const readyPaidModelProfiles = computed(() =>
+  readyModelProfiles.value.filter((item) => item.profile.cost_tier === 'paid')
+)
+const readyLocalModelProfiles = computed(() =>
+  readyModelProfiles.value.filter((item) => item.profile.cost_tier === 'local')
 )
 const hasReadyModel = computed(() => readyModelProfiles.value.length > 0)
 const hasReadyFreeModel = computed(() => readyFreeModelProfiles.value.length > 0)
@@ -495,7 +498,7 @@ function emptyModelForm() {
   return {
     profileKey: '', displayName: '', providerKey: 'deepseek', modelId: '', apiKey: '',
     apiBaseUrl: 'https://api.deepseek.com', websiteUrl: 'https://platform.deepseek.com',
-    costTier: 'free_quota', priority: 100, text: true, vision: false, tools: false
+    costTier: 'paid', priority: 100, text: true, vision: false, tools: false
   }
 }
 
@@ -866,6 +869,12 @@ function readinessText(value) {
     ready: '可调用', credential_required: '待配置额度 Key',
     policy_blocked: '策略已拦截', disabled: '已停用'
   }[value] ?? value
+}
+
+function costTierText(value) {
+  return {
+    free_quota: '免费额度', paid: '付费', local: '本地'
+  }[value] ?? '费用类型未知'
 }
 
 async function requestJson(url, options = {}) {
@@ -1573,23 +1582,30 @@ async function observeNextServerTurn() {
   }
 }
 
-async function archiveConversation() {
-  if (!selectedConversation.value || savingJobSearch.value) return
-  resetJobSearch()
+async function archiveConversation(conversation) {
+  if (!conversation?.id || savingJobSearch.value || conversationActionLoadingId.value) return
+  const isSelectedConversation = selectedConversation.value?.id === conversation.id
+  if (isSelectedConversation) resetJobSearch()
+  conversationActionLoadingId.value = conversation.id
   try {
-    await requestJson(`/api/career/conversations/${selectedConversation.value.id}/archive`, { method: 'POST' })
-    conversations.value = conversations.value.filter((item) => item.id !== selectedConversation.value.id)
+    await requestJson(`/api/career/conversations/${conversation.id}/archive`, { method: 'POST' })
+    conversations.value = conversations.value.filter((item) => item.id !== conversation.id)
     historyTotal.value = Math.max(0, historyTotal.value - 1)
     historyPage.value = Math.min(historyPage.value, historyTotalPages.value)
-    selectedConversation.value = null
-    conversationContext.value = null
-    messages.value = []
-    resetConversationDraft()
-    useFreeQuotaFirstSelection()
+    closeConversationActions()
+    if (isSelectedConversation) {
+      selectedConversation.value = null
+      conversationContext.value = null
+      messages.value = []
+      resetConversationDraft()
+      useFreeQuotaFirstSelection()
+    }
     feedback.value = '会话已归档，历史会被保留但不能继续写入。'
     void loadConversationPage(historyPage.value)
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '会话归档失败'
+  } finally {
+    conversationActionLoadingId.value = ''
   }
 }
 
@@ -1967,6 +1983,9 @@ onMounted(() => {
 
             <div v-else class="conversation-action-options">
               <button type="button" @click="startConversationRename(conversation)">重命名</button>
+              <button type="button" :disabled="conversationActionLoadingId === conversation.id" @click="archiveConversation(conversation)">
+                {{ conversationActionLoadingId === conversation.id ? '归档中…' : '归档' }}
+              </button>
               <button type="button" class="danger" @click="startConversationDelete(conversation.id)">删除会话</button>
             </div>
           </div>
@@ -2026,18 +2045,6 @@ onMounted(() => {
             <span>一键打招呼</span>
           </button>
           <button
-            type="button"
-            class="chat-material-button"
-            :aria-label="hasCandidateContext ? '简历资料，已添加' : '简历资料，尚未添加'"
-            :title="hasCandidateContext ? '查看或更换简历资料' : '添加简历资料'"
-            :disabled="savingJobSearch"
-            @click="openContextSetup"
-          >
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3.5h7l3 3V20H7z"/><path d="M14 3.5V7h3M9.5 11h5M9.5 14.5h5"/></svg>
-            <span>简历资料</span>
-            <i v-if="hasCandidateContext" class="material-state-dot" aria-hidden="true"></i>
-          </button>
-          <button
             ref="jobSearchButton"
             type="button"
             class="chat-material-button primary"
@@ -2095,19 +2102,21 @@ onMounted(() => {
             <button v-if="selectedConversation" class="chip-button active-context-chip" :class="{ active: conversationContext }" type="button" @click="openContextSetup">{{ contextButtonLabel }}</button>
             <select class="model-select" :value="modelSelectionValue" :disabled="!hasReadyModel" aria-label="本轮模型选择" @change="chooseModel">
               <option v-if="!hasReadyModel" value="">尚未配置可用模型</option>
-              <option v-if="hasReadyFreeModel" value="free_quota_first">【免费】自动选择可用模型</option>
+              <option v-if="hasReadyFreeModel" value="free_quota_first">【免费】自动选择</option>
               <optgroup v-if="readyFreeModelProfiles.length" label="已接入的免费模型">
                 <option v-for="item in readyFreeModelProfiles" :key="item.profile.id" :value="item.profile.id">【免费】{{ modelChoiceLabel(item) }}</option>
               </optgroup>
-              <optgroup v-if="readyOtherModelProfiles.length" label="已配置的其他模型">
-                <option v-for="item in readyOtherModelProfiles" :key="item.profile.id" :value="item.profile.id">{{ modelChoiceLabel(item) }}</option>
+              <optgroup v-if="readyPaidModelProfiles.length" label="已接入的付费模型">
+                <option v-for="item in readyPaidModelProfiles" :key="item.profile.id" :value="item.profile.id">【付费】{{ modelChoiceLabel(item) }}</option>
+              </optgroup>
+              <optgroup v-if="readyLocalModelProfiles.length" label="已接入的本地模型">
+                <option v-for="item in readyLocalModelProfiles" :key="item.profile.id" :value="item.profile.id">【本地】{{ modelChoiceLabel(item) }}</option>
               </optgroup>
             </select>
-            <button class="chip-button free-model-entry-button" type="button" @click="openFreeModelDirectory">{{ hasReadyModel ? '申请免费模型' : '配置可用模型' }}</button>
+            <button class="chip-button free-model-entry-button" type="button" @click="openFreeModelDirectory">{{ hasReadyModel ? '免费模型' : '配置模型' }}</button>
           </div>
           <div class="session-tools">
-            <button class="quiet-button model-manager-button" type="button" @click="openModelDialog">模型与连接</button>
-            <button v-if="selectedConversation" class="quiet-button danger" type="button" @click="archiveConversation">归档会话</button>
+            <button class="quiet-button model-manager-button" type="button" @click="openModelDialog">模型连接</button>
           </div>
         </div>
         <textarea v-model="messageText" aria-label="求职咨询内容" :disabled="!selectedConversation" :placeholder="composerPlaceholder" rows="3" @keydown.enter.exact.prevent="sendMessage" />
@@ -2219,11 +2228,11 @@ onMounted(() => {
             </div>
           </div>
           <div v-if="modelProfiles.length" class="connection-card-list">
-            <button v-for="item in modelProfiles" :key="item.profile.id" class="connection-card" type="button" @click="editModelConnection(item)">
+            <button v-for="item in modelProfiles" :key="item.profile.id" class="connection-card" type="button" :title="item.blocked_reason || ''" @click="editModelConnection(item)">
               <span class="connection-drag">⠿</span>
               <span class="provider-avatar">{{ item.profile.provider_key.slice(0, 2).toUpperCase() }}</span>
               <span class="connection-card-copy"><strong>{{ modelPrimaryLabel(item) }}</strong><small v-if="modelSecondaryLabel(item)">自定义名称：{{ modelSecondaryLabel(item) }}</small></span>
-              <span class="connection-meta"><span :class="`readiness ${item.readiness}`">{{ readinessText(item.readiness) }}</span><small>顺序 {{ item.profile.priority }}</small></span>
+              <span class="connection-meta"><span :class="`readiness ${item.readiness}`">{{ readinessText(item.readiness) }}</span><small>{{ costTierText(item.profile.cost_tier) }} · 顺序 {{ item.profile.priority }}</small></span>
             </button>
           </div>
           <div v-else class="connection-empty-state"><span>⌁</span><strong>还没有可用模型</strong><p>添加一个带免费额度的服务商连接后，即可开始求职分析。</p></div>
@@ -2255,8 +2264,16 @@ onMounted(() => {
               <div class="free-model-template-list">
                 <div v-for="model in offer.models" :key="model.model_id" class="free-model-template">
                   <div><strong>{{ model.display_name }}</strong><code>{{ model.model_id }}</code></div>
+                  <div class="free-model-template-meta">
+                    <small>{{ catalogModelStatus(offer, model) }}</small>
+                    <a
+                      :href="offer.setup_url"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      :aria-label="`打开 ${offer.display_name} 的 API Key 申请页面`"
+                    >获取 API Key ↗</a>
+                  </div>
                   <button type="button" @click="configureCatalogModel(offer, model)">{{ configuredCatalogProfile(offer, model) ? '编辑连接' : '填写 Key 并测试' }}</button>
-                  <small>{{ catalogModelStatus(offer, model) }}</small>
                 </div>
               </div>
               <footer>
@@ -2351,6 +2368,8 @@ onMounted(() => {
 .turn-queue-preview{display:grid;width:min(560px,86%);gap:7px;border:1px dashed var(--ui-line-strong);border-radius:12px;background:var(--ui-surface-soft);padding:10px 12px;color:var(--ui-text-secondary)}.turn-queue-preview>strong{font-size:11px}.turn-queue-preview article{display:grid;grid-template-columns:20px minmax(0,1fr) auto;align-items:start;gap:7px}.turn-queue-preview article span{display:grid;width:18px;height:18px;place-items:center;border-radius:50%;background:var(--ui-surface-active);color:var(--ui-accent-ink);font-size:10px;font-weight:850}.turn-queue-preview article p{overflow:hidden;margin:0;font-size:12px;line-height:1.45;text-overflow:ellipsis;white-space:nowrap}.turn-queue-preview article small{border-radius:999px;background:#fff;padding:2px 6px;color:var(--ui-text-muted);font-size:10px;font-weight:800}
 @keyframes career-thinking-spin { to { transform:rotate(360deg); } }
 .composer { border-top:1px solid #edf0e7; background:#fff; padding:12px 16px 14px; }.composer-toolbar { min-height:36px; flex-wrap:wrap; border-bottom:1px solid #edf0e7; padding-bottom:9px; }.input-tools,.session-tools { display:flex; min-width:0; flex-wrap:wrap; align-items:center; gap:7px; }.session-tools { margin-left:auto; justify-content:flex-end; }.job-url-row { display:grid; grid-template-columns:auto 1fr; align-items:center; gap:8px; margin:10px 0 9px; color:#738068; font-size:12px; font-weight:800; }.job-url-row input,.composer textarea { padding:10px 11px; }.composer textarea { display:block; min-height:68px; margin-top:10px; resize:vertical; }.composer-footer { margin-top:9px; }.input-tools { justify-content:flex-start; }.resume-input { display:none; }.chip-button.active { max-width:240px; overflow:hidden; background:#eaf4d4; color:#5a7d21; text-overflow:ellipsis; white-space:nowrap; }.file-clear-button { border-color:#f0d5d5; background:#fff8f8; color:#a65a5a; }.free-model-entry-button { border-style:dashed; background:#fff; color:#62812d; }.free-model-entry-button:hover { border-color:#9fbd67; background:#f5f9ed; }.model-select { width:auto; max-width:300px; padding:7px 9px; color:#65775a; font-size:12px; font-weight:700; }.send-button { min-width:88px; padding:9px 13px; }.composer-footer > small { color:#98a18e; font-size:11px; }
+.composer-toolbar{min-height:32px;flex-wrap:nowrap;gap:6px;border:1px solid var(--ui-line);border-radius:10px;background:var(--ui-surface-soft);padding:5px 6px}.composer-toolbar .input-tools,.composer-toolbar .session-tools{flex-wrap:nowrap;gap:5px}.composer-toolbar .input-tools{flex:1}.composer-toolbar :is(.chip-button,.quiet-button,.model-select){height:30px;border-color:var(--ui-line);border-radius:8px;background:var(--ui-surface);padding:5px 9px;color:var(--ui-text-secondary);font-size:11px}.composer-toolbar .active-context-chip{max-width:132px!important;flex:none;border-color:var(--ui-line-strong)!important;background:var(--ui-surface-active)!important;color:var(--ui-accent-ink)!important}.composer-toolbar .model-select{min-width:132px;max-width:230px;flex:1 1 164px}.composer-toolbar .free-model-entry-button{flex:none;border-style:solid;background:var(--ui-surface);color:var(--ui-accent-ink)}.composer-toolbar .model-manager-button{flex:none}.conversation-action-options button{min-width:0;padding-right:6px;padding-left:6px}
+@media(max-width:640px){.composer-toolbar{flex-wrap:wrap}.composer-toolbar .input-tools,.composer-toolbar .session-tools{width:100%;flex-wrap:wrap}.composer-toolbar .model-select{max-width:100%;flex:1 1 150px}}
 .interview-reference-row { display:flex; flex-wrap:wrap; gap:7px; margin-top:9px; }
 .interview-reference-chip { display:inline-flex; align-items:center; max-width:100%; gap:6px; border:1px solid #cfe1a9; border-radius:999px; background:#f1f8e4; color:#5d7e2a; padding:5px 7px 5px 10px; font-size:12px; font-weight:800; }
 .interview-reference-chip > span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -2375,7 +2394,7 @@ onMounted(() => {
 .test-connection-button:disabled { cursor:wait; opacity:.6; }
 .free-model-directory { background:linear-gradient(180deg,#fbfdf8 0,#fff 160px); }
 .free-directory-intro { display:flex; align-items:flex-start; justify-content:space-between; gap:24px; margin:18px 0 20px; border-bottom:1px solid #e7ecdf; padding-bottom:18px; }.free-directory-intro > div { max-width:690px; }.free-directory-intro span { color:#8aa34c; font-size:10px; font-weight:900; letter-spacing:.14em; }.free-directory-intro h3 { margin:5px 0 4px; font-size:20px; }.free-directory-intro p { margin:0; color:#778372; font-size:12px; line-height:1.65; }.free-directory-intro > strong { flex:0 0 auto; border-radius:999px; background:#eaf3d8; color:#66852d; padding:7px 10px; font-size:11px; }
-.free-provider-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; }.free-provider-card { display:flex; min-width:0; flex-direction:column; border:1px solid #dfe8d4; border-radius:18px; background:#fff; padding:16px; box-shadow:0 8px 24px rgba(65,82,50,.05); }.free-provider-card > header { display:grid; grid-template-columns:44px minmax(0,1fr) auto; align-items:center; gap:11px; }.free-provider-card > header strong,.free-provider-card > header small { display:block; }.free-provider-card > header strong { color:#31402e; font-size:14px; }.free-provider-card > header small { margin-top:3px; color:#839078; font-size:11px; }.catalog-readiness { border-radius:999px; background:#f4eee1; color:#9a7327; padding:5px 7px; font-size:10px; font-weight:850; }.catalog-readiness.ready { background:#eaf4d8; color:#5f8228; }.free-provider-card > p { min-height:44px; margin:13px 0 9px; color:#727f6c; font-size:12px; line-height:1.65; }.catalog-access-summary { margin-bottom:12px; border-left:3px solid #d9b86c; border-radius:0 9px 9px 0; background:#fff9eb; color:#866922; padding:8px 10px; font-size:11px; font-weight:800; line-height:1.5; }.catalog-access-summary.ready { border-left-color:#8dac4b; background:#f0f7e5; color:#5d7d28; }.free-model-template-list { display:grid; gap:8px; }.free-model-template { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:4px 10px; border:1px solid #e7ecdf; border-radius:12px; background:#fafcf7; padding:10px; }.free-model-template > div { min-width:0; }.free-model-template strong,.free-model-template code { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.free-model-template strong { color:#445340; font-size:12px; }.free-model-template code { margin-top:3px; color:#84917d; font-size:10px; }.free-model-template button { grid-row:1 / 3; grid-column:2; align-self:center; border:1px solid #b9cf8e; border-radius:9px; background:#f0f7e3; color:#5d7d28; padding:7px 9px; font-size:11px; font-weight:850; }.free-model-template > small { color:#96a08f; font-size:10px; }.free-provider-card > footer { display:flex; flex-wrap:wrap; gap:8px 14px; margin-top:auto; padding-top:14px; }.free-provider-card > footer a { color:#557825; font-size:11px; font-weight:850; text-decoration:none; }.free-provider-card > footer a:hover { text-decoration:underline; }
+.free-provider-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; }.free-provider-card { display:flex; min-width:0; flex-direction:column; border:1px solid #dfe8d4; border-radius:18px; background:#fff; padding:16px; box-shadow:0 8px 24px rgba(65,82,50,.05); }.free-provider-card > header { display:grid; grid-template-columns:44px minmax(0,1fr) auto; align-items:center; gap:11px; }.free-provider-card > header strong,.free-provider-card > header small { display:block; }.free-provider-card > header strong { color:#31402e; font-size:14px; }.free-provider-card > header small { margin-top:3px; color:#839078; font-size:11px; }.catalog-readiness { border-radius:999px; background:#f4eee1; color:#9a7327; padding:5px 7px; font-size:10px; font-weight:850; }.catalog-readiness.ready { background:#eaf4d8; color:#5f8228; }.free-provider-card > p { min-height:44px; margin:13px 0 9px; color:#727f6c; font-size:12px; line-height:1.65; }.catalog-access-summary { margin-bottom:12px; border-left:3px solid #d9b86c; border-radius:0 9px 9px 0; background:#fff9eb; color:#866922; padding:8px 10px; font-size:11px; font-weight:800; line-height:1.5; }.catalog-access-summary.ready { border-left-color:#8dac4b; background:#f0f7e5; color:#5d7d28; }.free-model-template-list { display:grid; gap:8px; }.free-model-template { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:4px 10px; border:1px solid #e7ecdf; border-radius:12px; background:#fafcf7; padding:10px; }.free-model-template > div { min-width:0; }.free-model-template strong,.free-model-template code { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.free-model-template strong { color:#445340; font-size:12px; }.free-model-template code { margin-top:3px; color:#84917d; font-size:10px; }.free-model-template-meta { display:flex; align-items:center; gap:10px; }.free-model-template-meta small { color:#96a08f; font-size:10px; }.free-model-template-meta a { color:#557825; font-size:10px; font-weight:850; text-decoration:none; white-space:nowrap; }.free-model-template-meta a:hover { text-decoration:underline; }.free-model-template-meta a:focus-visible { border-radius:4px; outline:2px solid currentColor; outline-offset:2px; }.free-model-template button { grid-row:1 / 3; grid-column:2; align-self:center; border:1px solid #b9cf8e; border-radius:9px; background:#f0f7e3; color:#5d7d28; padding:7px 9px; font-size:11px; font-weight:850; }.free-provider-card > footer { display:flex; flex-wrap:wrap; gap:8px 14px; margin-top:auto; padding-top:14px; }.free-provider-card > footer a { color:#557825; font-size:11px; font-weight:850; text-decoration:none; }.free-provider-card > footer a:hover { text-decoration:underline; }
 .catalog-load-error { display:flex; align-items:center; justify-content:space-between; gap:14px; flex-wrap:wrap; }.catalog-load-error > div { min-width:0; flex:1 1 420px; }.catalog-load-error span { display:block; }.catalog-load-error button { flex:0 0 auto; background:#fff; }
 /* 只维护电脑与手机两档；手机端保留一个页面级滚动面。 */
 @media (max-width:1500px) and (min-width:641px){.career-workspace{grid-template-columns:280px minmax(0,1fr);gap:10px}.career-workspace.has-context-rail{grid-template-columns:280px minmax(480px,1fr) min(var(--context-rail-width,620px),calc(100vw - 810px))}.career-workspace.history-collapsed{grid-template-columns:48px minmax(0,1fr)}.career-workspace.has-context-rail.history-collapsed{grid-template-columns:48px minmax(480px,1fr) min(var(--context-rail-width,620px),calc(100vw - 578px))}.career-history-panel{padding:11px}.career-history-panel.collapsed{padding:8px 5px}.chat-header{padding-right:14px;padding-left:14px}.message-list{padding-right:14px;padding-left:14px}}

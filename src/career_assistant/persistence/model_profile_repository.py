@@ -28,6 +28,20 @@ class ModelCostTier(StrEnum):
     PAID = "paid"
 
 
+PAID_ONLY_PROVIDER_KEYS = frozenset({"deepseek"})
+
+
+def normalize_model_cost_tier(
+    provider_key: str,
+    cost_tier: ModelCostTier,
+) -> ModelCostTier:
+    """纠正不能作为免费额度连接使用的服务商费用分类。"""
+
+    if provider_key.strip().lower() in PAID_ONLY_PROVIDER_KEYS:
+        return ModelCostTier.PAID
+    return cost_tier
+
+
 @dataclass(frozen=True)
 class ModelProfileDraft:
     """由模型设置页提交的无密钥模型档案内容。"""
@@ -485,7 +499,7 @@ class CareerModelProfileRepository:
             provider_key=provider_key,
             model_id=model_id,
             capabilities=frozenset(draft.capabilities),
-            cost_tier=draft.cost_tier,
+            cost_tier=normalize_model_cost_tier(provider_key, draft.cost_tier),
             priority=draft.priority,
             enabled=draft.enabled,
             api_base_url=api_base_url,
@@ -530,7 +544,10 @@ class CareerModelProfileRepository:
             capabilities=frozenset(
                 ModelCapability(capability) for capability in row["capability_codes"]
             ),
-            cost_tier=ModelCostTier(row["cost_tier"]),
+            cost_tier=normalize_model_cost_tier(
+                row["provider_key"],
+                ModelCostTier(row["cost_tier"]),
+            ),
             enabled=row["enabled"],
             priority=row["priority"],
             created_at=row["created_at"],
