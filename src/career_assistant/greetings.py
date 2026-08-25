@@ -461,4 +461,3 @@ JSON 输出示例：
     @staticmethod
     def _normalize_comparison(value: str) -> str:
         return re.sub(r"[\s，。！？；、,.!?;]", "", value).lower()
-

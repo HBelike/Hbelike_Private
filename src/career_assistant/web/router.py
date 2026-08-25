@@ -53,6 +53,15 @@ from src.career_assistant.context_profiles import (
 from src.career_assistant.document_parsing import DoclingServiceDocumentParser
 from src.career_assistant.cloud_vision import CloudVisionRouter
 from src.career_assistant.free_model_catalog import build_free_model_catalog_payload
+from src.career_assistant.greetings import (
+    CareerGreetingService,
+    GreetingCandidateNotFoundError,
+    GreetingGenerationError,
+    GreetingGenerationResult,
+    GreetingJobInput,
+    GreetingJobValidationError,
+    GreetingModelUnavailableError,
+)
 from src.career_assistant.intake_graph import CareerIntakeGraph
 from src.career_assistant.interview_library.models import (
     IngestionTriggerType,
@@ -181,6 +190,7 @@ class CareerAssistantServices:
     context_repository: CareerContextRepository
     job_assessment_repository: CareerJobAssessmentRepository
     job_assessment_service: CareerJobAssessmentService
+    greeting_service: CareerGreetingService
     model_profile_repository: CareerModelProfileRepository
     interview_library_repository: InterviewLibraryRepository
     interview_library_service: InterviewLibraryService
@@ -298,6 +308,39 @@ class ResolveModelRequest(BaseModel):
         default_factory=lambda: {ModelCapability.TEXT},
         min_length=1,
     )
+
+
+class GreetingJobRequest(BaseModel):
+    """来自浏览器职位库的一份完整岗位快照。"""
+
+    id: str = Field(min_length=1, max_length=500)
+    title: str = Field(min_length=1, max_length=240)
+    company: str = Field(default="", max_length=240)
+    recruiter: str = Field(default="", max_length=160)
+    description: str = Field(min_length=1, max_length=50_000)
+    skills: list[str] = Field(default_factory=list, max_length=50)
+    source_url: str = Field(default="", max_length=2_000)
+
+    def to_domain(self) -> GreetingJobInput:
+        """转换成与 Web 层无关的不可变岗位输入。"""
+
+        return GreetingJobInput(
+            id=self.id,
+            title=self.title,
+            company=self.company,
+            recruiter=self.recruiter,
+            description=self.description,
+            skills=tuple(self.skills),
+            source_url=self.source_url,
+        )
+
+
+class GenerateGreetingRequest(BaseModel):
+    """为单个岗位生成或重新生成招呼语。"""
+
+    candidate_profile_id: UUID
+    job: GreetingJobRequest
+    previous_message: str = Field(default="", max_length=2_000)
 
 
 class CreateInterviewExperienceRequest(BaseModel):
@@ -544,6 +587,11 @@ def get_career_services(request: Request) -> CareerAssistantServices:
                 model_client=model_connection_client,
                 settings=job_assessment_settings,
             )
+            greeting_service = CareerGreetingService(
+                context_repository=context_repository,
+                model_gateway=model_gateway,
+                model_client=model_connection_client,
+            )
             interview_retrieval_service = InterviewRetrievalService(
                 interview_library_repository,
                 interview_retrieval_settings,
@@ -601,6 +649,7 @@ def get_career_services(request: Request) -> CareerAssistantServices:
                 context_repository=context_repository,
                 job_assessment_repository=job_assessment_repository,
                 job_assessment_service=job_assessment_service,
+                greeting_service=greeting_service,
                 model_profile_repository=model_profile_repository,
                 interview_library_repository=interview_library_repository,
                 interview_library_service=interview_library_service,
@@ -821,6 +870,45 @@ def list_candidate_profiles(request: Request) -> dict[str, object]:
     read_services = get_career_read_services(request)
     profiles = read_services.context_repository.list_candidate_profiles(actor.actor_id)
     return {"items": [_candidate_profile_payload(item) for item in profiles]}
+
+
+@router.post("/greetings/generate")
+def generate_greeting(
+    request_body: GenerateGreetingRequest,
+    request: Request,
+) -> dict[str, object]:
+    """使用当前用户简历和单个完整 JD 生成一条可审核招呼语。"""
+
+    actor = get_request_actor()
+    try:
+        result = get_career_services(request).greeting_service.generate(
+            actor.organization_id,
+            actor.actor_id,
+            request_body.candidate_profile_id,
+            request_body.job.to_domain(),
+            request_body.previous_message,
+        )
+    except GreetingCandidateNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "candidate_profile_not_found", "message": str(exc)},
+        ) from exc
+    except GreetingModelUnavailableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": "greeting_model_unavailable", "message": str(exc)},
+        ) from exc
+    except GreetingJobValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": "incomplete_job_detail", "message": str(exc)},
+        ) from exc
+    except GreetingGenerationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"code": "greeting_generation_failed", "message": str(exc)},
+        ) from exc
+    return _greeting_payload(result)
 
 
 @router.post("/candidate-profiles/parse")
@@ -3222,6 +3310,28 @@ def _candidate_profile_payload(profile) -> dict[str, object]:
         "source_filename": profile.source_filename,
         "version": profile.version,
         "created_at": profile.created_at.isoformat(),
+    }
+
+
+def _greeting_payload(result: GreetingGenerationResult) -> dict[str, object]:
+    """只返回审核需要的文案和证据摘要，不下发简历与完整 JD。"""
+
+    return {
+        "job_key": result.job_key,
+        "message": result.message,
+        "resume_evidence": [
+            {"id": item.id, "summary": item.summary}
+            for item in result.resume_evidence
+        ],
+        "jd_highlights": [
+            {"id": item.id, "summary": item.summary}
+            for item in result.jd_highlights
+        ],
+        "warnings": list(result.warnings),
+        "model": {
+            "provider_key": result.provider_key,
+            "model_id": result.model_id,
+        },
     }
 
 

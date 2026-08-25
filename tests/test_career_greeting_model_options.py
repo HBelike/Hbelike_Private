@@ -58,4 +58,3 @@ def test_completion_options_can_enable_thinking_for_deepseek() -> None:
     )
 
     assert payload["thinking"] == {"type": "enabled"}
-
