@@ -8,17 +8,24 @@ import {
   normalizeBossExtensionConnection
 } from '../boss-extension-onboarding.js'
 import {
+  applyGreetingFailure,
+  applyGreetingResult,
   createGreetingItems,
   findGreetingFailureAction,
+  greetingJobKey,
   needsGreetingRiskWarning,
   normalizeGreetingLimit,
   queueGreetingItems,
   recordGreetingAttempt,
-  regenerateGreetingItem,
+  markGreetingGenerating,
   retryGreetingItems,
   stopGreetingItems,
   updateGreetingItemStatus
 } from '../career-greeting-preview.js'
+import {
+  generateGreetingBatch,
+  requestGreeting
+} from '../career-greeting-client.js'
 
 const props = defineProps({
   open: { type: Boolean, default: false },
@@ -44,8 +51,9 @@ const installDialogOpen = ref(false)
 const extensionGateError = ref('')
 const extensionGateMode = ref('install')
 const regeneratingItemId = ref('')
+const generationRunning = ref(false)
 const dialogRef = ref(null)
-let regenerationTimer = null
+let generationSession = 0
 
 const steps = [
   { key: 'select', label: '选择岗位' },
@@ -54,7 +62,11 @@ const steps = [
 ]
 
 const stageIndex = computed(() => Math.max(0, steps.findIndex((item) => item.key === stage.value)))
-const includedItems = computed(() => items.value.filter((item) => item.included))
+const includedItems = computed(() => items.value.filter((item) => (
+  item.included
+  && Boolean(item.message)
+  && !['generating', 'generation_failed'].includes(item.status)
+)))
 const activeItem = computed(() => items.value.find((item) => item.id === activeItemId.value) ?? items.value[0] ?? null)
 const sentCount = computed(() => items.value.filter((item) => item.status === 'sent').length)
 const waitingCount = computed(() => items.value.filter((item) => ['queued', 'preflighting', 'sending'].includes(item.status)).length)
@@ -64,7 +76,7 @@ const failureAction = computed(() => findGreetingFailureAction(items.value))
 const failureActionItem = computed(() => items.value.find((item) => item.id === failureAction.value?.itemId) ?? null)
 
 watch(() => props.open, (open) => {
-  clearTimers()
+  invalidateGeneration()
   if (!open) return
   const previewJobs = props.previewJobs.slice(0, 10)
   const startsInReview = props.initialStage === 'review' && previewJobs.length > 0
@@ -84,13 +96,15 @@ watch(() => props.open, (open) => {
   extensionGateMode.value = 'install'
   regeneratingItemId.value = ''
   nextTick(() => dialogRef.value?.focus())
+  if (startsInReview) nextTick(() => void generateAllGreetings(previewJobs))
 }, { immediate: true })
 
-onBeforeUnmount(clearTimers)
+onBeforeUnmount(invalidateGeneration)
 
-function clearTimers() {
-  if (regenerationTimer) window.clearTimeout(regenerationTimer)
-  regenerationTimer = null
+function invalidateGeneration() {
+  generationSession += 1
+  generationRunning.value = false
+  regeneratingItemId.value = ''
 }
 
 function close() {
@@ -98,7 +112,7 @@ function close() {
     stopSending()
     return
   }
-  clearTimers()
+  invalidateGeneration()
   emit('cancel')
 }
 
@@ -112,15 +126,38 @@ function updateSelectionLimit(event) {
   selectionLimit.value = Math.max(selectedJobs.value.length, nextLimit)
 }
 
-function startReview() {
-  if (!selectedJobs.value.length) return
+async function startReview() {
+  if (!selectedJobs.value.length || !props.candidateProfile?.id || generationRunning.value) return
   items.value = createGreetingItems(selectedJobs.value)
   activeItemId.value = items.value[0]?.id ?? ''
   stage.value = 'review'
+  await generateAllGreetings(selectedJobs.value)
+}
+
+async function generateAllGreetings(jobs) {
+  const session = ++generationSession
+  generationRunning.value = true
+  await generateGreetingBatch(
+    jobs,
+    (job) => requestGreeting({
+      candidateProfileId: props.candidateProfile?.id,
+      job
+    }),
+    3,
+    (result) => {
+      if (session !== generationSession) return
+      const id = String(result.value?.job_key || greetingJobKey(result.job))
+      items.value = result.status === 'fulfilled'
+        ? applyGreetingResult(items.value, id, result.value)
+        : applyGreetingFailure(items.value, id, result.reason, { preserveMessage: false })
+    }
+  )
+  if (session === generationSession) generationRunning.value = false
 }
 
 function returnToSelection() {
   if (sending.value) return
+  invalidateGeneration()
   stage.value = 'select'
 }
 
@@ -138,24 +175,39 @@ function updateActiveMessage(event) {
 function updateActiveIncluded(event) {
   const included = event.target.checked
   items.value = items.value.map((item) => item.id === activeItem.value?.id
-    ? { ...item, included, status: included ? 'ready' : 'excluded' }
+    ? {
+        ...item,
+        included,
+        status: included
+          ? (item.message ? 'ready' : 'generation_failed')
+          : 'excluded'
+      }
     : item)
 }
 
-function regenerateActive() {
+async function regenerateActive() {
   const item = activeItem.value
-  if (!item || regeneratingItemId.value) return
+  if (!item || regeneratingItemId.value || generationRunning.value || !props.candidateProfile?.id) return
   regeneratingItemId.value = item.id
-  items.value = items.value.map((entry) => entry.id === item.id
-    ? { ...entry, status: 'generating' }
-    : entry)
-  regenerationTimer = window.setTimeout(() => {
-    items.value = items.value.map((entry) => entry.id === item.id
-      ? regenerateGreetingItem({ ...entry, status: 'ready' })
-      : entry)
-    regeneratingItemId.value = ''
-    regenerationTimer = null
-  }, 520)
+  const previousMessage = item.message
+  const session = generationSession
+  items.value = markGreetingGenerating(items.value, item.id)
+  try {
+    const payload = await requestGreeting({
+      candidateProfileId: props.candidateProfile.id,
+      job: item.job,
+      previousMessage: previousMessage
+    })
+    if (session === generationSession) {
+      items.value = applyGreetingResult(items.value, item.id, payload)
+    }
+  } catch (error) {
+    if (session === generationSession) {
+      items.value = applyGreetingFailure(items.value, item.id, error, { preserveMessage: true })
+    }
+  } finally {
+    if (session === generationSession) regeneratingItemId.value = ''
+  }
 }
 
 function requestSend() {
@@ -311,7 +363,8 @@ function previewDelay(ms) {
 function statusLabel(status) {
   return {
     ready: '待审核',
-    generating: '重新生成中',
+    generating: '智能生成中',
+    generation_failed: '生成失败',
     excluded: '已取消',
     queued: '等待发送',
     preflighting: '正在预检',
@@ -419,27 +472,35 @@ function formatStatusTime(value) {
 
               <div class="message-paper" :class="{ disabled: !activeItem.included }">
                 <label for="greeting-message">招呼语</label>
+                <div v-if="activeItem.status === 'generating' && !activeItem.message" class="generation-placeholder" role="status">
+                  <span class="button-loader" aria-hidden="true"></span>
+                  DeepSeek V4 Pro 正在结合简历与完整 JD 生成
+                </div>
                 <textarea
                   id="greeting-message"
                   :value="activeItem.message"
-                  :disabled="!activeItem.included || activeItem.status === 'generating'"
+                  :disabled="!activeItem.included || activeItem.status === 'generating' || !activeItem.message"
                   @input="updateActiveMessage"
                 ></textarea>
+                <p v-if="activeItem.generationError" class="generation-error" role="alert">
+                  {{ activeItem.generationError }}
+                </p>
                 <div class="message-meta">
                   <span>建议 150 字以内，不做机械截断</span>
-                  <strong>{{ activeItem.message.length }} 字</strong>
+                  <strong>{{ activeItem.message?.length || 0 }} 字</strong>
                 </div>
               </div>
 
               <div class="editor-actions">
-                <button type="button" class="regenerate-button" :disabled="!activeItem.included || regeneratingItemId === activeItem.id" @click="regenerateActive">
+                <button type="button" class="regenerate-button" :disabled="!activeItem.included || activeItem.status === 'generating' || generationRunning || regeneratingItemId === activeItem.id" @click="regenerateActive">
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 5v6h-6"/></svg>
-                  {{ regeneratingItemId === activeItem.id ? '正在重新生成' : '重新生成这一条' }}
+                  {{ regeneratingItemId === activeItem.id ? '正在重新生成' : (activeItem.message ? '重新生成这一条' : '重试生成这一条') }}
                 </button>
-                <span>第 {{ activeItem.revision }} 版 · humanizer 已检查</span>
+                <span v-if="activeItem.revision">第 {{ activeItem.revision }} 版 · 事实证据已校验</span>
+                <span v-else>尚未生成成功</span>
               </div>
 
-              <section class="quality-note">
+              <section v-if="activeItem.message && activeItem.status !== 'generating'" class="quality-note">
                 <i aria-hidden="true">✓</i>
                 <div><strong>事实约束已通过</strong><p>数字、公司、项目和经历均来自当前简历版本。</p></div>
               </section>
@@ -455,7 +516,7 @@ function formatStatusTime(value) {
                 <h4>岗位关注点</h4>
                 <div class="highlight-list"><span v-for="highlight in activeItem.jdHighlights" :key="highlight">{{ highlight }}</span></div>
               </section>
-              <footer><strong>humanizer</strong><span>删除套话与夸张表述，不改变事实。</span></footer>
+              <footer><strong>DeepSeek V4 Pro</strong><span>基于简历与完整 JD 生成，固定 temperature=0.2。</span></footer>
             </aside>
           </section>
 
@@ -536,6 +597,7 @@ function formatStatusTime(value) {
             <label for="greeting-limit">本批上限</label>
             <input id="greeting-limit" :value="selectionLimit" type="number" min="1" max="10" @change="updateSelectionLimit" />
             <span>最多 10 个，当前已选 <strong>{{ selectedJobs.length }}</strong> 个</span>
+            <small v-if="!candidateProfile?.id">请先在当前会话选择简历资料</small>
           </div>
           <div v-else class="local-boundary" :class="{ live: !simulationMode }">
             <i aria-hidden="true"></i><span>{{ simulationMode ? '安全预览，不会发送到 BOSS' : '真实发送：逐条预检、逐条确认结果' }}</span>
@@ -545,8 +607,8 @@ function formatStatusTime(value) {
             <button v-if="stage === 'review'" type="button" class="secondary-button" @click="returnToSelection">返回选岗</button>
             <button v-if="stage === 'sending' && sending" type="button" class="danger-button" @click="stopSending">停止剩余发送</button>
             <button type="button" class="secondary-button" @click="close">{{ sendComplete || stopped ? '关闭' : '取消' }}</button>
-            <button v-if="stage === 'select'" type="button" class="primary-button" :disabled="!selectedJobs.length" @click="startReview">生成 {{ selectedJobs.length || '' }} 条招呼语</button>
-            <button v-else-if="stage === 'review'" type="button" class="primary-button" :disabled="!includedItems.length" @click="requestSend">确认并{{ simulationMode ? '模拟' : '真实' }}发送 {{ includedItems.length }} 条</button>
+            <button v-if="stage === 'select'" type="button" class="primary-button" :disabled="!selectedJobs.length || !candidateProfile?.id || generationRunning" @click="startReview">生成 {{ selectedJobs.length || '' }} 条招呼语</button>
+            <button v-else-if="stage === 'review'" type="button" class="primary-button" :disabled="!includedItems.length || generationRunning" @click="requestSend">确认并{{ simulationMode ? '模拟' : '真实' }}发送 {{ includedItems.length }} 条</button>
           </div>
         </footer>
 
@@ -681,6 +743,8 @@ function formatStatusTime(value) {
 .message-paper { margin-top: 22px; border: 1px solid var(--greeting-line-strong); border-radius: 16px; background: linear-gradient(#fff,#fbfdff); padding: 16px 17px 12px; box-shadow: 0 14px 34px rgba(8,65,133,.07); transition: opacity .16s ease; }
 .message-paper.disabled { opacity: .5; }
 .message-paper > label { color: var(--greeting-copy); font-size: 10px; font-weight: 850; }
+.generation-placeholder { display: flex; min-height: 46px; align-items: center; gap: 9px; margin-top: 10px; border-radius: 9px; background: var(--greeting-blue-soft); color: var(--greeting-blue-ink); padding: 9px 11px; font-size: 11px; font-weight: 750; }
+.generation-error { margin: 9px 0 0; border-radius: 8px; background: #fff1f2; color: #a33b46; padding: 8px 10px; font-size: 10px; line-height: 1.55; }
 .message-paper textarea { display: block; width: 100%; min-height: 178px; box-sizing: border-box; margin-top: 9px; resize: vertical; border: 0; outline: 0; background: transparent; color: var(--greeting-ink); padding: 0; font: 520 15px/1.9 var(--ui-font-body, "Segoe UI Variable Text", sans-serif); }
 .message-paper:focus-within { border-color: var(--greeting-blue); box-shadow: 0 0 0 3px var(--ui-focus, rgba(8,105,216,.12)),0 14px 34px rgba(8,65,133,.07); }
 .message-meta { display: flex; align-items: center; justify-content: space-between; gap: 12px; border-top: 1px dashed var(--greeting-line); color: var(--greeting-muted); padding-top: 9px; font-size: 9px; }
@@ -766,6 +830,7 @@ function formatStatusTime(value) {
 .batch-limit-control input { width: 52px; height: 34px; box-sizing: border-box; border: 1px solid var(--greeting-line-strong); border-radius: 8px; outline: 0; color: var(--greeting-ink); padding: 0 8px; font: 850 12px/1 var(--ui-font-utility, Consolas, monospace); }
 .batch-limit-control input:focus { border-color: var(--greeting-blue); box-shadow: 0 0 0 3px var(--ui-focus, rgba(8,105,216,.12)); }
 .batch-limit-control > span { color: var(--greeting-muted); }
+.batch-limit-control > small { color: #a33b46; font-size: 10px; font-weight: 750; }
 .batch-limit-control strong { color: var(--greeting-blue-ink); }
 .local-boundary { gap: 8px; color: #087d7d; font-size: 10px; font-weight: 800; }
 .local-boundary.live { color: var(--greeting-blue-ink); }
