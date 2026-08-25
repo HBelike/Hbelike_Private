@@ -5,9 +5,11 @@ import test from 'node:test'
 import {
   BOSS_EXTENSION_DOWNLOAD_URL,
   BOSS_EXTENSION_GUIDE_URL,
+  BOSS_EXTENSION_REQUIRED_CAPABILITIES,
   BOSS_EXTENSION_VERSION,
   bossExtensionGuideUrl,
-  normalizeBossExtensionConnection
+  normalizeBossExtensionConnection,
+  shouldOpenBossExtensionGate
 } from './boss-extension-onboarding.js'
 
 const manifestUrl = new URL('../../browser-extension/job-library/manifest.json', import.meta.url)
@@ -21,15 +23,38 @@ test('扩展下载地址与真实 manifest 版本保持一致', async () => {
   )
 })
 
-test('连接结果保留当前浏览器扩展版本', () => {
-  assert.deepEqual(normalizeBossExtensionConnection({ connected: true, version: '0.2.2' }), {
+test('已安装旧版助手保持已连接，只单独标记安全重试能力不足', () => {
+  assert.deepEqual(normalizeBossExtensionConnection({ connected: true, version: '0.2.3' }), {
     status: 'ready',
-    version: '0.2.2'
+    version: '0.2.3',
+    capabilities: [],
+    greetingRetryReady: false,
+    missingCapabilities: BOSS_EXTENSION_REQUIRED_CAPABILITIES
+  })
+  assert.deepEqual(normalizeBossExtensionConnection({
+    connected: true,
+    version: '0.2.4',
+    capabilities: [...BOSS_EXTENSION_REQUIRED_CAPABILITIES]
+  }), {
+    status: 'ready',
+    version: '0.2.4',
+    capabilities: BOSS_EXTENSION_REQUIRED_CAPABILITIES,
+    greetingRetryReady: true,
+    missingCapabilities: []
   })
   assert.deepEqual(normalizeBossExtensionConnection(null), {
     status: 'missing',
-    version: ''
+    version: '',
+    capabilities: [],
+    greetingRetryReady: false,
+    missingCapabilities: BOSS_EXTENSION_REQUIRED_CAPABILITIES
   })
+})
+
+test('静默检测不弹安装窗口，只有用户操作且真正未连接时才弹出', () => {
+  assert.equal(shouldOpenBossExtensionGate('missing'), false)
+  assert.equal(shouldOpenBossExtensionGate('missing', { interactive: true }), true)
+  assert.equal(shouldOpenBossExtensionGate('ready', { interactive: true }), false)
 })
 
 test('Chrome 与 Edge 使用同一教程页的独立步骤锚点', () => {

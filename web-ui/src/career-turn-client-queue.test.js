@@ -16,7 +16,7 @@ test('服务端 Turn 按 queue_sequence 恢复且过滤终态', () => {
   ])
 
   assert.deepEqual(restored.map((item) => item.id), ['turn-1', 'turn-2'])
-  assert.equal(restored[1].content, '已提交的排队消息')
+  assert.equal(restored[1].content, '等待回复的消息')
 })
 
 test('每次 API 受理后立即加入服务端等待列表', () => {

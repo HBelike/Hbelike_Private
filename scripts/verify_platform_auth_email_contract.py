@@ -39,7 +39,7 @@ class FakeAuthService:
             display_name="接口契约用户",
             email="contract-test@example.com",
             email_verified_at=now,
-            role=PlatformRole.VIEWER,
+            role=PlatformRole.USER,
             is_active=True,
             created_at=now,
         )

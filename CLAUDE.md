@@ -145,4 +145,4 @@ SearchTask → SummaryTask → ShortVideoPromptTask → ImageTask → VideoClipP
 - 微信公众号默认只创建草稿，不自动发布；发布必须经过人工审核
 - 云端托管 API 优先；本地 GPU 推理仅可作为开发兜底，不得成为生产唯一依赖
 - 每个新模块或重大调整需更新对应决策文档（`docs/*.md`）
-- 生产环境：`PLATFORM_AUTH_REQUIRED=true`，`PLATFORM_CLOSED_OPERATOR_MODE=true`，`CAREER_REDACTION_ENABLED=true`
+- 生产环境：`PLATFORM_AUTH_REQUIRED=true`，`CAREER_REDACTION_ENABLED=true`；普通用户按管理员保存的路由模块配置访问，管理员接口继续由服务端鉴权

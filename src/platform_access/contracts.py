@@ -8,22 +8,19 @@ from enum import Enum
 from uuid import UUID
 
 
-class PlatformRole(str, Enum):
-    """平台权限等级，按查看、执行、管理逐级递增。"""
+PLATFORM_ADMIN_EMAIL = "2963613812@qq.com"
 
-    VIEWER = "viewer"
-    OPERATOR = "operator"
+
+class PlatformRole(str, Enum):
+    """平台角色只区分固定管理员与普通用户。"""
+
+    USER = "user"
     ADMIN = "admin"
 
     def allows(self, required: "PlatformRole") -> bool:
-        """判断当前角色是否包含目标操作权限。"""
+        """管理员包含普通用户能力，普通用户不能执行管理员操作。"""
 
-        ranks = {
-            PlatformRole.VIEWER: 1,
-            PlatformRole.OPERATOR: 2,
-            PlatformRole.ADMIN: 3,
-        }
-        return ranks[self] >= ranks[required]
+        return self is PlatformRole.ADMIN or required is PlatformRole.USER
 
 
 @dataclass(frozen=True)

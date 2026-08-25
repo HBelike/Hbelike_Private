@@ -28,7 +28,7 @@ WebUI 对话 / PDF / 图片 / 职位链接
 1. 复制 `.env.career-assistant.example` 为 `.env.career-assistant`，设置 PostgreSQL 连接信息与模型额度 Key。
 2. 启动数据库：`docker compose --env-file .env.career-assistant -f docker-compose.career-assistant.yml up -d`。
 3. 执行既有迁移命令，确保 `career_assistant` schema 已创建。
-4. 首次开发前安装热更新依赖：`.\.venv\Scripts\python.exe -m pip install -r requirements-development.txt`。启动 Web API 的唯一命令是 `scripts\start_dev_backend.ps1`。它以 Uvicorn + `watchfiles` 监视 `src/**/*.py` 与 `config/**/*.yaml`，并在 Windows 工作区强制使用轮询模式；前端通过 `web-ui/vite.config.js` 代理到固定端口 `18080`。不要同时启动多个 Web API 实例，否则浏览器可能命中旧进程。
+4. 首次开发前安装热更新依赖：`.\.venv\Scripts\python.exe -m pip install -r requirements-development.txt`。本地后端唯一启动命令是 `scripts\start_dev_backend.ps1`：脚本以前台方式启动 Uvicorn API，同时以隐藏的独立进程启动 `career-agent-worker`，API 退出时自动清理对应 Worker。API 使用 `watchfiles` 监视 `src/**/*.py` 与 `config/**/*.yaml`，并在 Windows 工作区强制使用轮询模式；前端通过 `web-ui/vite.config.js` 代理到固定端口 `18080`。不要直接只运行 `preview_server.py`，否则 Turn 会入队但无人消费；也不要同时启动多个本地后端实例，避免浏览器命中旧进程。
 5. 启动前端：在 `web-ui` 下执行 `npm run dev`，访问 `http://127.0.0.1:5173/career`。
 
 ### 长回复配置

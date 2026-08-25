@@ -11,13 +11,22 @@ import {
   shouldRefreshBossSession
 } from './boss-data.js'
 import {
+  BOSS_CHAT_PAGE_EVIDENCE,
   buildBossChatUrl,
   CHAT_DELIVERY_EVIDENCE,
   classifyFriendAddResponse,
-  normalizeGreetingPayload
+  createTabBusyGreetingFailure,
+  isTransientTabEditError,
+  normalizeGreetingPayload,
+  retryTransientTabEdit,
+  withGreetingRetryContext
 } from './boss-greeting.js'
 
 const WEB_CHANNEL = 'find-job-job-library-web-v1'
+const GREETING_CAPABILITIES = Object.freeze([
+  'retry_greeting_message',
+  'greeting_submission_state'
+])
 const ALLOWED_APP_HOSTS = new Set(['127.0.0.1', 'localhost', 'xingxingtech.cn', 'www.xingxingtech.cn'])
 const BOSS_HOME = 'https://www.zhipin.com/web/geek/jobs?city=101020100&ka=open_joblist'
 const REQUEST_GAP_MS = 1000
@@ -115,7 +124,7 @@ async function navigateBossTab(tabId, url, timeoutMs = 20000) {
   })
 
   try {
-    await chrome.tabs.update(tabId, { url, active: false })
+    await retryTransientTabEdit(() => chrome.tabs.update(tabId, { url, active: false }))
   } catch (error) {
     clearTimeout(timeoutId)
     chrome.tabs.onUpdated.removeListener(listener)
@@ -332,11 +341,12 @@ async function getGreetingTab(url) {
     try {
       const current = await chrome.tabs.get(greetingTabId)
       if (current?.id) return navigateBossTab(current.id, url, 25000)
-    } catch {
+    } catch (error) {
+      if (isTransientTabEditError(error)) throw error
       greetingTabId = null
     }
   }
-  const created = await chrome.tabs.create({ url, active: false })
+  const created = await retryTransientTabEdit(() => chrome.tabs.create({ url, active: false }))
   if (!created.id) throw new Error('无法打开 BOSS 聊天页面。')
   greetingTabId = created.id
   return waitForTabReady(created.id, 25000)
@@ -346,10 +356,64 @@ async function runChatSend(tabId, message) {
   const [{ result } = {}] = await chrome.scripting.executeScript({
     target: { tabId },
     world: 'MAIN',
-    args: [message, CHAT_DELIVERY_EVIDENCE],
-    func: async (finalMessage, evidenceRules) => {
+    args: [message, CHAT_DELIVERY_EVIDENCE, BOSS_CHAT_PAGE_EVIDENCE],
+    func: async (finalMessage, evidenceRules, pageEvidenceRules) => {
       const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds))
-      const normalized = String(finalMessage ?? '').trim()
+      const messageToSend = String(finalMessage ?? '').trim()
+      const normalizeMessageText = (value) => String(value ?? '')
+        .replace(/[\u200B-\u200D\u2060\uFEFF]/g, '')
+        .replace(/\u00A0/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 4000)
+      const normalized = normalizeMessageText(messageToSend)
+      const outgoingRowSelector = [
+        '.item-myself',
+        '.message-item.myself',
+        '.message-item.is-self',
+        '.chat-message.myself',
+        '.chat-message.is-self',
+        '[class~="message-item"][class~="myself"]',
+        '[data-message-direction="outgoing"]',
+        '[data-direction="outgoing"]',
+        '[data-side="right"][class*="message"]'
+      ].join(',')
+      const messageTextSelectors = [
+        '.message-text',
+        '[data-message-text]',
+        '[class*="message-content"]',
+        '[class*="message-bubble"]'
+      ]
+      const readMessageText = (row) => {
+        for (const selector of messageTextSelectors) {
+          const candidate = row.querySelector(selector)
+          const candidateText = normalizeMessageText(candidate?.textContent)
+          if (candidateText) return candidateText
+        }
+        return ''
+      }
+      const outgoingMessages = () => [...new Set(document.querySelectorAll(outgoingRowSelector))]
+        .map((row) => ({ row, text: readMessageText(row) }))
+        .filter((item) => item.text)
+      const hasNewLogicalMessage = (baselineTexts, currentTexts) => {
+        const baseline = baselineTexts.map(normalizeMessageText)
+        const current = currentTexts.map(normalizeMessageText)
+        if (!current.length || current.at(-1) !== normalized) return false
+        if (baseline.length === current.length
+          && baseline.every((value, index) => value === current[index])) {
+          return false
+        }
+        const baselineMatches = baseline.filter((value) => value === normalized).length
+        const currentMatches = current.filter((value) => value === normalized).length
+        if (currentMatches > baselineMatches) return true
+        const maximumOverlap = Math.min(baseline.length, current.length - 1)
+        for (let overlap = maximumOverlap; overlap > 0; overlap -= 1) {
+          const baselineSuffix = baseline.slice(-overlap)
+          const currentPrefix = current.slice(0, overlap)
+          if (baselineSuffix.every((value, index) => value === currentPrefix[index])) return true
+        }
+        return false
+      }
       const classifyEvidence = (evidence = {}) => {
         const statusClasses = String(evidence.statusClasses ?? '').trim().slice(0, 800)
         const statusText = String(evidence.statusText ?? '').trim().slice(0, 300)
@@ -368,16 +432,28 @@ async function runChatSend(tabId, message) {
         }
         return 'pending'
       }
-      const pageState = () => {
+      const isVisible = (element) => {
+        if (!element) return false
+        const style = window.getComputedStyle(element)
+        const rect = element.getBoundingClientRect()
+        return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0
+      }
+      const pageState = (submissionState = 'not_submitted') => {
         const pageText = document.body?.innerText ?? ''
-        if (/安全验证|环境存在异常|请稍候/.test(pageText) || /verify|security-check/i.test(location.pathname)) {
-          return { code: 'verification_required', message: 'BOSS 要求安全验证。', stopBatch: true }
+        const pageRoute = location.pathname
+        const hasVisibleChallenge = [...document.querySelectorAll(pageEvidenceRules.verificationSelector)]
+          .some(isVisible)
+        if (new RegExp(pageEvidenceRules.verificationRoutePattern, 'i').test(pageRoute)
+          || hasVisibleChallenge
+          || new RegExp(pageEvidenceRules.verificationTextPattern).test(pageText)) {
+          return { code: 'verification_required', message: 'BOSS 要求安全验证。', stopBatch: true, submissionState }
         }
-        if (/登录后继续|扫码登录|密码登录/.test(pageText) || /\/web\/user\/?$/.test(location.pathname)) {
-          return { code: 'login_required', message: 'BOSS 登录状态已失效。', stopBatch: true }
+        if (new RegExp(pageEvidenceRules.loginTextPattern).test(pageText)
+          || new RegExp(pageEvidenceRules.loginRoutePattern, 'i').test(pageRoute)) {
+          return { code: 'login_required', message: 'BOSS 登录状态已失效。', stopBatch: true, submissionState }
         }
-        if (/操作过于频繁|沟通上限|沟通额度|已与\d+位BOSS沟通/.test(pageText)) {
-          return { code: 'rate_limited', message: 'BOSS 限制了当前沟通频率。', stopBatch: true }
+        if (new RegExp(pageEvidenceRules.rateLimitTextPattern).test(pageText)) {
+          return { code: 'rate_limited', message: 'BOSS 限制了当前沟通频率。', stopBatch: true, submissionState }
         }
         return null
       }
@@ -396,13 +472,11 @@ async function runChatSend(tabId, message) {
         await sleep(100)
       }
       if (!chatInput || !sendButton) {
-        return { code: 'chat_unavailable', message: 'BOSS 聊天输入框或发送按钮未加载。', stopBatch: true }
+        return { code: 'chat_unavailable', message: 'BOSS 聊天输入框或发送按钮未加载。', stopBatch: true, submissionState: 'not_submitted' }
       }
 
-      const outgoingMessages = () => [...document.querySelectorAll('.item-myself .message-text')]
-        .filter((element) => element.textContent?.trim() === normalized)
-      if (outgoingMessages().some((element) => {
-        const row = element.closest('.item-myself')
+      if (outgoingMessages().some(({ row, text }) => {
+        if (text !== normalized) return false
         const status = row?.querySelector('.status,[class*="status-"]')
         return classifyEvidence({
           statusClasses: `${row?.className ?? ''} ${status?.className ?? ''}`,
@@ -412,8 +486,54 @@ async function runChatSend(tabId, message) {
         return { ok: true, status: 'already_sent' }
       }
 
-      const existingOutgoingMessages = new Set(outgoingMessages())
-      const firstSeenAt = new WeakMap()
+      const baselineOutgoingTexts = outgoingMessages().map((item) => item.text)
+      let logicalObservation = {
+        firstSeenAt: 0,
+        lastSeenAt: 0,
+        stableForMs: 0,
+        isNew: false,
+        inputCleared: false
+      }
+      const sampleLogicalMessage = () => {
+        const currentMessages = outgoingMessages()
+        const now = Date.now()
+        const inputCleared = !normalizeMessageText(chatInput.textContent)
+        const isNewLogicalMessage = hasNewLogicalMessage(
+          baselineOutgoingTexts,
+          currentMessages.map((item) => item.text)
+        )
+        const previousFirstSeenAt = Number(logicalObservation.firstSeenAt) || 0
+        const previousLastSeenAt = Number(logicalObservation.lastSeenAt) || 0
+        const renderGapMs = Math.max(0, Number(evidenceRules.renderGapMs) || 0)
+        if (!inputCleared) {
+          logicalObservation = { firstSeenAt: 0, lastSeenAt: 0, stableForMs: 0, isNew: false, inputCleared: false }
+        } else if (isNewLogicalMessage) {
+          const stayedWithinRenderGap = previousFirstSeenAt > 0
+            && previousLastSeenAt > 0
+            && now - previousLastSeenAt <= renderGapMs
+          const firstSeenAt = stayedWithinRenderGap ? previousFirstSeenAt : now
+          logicalObservation = {
+            firstSeenAt,
+            lastSeenAt: now,
+            stableForMs: Math.max(0, now - firstSeenAt),
+            isNew: true,
+            inputCleared: true
+          }
+        } else if (previousFirstSeenAt > 0
+          && previousLastSeenAt > 0
+          && now - previousLastSeenAt <= renderGapMs) {
+          logicalObservation = {
+            firstSeenAt: previousFirstSeenAt,
+            lastSeenAt: previousLastSeenAt,
+            stableForMs: Math.max(0, now - previousFirstSeenAt),
+            isNew: false,
+            inputCleared: true
+          }
+        } else {
+          logicalObservation = { firstSeenAt: 0, lastSeenAt: 0, stableForMs: 0, isNew: false, inputCleared: true }
+        }
+        return { currentMessages, evidence: logicalObservation, isNewLogicalMessage }
+      }
 
       chatInput.focus()
       const selection = window.getSelection()
@@ -423,56 +543,64 @@ async function runChatSend(tabId, message) {
       selection?.addRange(range)
       let inserted = false
       try {
-        inserted = document.execCommand('insertText', false, normalized)
+        inserted = document.execCommand('insertText', false, messageToSend)
       } catch {
         inserted = false
       }
-      if (!inserted || chatInput.textContent?.trim() !== normalized) {
-        chatInput.textContent = normalized
+      if (!inserted || normalizeMessageText(chatInput.textContent) !== normalized) {
+        chatInput.textContent = messageToSend
       }
       chatInput.dispatchEvent(new InputEvent('input', {
         bubbles: true,
         inputType: 'insertText',
-        data: normalized
+        data: messageToSend
       }))
       chatInput.dispatchEvent(new Event('change', { bubbles: true }))
       await sleep(180)
-      if (chatInput.textContent?.trim() !== normalized) {
-        return { code: 'message_fill_failed', message: '招呼语未能写入 BOSS 聊天框。', stopBatch: true }
+      if (normalizeMessageText(chatInput.textContent) !== normalized) {
+        return { code: 'message_fill_failed', message: '招呼语未能写入 BOSS 聊天框。', stopBatch: true, submissionState: 'not_submitted' }
       }
       if (sendButton.disabled || sendButton.getAttribute('aria-disabled') === 'true') {
-        return { code: 'send_disabled', message: 'BOSS 发送按钮当前不可用。', stopBatch: true }
+        return { code: 'send_disabled', message: 'BOSS 发送按钮当前不可用。', stopBatch: true, submissionState: 'not_submitted' }
       }
 
-      sendButton.click()
-      for (let attempt = 0; attempt < 150; attempt += 1) {
-        const blocked = pageState()
-        if (blocked) return blocked
-        for (const element of outgoingMessages()) {
-          const row = element.closest('.item-myself')
-          const status = row?.querySelector('.status,[class*="status-"]')
-          const isNew = !existingOutgoingMessages.has(element)
-          if (isNew && !firstSeenAt.has(element)) firstSeenAt.set(element, Date.now())
-          const evidence = classifyEvidence({
-            isNew,
-            inputCleared: !chatInput.textContent?.trim(),
-            stableForMs: isNew ? Date.now() - firstSeenAt.get(element) : 0,
-            statusClasses: `${row?.className ?? ''} ${status?.className ?? ''}`,
-            statusText: status?.textContent ?? ''
-          })
-          if (evidence === 'sent') {
-            return { ok: true, status: 'sent' }
+      const observer = new MutationObserver(() => {
+        sampleLogicalMessage()
+      })
+      observer.observe(document.body, { childList: true, subtree: true, characterData: true })
+      try {
+        sendButton.click()
+        for (let attempt = 0; attempt < 150; attempt += 1) {
+          const blocked = pageState('unknown')
+          if (blocked) return blocked
+          const { currentMessages, evidence, isNewLogicalMessage } = sampleLogicalMessage()
+          const currentMessage = isNewLogicalMessage && currentMessages.at(-1)?.text === normalized
+            ? currentMessages.at(-1)
+            : null
+          if (currentMessage) {
+            const status = currentMessage.row.querySelector('.status,[class*="status-"]')
+            const classified = classifyEvidence({
+              ...evidence,
+              statusClasses: `${currentMessage.row.className ?? ''} ${status?.className ?? ''}`,
+              statusText: status?.textContent ?? ''
+            })
+            if (classified === 'failed') {
+              return { code: 'send_failed', message: 'BOSS 明确返回发送失败。', stopBatch: true, submissionState: 'failed' }
+            }
+            if (classified === 'sent') {
+              return { ok: true, status: 'sent' }
+            }
           }
-          if (evidence === 'failed') {
-            return { code: 'send_failed', message: 'BOSS 明确返回发送失败。', stopBatch: true }
-          }
+          await sleep(100)
         }
-        await sleep(100)
+      } finally {
+        observer.disconnect()
       }
       return {
         code: 'send_unknown',
         message: '未能确认招呼语是否送达，已停止本批以避免重复发送。',
-        stopBatch: true
+        stopBatch: true,
+        submissionState: 'unknown'
       }
     }
   })
@@ -502,7 +630,17 @@ async function handleGreetingOperation(action, rawPayload) {
 
   const bossTab = await getBossTab(BOSS_HOME)
   if (!bossTab?.id || isBossBlockedPage(bossTab.url)) {
-    return { ok: false, error: { code: 'login_or_verification_required', message: '请检查 BOSS 登录或安全验证状态。', stopBatch: true } }
+    return {
+      ok: false,
+      error: {
+        code: 'login_or_verification_required',
+        message: '请检查 BOSS 登录或安全验证状态。',
+        stopBatch: true,
+        retryable: true,
+        retryMode: 'full',
+        submissionState: 'not_submitted'
+      }
+    }
   }
 
   const detailRead = await runBossReadWithSingleRefresh(
@@ -521,27 +659,53 @@ async function handleGreetingOperation(action, rawPayload) {
     return { ok: true, data: { ready: true, job: { securityId: detail.securityId, jobId: detail.jobId, bossId: detail.bossId, lid: detail.lid } } }
   }
 
-  await respectRequestGap()
-  const friendResult = await runFriendAdd(bossTab.id, detail)
-  lastRequestAt = Date.now()
-  const transportFailure = greetingFailure(friendResult)
-  if (transportFailure) return { ok: false, error: transportFailure }
-  const friendFailure = classifyFriendAddResponse(friendResult.response)
-  if (!friendFailure.ok) {
-    if (friendFailure.stopBatch === false) {
-      return { ok: true, data: { status: 'skipped', reason: friendFailure.message, code: friendFailure.code } }
+  let friendState = {
+    ok: true,
+    defaultGreetingSent: rawPayload?.defaultGreetingSent === true
+  }
+  if (action !== 'retry_greeting_message') {
+    await respectRequestGap()
+    const friendResult = await runFriendAdd(bossTab.id, detail)
+    lastRequestAt = Date.now()
+    const transportFailure = greetingFailure(friendResult)
+    if (transportFailure) return { ok: false, error: transportFailure }
+    friendState = classifyFriendAddResponse(friendResult.response)
+    if (!friendState.ok) {
+      if (friendState.stopBatch === false) {
+        return { ok: true, data: { status: 'skipped', reason: friendState.message, code: friendState.code } }
+      }
+      return { ok: false, error: friendState }
     }
-    return { ok: false, error: friendFailure }
   }
 
-  const chatTab = await getGreetingTab(buildBossChatUrl({ ...detail, message: payload.message }))
+  let chatTab
+  try {
+    chatTab = await getGreetingTab(buildBossChatUrl({ ...detail, message: payload.message }))
+  } catch (error) {
+    if (!isTransientTabEditError(error)) throw error
+    return {
+      ok: false,
+      error: createTabBusyGreetingFailure({
+        defaultGreetingSent: friendState.defaultGreetingSent === true
+      })
+    }
+  }
   const sendResult = await runChatSend(chatTab.id, payload.message)
-  if (!sendResult?.ok) return { ok: false, error: sendResult || { code: 'send_unknown', message: '发送结果未知。', stopBatch: true } }
+  if (!sendResult?.ok) {
+    return {
+      ok: false,
+      error: withGreetingRetryContext(
+        sendResult || { code: 'send_unknown', message: '发送结果未知。', stopBatch: true, submissionState: 'unknown' },
+        { defaultGreetingSent: friendState.defaultGreetingSent === true }
+      )
+    }
+  }
   return {
     ok: true,
     data: {
       status: sendResult.status,
-      defaultGreetingSent: friendFailure.defaultGreetingSent === true,
+      defaultGreetingSent: friendState.defaultGreetingSent === true,
+      resumedMessageOnly: action === 'retry_greeting_message',
       sentAt: new Date().toISOString()
     }
   }
@@ -609,8 +773,17 @@ async function handleMessage(message, sender) {
   if (!isAllowedSender(sender) || message?.channel !== WEB_CHANNEL) {
     return { ok: false, error: { code: 'forbidden_sender', message: '当前页面不能调用职位库助手。' } }
   }
-  if (message.action === 'ping') return { ok: true, data: { connected: true, version: chrome.runtime.getManifest().version } }
-  if (['preflight_greeting', 'send_greeting'].includes(message.action)) {
+  if (message.action === 'ping') {
+    return {
+      ok: true,
+      data: {
+        connected: true,
+        version: chrome.runtime.getManifest().version,
+        capabilities: GREETING_CAPABILITIES
+      }
+    }
+  }
+  if (['preflight_greeting', 'send_greeting', 'retry_greeting_message'].includes(message.action)) {
     return handleGreetingOperation(message.action, message.payload ?? {})
   }
   if (!['list_cities', 'search_jobs', 'get_job_detail'].includes(message.action)) {

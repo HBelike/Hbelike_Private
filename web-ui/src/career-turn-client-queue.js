@@ -5,7 +5,7 @@ export function restoreServerTurns(items = []) {
     .map((turn) => ({
       id: turn.id,
       serverTurn: { ...turn },
-      content: turn.content || '已提交的排队消息',
+      content: turn.content || '等待回复的消息',
       temporaryMessageId: turn.temporaryMessageId || '',
       streamedText: '',
       progress: []

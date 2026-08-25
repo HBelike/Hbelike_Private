@@ -1,4 +1,12 @@
 const LEGACY_KEYS = ['skill_coverage', 'experience_coverage', 'project_relevance', 'critical_gap']
+const SECTION_HEADING_ALIASES = new Set([
+  '岗位职责', '职位职责', '工作职责', '工作内容', '核心职责', '主要职责', '你将负责',
+  '任职要求', '岗位要求', '职位要求', '基本要求', '核心要求', '任职资格', '岗位资格', '任职条件', '我们希望', '你需要',
+  '加分项', '优先条件', '优先考虑', '加分要求', '加分条件',
+  '经验要求', '经验条件', '学历要求', '学历条件', '证书要求', '证书条件',
+  '工作条件', '工作地点', '薪资福利', '职位福利', '福利待遇', '团队与福利', '我们提供', '你将获得',
+  '公司介绍', '公司信息', '其他信息'
+])
 
 export function isAssessmentPending(assessment) {
   return ['queued', 'analyzing'].includes(assessment?.status)
@@ -47,12 +55,17 @@ export function itemsForDimension(assessment, dimensionId) {
   return requirements.filter((item) => (item.dimensions ?? [item.category]).includes(category))
 }
 
+export function sectionItemNumber(items, index) {
+  return Array.isArray(items) && items.length > 1 ? index + 1 : null
+}
+
 export function assessmentCanvasSections(assessment) {
   if (assessment?.algorithm_version !== 'llm-judge-v1' || !Array.isArray(assessment.job_sections)) return null
   const sections = assessment.job_sections
   const items = (...categories) => sections
     .filter((section) => categories.includes(section.category))
-    .flatMap((section) => section.items ?? [])
+    .flatMap((section) => cleanAssessmentSectionItems(section))
+    .filter((item, index, values) => values.indexOf(item) === index)
   const supporting = [
     { key: 'work_condition', label: '工作条件', items: items('work_condition') },
     { key: 'compensation_benefit', label: '薪资福利', items: items('compensation_benefit') },
@@ -68,6 +81,33 @@ export function assessmentCanvasSections(assessment) {
     supporting,
     hasStructure: sections.length > 0
   }
+}
+
+function cleanAssessmentSectionItems(section) {
+  return (Array.isArray(section?.items) ? section.items : [])
+    .map(cleanAssessmentSectionItem)
+    .filter((item) => {
+      const normalized = normalizedSectionHeading(item)
+      return normalized && !SECTION_HEADING_ALIASES.has(normalized)
+    })
+}
+
+function cleanAssessmentSectionItem(value) {
+  return String(value ?? '')
+    .replace(/<!--.*?-->/g, '')
+    .replace(/<[^>]+>/g, '')
+    .replace(/^\s{0,3}#{1,6}\s*/, '')
+    .replace(/^\s*(?:\d+[.)、]|[一二三四五六七八九十]+[.)、])\s*/, '')
+    .replace(/^\s*(?:[-*+•·▪◦—–])\s+/, '')
+    .replace(/\*\*|__|`/g, '')
+    .trim()
+}
+
+function normalizedSectionHeading(value) {
+  return cleanAssessmentSectionItem(value)
+    .replace(/^【|】$/g, '')
+    .replace(/[：:]$/, '')
+    .trim()
 }
 
 function legacyDescription(key) {

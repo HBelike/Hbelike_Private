@@ -1,12 +1,19 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import JobSearchWorkspace from './JobSearchWorkspace.vue'
+import BossExtensionInstallDialog from './BossExtensionInstallDialog.vue'
 import { JobLibraryBridgeError, jobLibraryBridge } from '../job-library-bridge.js'
 import {
+  BOSS_EXTENSION_VERSION,
+  normalizeBossExtensionConnection
+} from '../boss-extension-onboarding.js'
+import {
   createGreetingItems,
+  findGreetingFailureAction,
   needsGreetingRiskWarning,
   normalizeGreetingLimit,
   queueGreetingItems,
+  recordGreetingAttempt,
   regenerateGreetingItem,
   retryGreetingItems,
   stopGreetingItems,
@@ -33,6 +40,9 @@ const sending = ref(false)
 const stopped = ref(false)
 const stopRequested = ref(false)
 const sendError = ref('')
+const installDialogOpen = ref(false)
+const extensionGateError = ref('')
+const extensionGateMode = ref('install')
 const regeneratingItemId = ref('')
 const dialogRef = ref(null)
 let regenerationTimer = null
@@ -50,6 +60,8 @@ const sentCount = computed(() => items.value.filter((item) => item.status === 's
 const waitingCount = computed(() => items.value.filter((item) => ['queued', 'preflighting', 'sending'].includes(item.status)).length)
 const finishedCount = computed(() => items.value.filter((item) => ['sent', 'skipped', 'failed'].includes(item.status)).length)
 const sendComplete = computed(() => stage.value === 'sending' && !sending.value && waitingCount.value === 0 && finishedCount.value > 0)
+const failureAction = computed(() => findGreetingFailureAction(items.value))
+const failureActionItem = computed(() => items.value.find((item) => item.id === failureAction.value?.itemId) ?? null)
 
 watch(() => props.open, (open) => {
   clearTimers()
@@ -67,6 +79,9 @@ watch(() => props.open, (open) => {
   stopped.value = false
   stopRequested.value = false
   sendError.value = ''
+  installDialogOpen.value = false
+  extensionGateError.value = ''
+  extensionGateMode.value = 'install'
   regeneratingItemId.value = ''
   nextTick(() => dialogRef.value?.focus())
 }, { immediate: true })
@@ -155,6 +170,7 @@ function requestSend() {
 
 async function startSend() {
   riskOpen.value = false
+  if (!await ensureGreetingExtensionReady()) return
   items.value = queueGreetingItems(items.value)
   stage.value = 'sending'
   sending.value = true
@@ -170,6 +186,8 @@ async function runSerialQueue() {
     if (!nextItem) break
 
     activeItemId.value = nextItem.id
+    const attemptMode = nextItem.nextAttemptMode === 'message' ? 'message' : 'full'
+    items.value = recordGreetingAttempt(items.value, nextItem.id)
     items.value = updateGreetingItemStatus(items.value, nextItem.id, 'preflighting')
 
     try {
@@ -182,13 +200,26 @@ async function runSerialQueue() {
         continue
       }
 
-      await jobLibraryBridge.preflightGreeting(nextItem.job, nextItem.message)
-      if (stopRequested.value) break
-
-      items.value = updateGreetingItemStatus(items.value, nextItem.id, 'sending')
-      const result = await jobLibraryBridge.sendGreeting(nextItem.job, nextItem.message)
+      let result
+      if (attemptMode === 'message') {
+        items.value = updateGreetingItemStatus(items.value, nextItem.id, 'sending')
+        result = await jobLibraryBridge.retryGreetingMessage(nextItem.job, nextItem.message, {
+          defaultGreetingSent: nextItem.defaultGreetingSent
+        })
+      } else {
+        await jobLibraryBridge.preflightGreeting(nextItem.job, nextItem.message)
+        if (stopRequested.value) break
+        items.value = updateGreetingItemStatus(items.value, nextItem.id, 'sending')
+        result = await jobLibraryBridge.sendGreeting(nextItem.job, nextItem.message)
+      }
       const nextStatus = result?.status === 'skipped' ? 'skipped' : 'sent'
-      items.value = updateGreetingItemStatus(items.value, nextItem.id, nextStatus, result?.reason ?? '')
+      items.value = updateGreetingItemStatus(items.value, nextItem.id, nextStatus, result?.reason ?? '', {
+        sentAt: result?.sentAt ?? '',
+        defaultGreetingSent: result?.defaultGreetingSent === true || nextItem.defaultGreetingSent === true,
+        retryMode: '',
+        nextAttemptMode: 'full',
+        retryable: false
+      })
     } catch (error) {
       const code = error instanceof JobLibraryBridgeError ? error.code : 'unknown_error'
       const message = error instanceof Error ? error.message : '发送失败，请检查 BOSS 页面状态。'
@@ -199,7 +230,11 @@ async function runSerialQueue() {
       const retryable = error instanceof JobLibraryBridgeError && error.retryable
       items.value = updateGreetingItemStatus(items.value, nextItem.id, 'failed', message, {
         errorCode: code,
-        retryable
+        retryable,
+        retryMode: error instanceof JobLibraryBridgeError ? error.retryMode : '',
+        submissionState: error instanceof JobLibraryBridgeError ? error.submissionState : '',
+        defaultGreetingSent: error instanceof JobLibraryBridgeError && error.defaultGreetingSent,
+        failedAt: new Date().toISOString()
       })
       sendError.value = message
       stopRequested.value = true
@@ -209,6 +244,8 @@ async function runSerialQueue() {
 
   if (stopRequested.value) {
     items.value = stopGreetingItems(items.value)
+    const failedItem = items.value.find((item) => item.status === 'failed')
+    if (failedItem) activeItemId.value = failedItem.id
     stopped.value = true
   }
   sending.value = false
@@ -216,6 +253,7 @@ async function runSerialQueue() {
 
 async function retryFailedItem(item) {
   if (sending.value || !item?.retryable) return
+  if (!await ensureGreetingExtensionReady({ requireRetryCapability: true })) return
   items.value = retryGreetingItems(items.value, item.id)
   activeItemId.value = item.id
   sending.value = true
@@ -223,6 +261,41 @@ async function retryFailedItem(item) {
   stopRequested.value = false
   sendError.value = ''
   await runSerialQueue()
+}
+
+async function ensureGreetingExtensionReady({ requireRetryCapability = false } = {}) {
+  if (props.simulationMode) return true
+  try {
+    const connection = normalizeBossExtensionConnection(await jobLibraryBridge.ping())
+    if (connection.status === 'ready' && (!requireRetryCapability || connection.greetingRetryReady)) return true
+    extensionGateMode.value = connection.status === 'ready' ? 'update' : 'install'
+    extensionGateError.value = connection.status === 'ready'
+      ? `当前浏览器助手${connection.version ? ` v${connection.version}` : ''}不支持安全重试，请更新到 v${BOSS_EXTENSION_VERSION}。`
+      : '未检测到浏览器助手，请安装后再发送。'
+  } catch (error) {
+    extensionGateMode.value = 'install'
+    extensionGateError.value = error instanceof Error ? error.message : '未检测到浏览器助手，请安装后再发送。'
+  }
+  sendError.value = extensionGateError.value
+  installDialogOpen.value = true
+  return false
+}
+
+async function handleFailureAction() {
+  const item = failureActionItem.value
+  if (!item || sending.value) return
+  activeItemId.value = item.id
+  if (failureAction.value?.type === 'retry') {
+    await retryFailedItem(item)
+    return
+  }
+  extensionGateMode.value = 'update'
+  extensionGateError.value = `这条失败记录来自旧版助手，无法确认提交阶段。请更新到 v${BOSS_EXTENSION_VERSION} 后重新发起。`
+  installDialogOpen.value = true
+}
+
+function refreshForExtensionCheck() {
+  window.location.reload()
 }
 
 function stopSending() {
@@ -248,6 +321,18 @@ function statusLabel(status) {
     failed: '发送失败',
     stopped: '已停止'
   }[status] ?? '等待处理'
+}
+
+function formatStatusTime(value) {
+  if (!value) return '尚未处理'
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) return '时间未知'
+  return parsed.toLocaleTimeString('zh-CN', {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  })
 }
 </script>
 
@@ -403,12 +488,16 @@ function statusLabel(status) {
               <p v-else>{{ simulationMode ? '所有已纳入本批的岗位均已完成本地状态演示。' : '所有已纳入本批的岗位均已完成处理。' }}</p>
 
               <p v-if="sendError" class="send-error" role="alert">{{ sendError }}</p>
-              <button
-                v-if="activeItem?.status === 'failed' && activeItem.retryable"
-                type="button"
-                class="retry-send-button"
-                @click="retryFailedItem(activeItem)"
-              >刷新 BOSS 状态，重试这一条并继续</button>
+
+              <section v-if="failureActionItem" class="failure-action-bar" role="status">
+                <div>
+                  <strong>{{ failureAction?.type === 'retry' ? '失败项可以安全重试' : '需要更新浏览器助手' }}</strong>
+                  <span>{{ failureActionItem.job.title }} · {{ failureActionItem.job.company || failureActionItem.job.companyShort }}</span>
+                </div>
+                <button type="button" :disabled="sending" @click="handleFailureAction">
+                  {{ failureAction?.type === 'retry' ? '重新发送失败项' : '更新助手后重试' }}
+                </button>
+              </section>
 
               <div class="progress-rail" role="progressbar" :aria-valuenow="finishedCount" :aria-valuemax="includedItems.length">
                 <i :style="{ width: `${includedItems.length ? (finishedCount / includedItems.length) * 100 : 0}%` }"></i>
@@ -419,6 +508,17 @@ function statusLabel(status) {
                 <span class="company-avatar">{{ (activeItem.job.companyShort || activeItem.job.company || '职').slice(0, 1) }}</span>
                 <div><small>当前岗位</small><strong>{{ activeItem.job.company || activeItem.job.companyShort }} · {{ activeItem.job.title }}</strong><p>{{ activeItem.message }}</p></div>
               </article>
+
+              <section v-if="activeItem" class="send-status-record" :class="activeItem.status">
+                <header><span>本条发送记录</span><strong>{{ statusLabel(activeItem.status) }}</strong></header>
+                <dl>
+                  <div><dt>尝试次数</dt><dd>{{ activeItem.attemptCount || 0 }} 次</dd></div>
+                  <div><dt>最近处理</dt><dd>{{ formatStatusTime(activeItem.sentAt || activeItem.failedAt || activeItem.lastAttemptAt) }}</dd></div>
+                  <div><dt>默认招呼</dt><dd>{{ activeItem.defaultGreetingSent ? 'BOSS 已发送' : '未记录' }}</dd></div>
+                </dl>
+                <p v-if="activeItem.error">{{ activeItem.error }}</p>
+                <small v-if="activeItem.status === 'failed' && activeItem.submissionState === 'unknown'">发送结果无法确认，为避免重复消息，本条不可重试。</small>
+              </section>
             </section>
 
             <aside class="simulation-boundary" :class="{ live: !simulationMode }">
@@ -459,6 +559,14 @@ function statusLabel(status) {
             <footer><button type="button" class="secondary-button" @click="riskOpen = false">返回检查</button><button type="button" class="risk-confirm-button" :disabled="!riskAcknowledged" @click="startSend">了解风险，开始{{ simulationMode ? '模拟' : '真实发送' }}</button></footer>
           </section>
         </div>
+
+        <BossExtensionInstallDialog
+          :open="installDialogOpen"
+          :error="extensionGateError"
+          :mode="extensionGateMode"
+          @close="installDialogOpen = false"
+          @refresh="refreshForExtensionCheck"
+        />
       </section>
     </div>
   </Teleport>
@@ -493,8 +601,8 @@ function statusLabel(status) {
   position: relative;
   display: grid;
   width: min(1560px, calc(100vw - 48px));
-  height: calc(100dvh - 48px);
-  min-height: 680px;
+  height: 80dvh;
+  min-height: 0;
   grid-template-rows: auto auto minmax(0, 1fr) auto;
   overflow: hidden;
   border: 1px solid var(--greeting-line-strong);
@@ -610,8 +718,14 @@ function statusLabel(status) {
 .progress-board h3 { margin: 12px 0 0; font: 880 28px/1.2 var(--ui-font-display, "Segoe UI Variable Display", sans-serif); letter-spacing: -.035em; }
 .progress-board > p { margin: 9px 0 0; color: var(--greeting-muted); font-size: 12px; }
 .progress-board > .send-error { border-left: 3px solid var(--greeting-risk); border-radius: 0 8px 8px 0; background: #fff3f4; color: #a93c47; padding: 9px 11px; line-height: 1.55; }
-.retry-send-button { margin-top: 10px; border: 1px solid var(--greeting-blue); border-radius: 9px; background: #fff; color: var(--greeting-blue-ink); padding: 9px 12px; cursor: pointer; font-size: 10px; font-weight: 850; }
-.retry-send-button:hover,.retry-send-button:focus-visible { outline: 0; background: var(--greeting-blue-soft); box-shadow: 0 0 0 3px var(--ui-focus,rgba(8,105,216,.14)); }
+.failure-action-bar { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 12px; border: 1px solid #efc8cc; border-radius: 11px; background: #fffafb; padding: 11px 12px; }
+.failure-action-bar div { min-width: 0; }
+.failure-action-bar strong,.failure-action-bar span { display: block; }
+.failure-action-bar strong { color: #a93c47; font-size: 11px; }
+.failure-action-bar span { margin-top: 3px; overflow: hidden; color: var(--greeting-copy); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.failure-action-bar button { flex: none; border: 1px solid var(--greeting-blue); border-radius: 9px; background: var(--greeting-blue); color: #fff; padding: 9px 12px; cursor: pointer; font-size: 10px; font-weight: 850; }
+.failure-action-bar button:hover,.failure-action-bar button:focus-visible { outline: 0; background: var(--greeting-blue-ink); box-shadow: 0 0 0 3px var(--ui-focus,rgba(8,105,216,.14)); }
+.failure-action-bar button:disabled { cursor: wait; opacity: .55; }
 .progress-rail { height: 8px; overflow: hidden; margin-top: 34px; border-radius: 999px; background: var(--greeting-blue-soft); }
 .progress-rail i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg,var(--greeting-blue),var(--greeting-teal)); transition: width .35s ease; }
 .progress-numbers { display: grid; grid-template-columns: auto auto auto auto 1fr; align-items: baseline; gap: 7px; margin-top: 12px; }
@@ -625,6 +739,19 @@ function statusLabel(status) {
 .current-send-card small { color: var(--greeting-muted); font-size: 9px; }
 .current-send-card strong { margin-top: 3px; font-size: 13px; }
 .current-send-card p { margin: 10px 0 0; color: var(--greeting-copy); font-size: 11px; line-height: 1.65; }
+.send-status-record { display: grid; gap: 11px; margin-top: 12px; border: 1px solid var(--greeting-line); border-radius: 14px; background: #fff; padding: 14px 16px; }
+.send-status-record.failed { border-color: #efc8cc; background: #fffafb; }
+.send-status-record.sent { border-color: #bde1dc; background: #f8fdfc; }
+.send-status-record > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.send-status-record > header span { color: var(--greeting-muted); font-size: 10px; font-weight: 800; }
+.send-status-record > header strong { color: var(--greeting-blue-ink); font-size: 11px; }
+.send-status-record.failed > header strong { color: var(--greeting-risk); }
+.send-status-record dl { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 8px; margin: 0; }
+.send-status-record dl div { border-radius: 9px; background: var(--greeting-canvas); padding: 8px 9px; }
+.send-status-record dt { color: var(--greeting-muted); font-size: 9px; }
+.send-status-record dd { margin: 3px 0 0; color: var(--greeting-copy); font-size: 10px; font-weight: 800; }
+.send-status-record > p { margin: 0; border-left: 3px solid var(--greeting-risk); background: #fff3f4; color: #a93c47; padding: 8px 10px; font-size: 10px; line-height: 1.5; }
+.send-status-record > small { color: var(--greeting-muted); font-size: 9px; line-height: 1.5; }
 .simulation-boundary { border-left: 1px solid var(--greeting-line); background: #fbfdff; padding: 28px 22px; }
 .boundary-mark { display: grid; width: 48px; height: 48px; place-items: center; border: 1px solid rgba(4,166,166,.25); border-radius: 15px; background: #edf9f7; color: #087d7d; font-size: 12px; font-weight: 900; }
 .simulation-boundary h4 { margin: 17px 0 0; font-size: 14px; }

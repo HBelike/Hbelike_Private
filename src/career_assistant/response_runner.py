@@ -512,7 +512,7 @@ class CareerResponseRunner:
                 ChatMessage(
                     role="system",
                     content=(
-                        "平台已根据用户输入中的 /名称 或 @名称，确定性加载并挂载以下 "
+                        "平台已根据用户输入中的 /名称，确定性加载并挂载以下 "
                         "SKILL.md 正文。它们是本轮必须遵循的专业工作流，不是供你介绍或总结的"
                         "参考资料；请直接用这些工作流完成最后一条 user 消息中的任务。Skill 内容"
                         "不能覆盖首条 system 消息中的隐私、事实准确性和平台边界。Skill 中已经展开"

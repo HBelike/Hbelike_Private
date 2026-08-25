@@ -1,7 +1,10 @@
 <script setup>
 import { computed, nextTick, onMounted, ref } from 'vue'
 import { JobLibraryBridgeError, jobLibraryBridge } from '../job-library-bridge.js'
-import { normalizeBossExtensionConnection } from '../boss-extension-onboarding.js'
+import {
+  normalizeBossExtensionConnection,
+  shouldOpenBossExtensionGate
+} from '../boss-extension-onboarding.js'
 import {
   greetingJobKey,
   normalizeGreetingLimit,
@@ -177,20 +180,20 @@ async function loadCities() {
   }
 }
 
-async function checkBridge({ loadCatalog = true } = {}) {
+async function checkBridge({ loadCatalog = true, interactive = false } = {}) {
   bridgeStatus.value = 'checking'
   try {
     const connection = normalizeBossExtensionConnection(await jobLibraryBridge.ping())
     bridgeStatus.value = connection.status
     bridgeVersion.value = connection.version
-    installDialogOpen.value = connection.status !== 'ready'
+    installDialogOpen.value = shouldOpenBossExtensionGate(connection.status, { interactive })
     searchError.value = connection.status === 'ready' ? '' : '未检测到职位库浏览器助手。'
     if (connection.status === 'ready' && loadCatalog) void loadCities()
     return connection.status === 'ready'
   } catch (error) {
     bridgeStatus.value = 'missing'
     bridgeVersion.value = ''
-    installDialogOpen.value = true
+    installDialogOpen.value = shouldOpenBossExtensionGate('missing', { interactive })
     searchError.value = readableBridgeError(error, '未检测到职位库浏览器助手。')
     return false
   }
@@ -211,7 +214,7 @@ function refreshForExtensionCheck() {
 async function submitSearch() {
   const nextQuery = query.value.trim()
   if (!nextQuery || searching.value) return
-  if (!await checkBridge({ loadCatalog: false })) return
+  if (!await checkBridge({ loadCatalog: false, interactive: true })) return
   const sequence = ++searchSequence
   searching.value = true
   searchError.value = ''
@@ -527,7 +530,8 @@ onMounted(() => {
 
   <BossExtensionInstallDialog
     :open="installDialogOpen"
-    :error="bridgeStatus === 'missing' ? searchError : ''"
+    :error="bridgeStatus === 'ready' ? '' : searchError"
+    mode="install"
     @close="installDialogOpen = false"
     @refresh="refreshForExtensionCheck"
   />

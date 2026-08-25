@@ -95,13 +95,27 @@ class CareerSkillRuntimeTests(unittest.TestCase):
         self.assertNotIn("---", activated[0].instructions)
         self.assertIn("请按事实完成求职分析", activated[0].instructions)
 
-    def test_at_mention_can_activate_an_installed_skill_without_frontend_id(self) -> None:
+    def test_at_reference_does_not_activate_or_strip_an_installed_skill_name(self) -> None:
         library = _FakeSkillLibrary(("resume-review",))
         runtime = CareerSkillRuntime(library)  # type: ignore[arg-type]
 
-        activated = runtime.activate([], "请使用 @resume-review 分析简历")
+        result = runtime.resolve([], "请结合 @resume-review 分析面经")
 
-        self.assertEqual([item.name for item in activated], ["resume-review"])
+        self.assertEqual(result.skills, ())
+        self.assertEqual(result.user_task_text, "请结合 @resume-review 分析面经")
+
+    def test_conversation_does_not_inherit_skill_from_at_reference(self) -> None:
+        library = _FakeSkillLibrary(("resume-review",))
+        runtime = CareerSkillRuntime(library)  # type: ignore[arg-type]
+
+        result = runtime.resolve_for_conversation(
+            [],
+            "继续分析",
+            ["请结合 @resume-review 分析面经"],
+        )
+
+        self.assertEqual(result.skills, ())
+        self.assertEqual(result.user_task_text, "继续分析")
 
     def test_resolve_strips_invocation_and_ignores_stale_selected_skill(self) -> None:
         library = _FakeSkillLibrary(("find-skills", "resume-review"))
@@ -192,7 +206,7 @@ class CareerSkillRuntimeTests(unittest.TestCase):
         runtime = CareerSkillRuntime(library)  # type: ignore[arg-type]
 
         with self.assertRaisesRegex(ValueError, "单轮最多激活 3 个 Skill"):
-            runtime.activate([], " ".join(f"@{name}" for name in names))
+            runtime.activate([], " ".join(f"/{name}" for name in names))
 
     def test_response_prompt_contains_activated_skill_and_runtime_boundary(self) -> None:
         library = _FakeSkillLibrary(("resume-review",))

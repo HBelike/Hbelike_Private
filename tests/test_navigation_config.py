@@ -6,7 +6,7 @@ import unittest
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from src.platform_access.contracts import PlatformRole, PlatformUser
+from src.platform_access.contracts import PLATFORM_ADMIN_EMAIL, PlatformRole, PlatformUser
 from src.platform_access.navigation_config import (
     DEFAULT_ROUTE_MODULE_SETTINGS,
     normalize_route_module_settings,
@@ -44,6 +44,10 @@ def build_user(role: PlatformRole) -> PlatformUser:
 
 
 class NavigationConfigTests(unittest.TestCase):
+    def test_role_model_only_contains_user_and_admin(self) -> None:
+        self.assertEqual({role.value for role in PlatformRole}, {"user", "admin"})
+        self.assertEqual(PLATFORM_ADMIN_EMAIL, "2963613812@qq.com")
+
     def test_default_catalog_contains_job_library_as_top_level_module(self) -> None:
         modules = route_modules_for_ui(None, PlatformRole.ADMIN)
         by_key = {item["key"]: item for item in modules}
@@ -58,13 +62,31 @@ class NavigationConfigTests(unittest.TestCase):
 
         self.assertEqual(len(modules), 9)
         self.assertTrue(all(item["enabled"] for item in modules))
+        self.assertEqual(modules[0]["key"], "career_assistant")
+        self.assertEqual(modules[1]["key"], "workbench")
         self.assertEqual(modules[-1]["key"], "admin_console")
         self.assertEqual(modules[-1]["path"], "/admin/modules")
 
-    def test_viewer_only_accesses_enabled_non_admin_modules(self) -> None:
+    def test_admin_accesses_every_module_even_when_switches_are_disabled(self) -> None:
+        modules = route_modules_for_ui(
+            {
+                "career_assistant": False,
+                "workbench": False,
+                "evaluation_center": False,
+            },
+            PlatformRole.ADMIN,
+        )
+        by_key = {item["key"]: item for item in modules}
+
+        self.assertFalse(by_key["career_assistant"]["enabled"])
+        self.assertFalse(by_key["workbench"]["enabled"])
+        self.assertFalse(by_key["evaluation_center"]["enabled"])
+        self.assertTrue(all(item["accessible"] for item in modules))
+
+    def test_user_only_accesses_enabled_non_admin_modules(self) -> None:
         modules = route_modules_for_ui(
             {"career_assistant": False, "skill_library": False},
-            PlatformRole.VIEWER,
+            PlatformRole.USER,
         )
         by_key = {item["key"]: item for item in modules}
 
@@ -88,11 +110,11 @@ class NavigationConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "必须是布尔值"):
             normalize_route_module_settings({"workbench": 1})
 
-    def test_viewer_cannot_save_route_modules(self) -> None:
+    def test_user_cannot_save_route_modules(self) -> None:
         service = PlatformAccessService(FakeNavigationRepository())
 
         with self.assertRaises(PermissionError):
-            service.save_route_modules(build_user(PlatformRole.VIEWER), {"workbench": False})
+            service.save_route_modules(build_user(PlatformRole.USER), {"workbench": False})
 
     def test_admin_save_is_returned_as_accessible_catalog(self) -> None:
         repository = FakeNavigationRepository()
@@ -102,6 +124,7 @@ class NavigationConfigTests(unittest.TestCase):
         by_key = {item["key"]: item for item in modules}
 
         self.assertFalse(by_key["career_assistant"]["enabled"])
+        self.assertTrue(by_key["career_assistant"]["accessible"])
         self.assertTrue(by_key["admin_console"]["enabled"])
 
 

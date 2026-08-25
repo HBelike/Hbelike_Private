@@ -4,7 +4,8 @@ import {
   assessmentCanvasSections,
   buildAssessmentCards,
   isAssessmentPending,
-  itemsForDimension
+  itemsForDimension,
+  sectionItemNumber
 } from './career-assessment-view.js'
 
 const assessment = {
@@ -49,4 +50,54 @@ test('Judge 分区把公司历史留在公司信息而不是任职要求', () =>
     label: '公司信息',
     items: ['公司拥有十年行业经验']
   })
+})
+
+test('Judge 分区过滤误入的标题并清理原文列表序号', () => {
+  const sections = assessmentCanvasSections({
+    algorithm_version: 'llm-judge-v1',
+    job_sections: [
+      {
+        category: 'responsibility',
+        title: '岗位职责',
+        items: ['岗位职责', '1. 参与核心产品持续开发']
+      },
+      {
+        category: 'required_qualification',
+        title: '任职要求',
+        items: ['任职要求', '1、4 年以上研发经验']
+      },
+      {
+        category: 'compensation_benefit',
+        title: '薪资福利',
+        items: ['20-30K', '## 职位福利', '• 节日福利、带薪年假']
+      }
+    ]
+  })
+
+  assert.deepEqual(sections.responsibilities, ['参与核心产品持续开发'])
+  assert.deepEqual(sections.requirements, [{ text: '4 年以上研发经验', type: '必须' }])
+  assert.deepEqual(sections.supporting, [{
+    key: 'compensation_benefit',
+    label: '薪资福利',
+    items: ['20-30K', '节日福利、带薪年假']
+  }])
+})
+
+test('分区仅在存在多条有效记录时生成序号', () => {
+  assert.equal(sectionItemNumber(['唯一记录'], 0), null)
+  assert.equal(sectionItemNumber(['第一条', '第二条'], 0), 1)
+  assert.equal(sectionItemNumber(['第一条', '第二条'], 1), 2)
+})
+
+test('与模型分区标题相同的真实正文不会被误删', () => {
+  const sections = assessmentCanvasSections({
+    algorithm_version: 'llm-judge-v1',
+    job_sections: [{
+      category: 'responsibility',
+      title: '参与核心产品持续开发',
+      items: ['参与核心产品持续开发']
+    }]
+  })
+
+  assert.deepEqual(sections.responsibilities, ['参与核心产品持续开发'])
 })

@@ -10,7 +10,7 @@ import hashlib
 from datetime import UTC, datetime
 from typing import Protocol
 
-from src.platform_access.contracts import PlatformUser
+from src.platform_access.contracts import PLATFORM_ADMIN_EMAIL, PlatformUser
 from src.platform_access.security import hash_password, normalize_email
 
 
@@ -21,8 +21,8 @@ class FirstAdminBootstrapError(RuntimeError):
 class FirstAdminRepository(Protocol):
     """首次管理员初始化所需的最小仓储契约，便于命令行与测试复用。"""
 
-    def has_active_users(self) -> bool:
-        """返回平台是否已经存在可登录用户。"""
+    def has_active_admin(self) -> bool:
+        """返回平台是否已经存在可登录管理员。"""
 
     def find_user_by_email(self, email: str) -> tuple[PlatformUser, str] | None:
         """按规范化邮箱查找已存在账户。"""
@@ -53,8 +53,10 @@ def bootstrap_first_admin(
     """
 
     normalized_email = normalize_email(email)
-    if repository.has_active_users():
-        raise FirstAdminBootstrapError("平台已存在可登录账户，首次管理员初始化已关闭")
+    if normalized_email != PLATFORM_ADMIN_EMAIL:
+        raise FirstAdminBootstrapError(f"管理员邮箱必须是 {PLATFORM_ADMIN_EMAIL}")
+    if repository.has_active_admin():
+        raise FirstAdminBootstrapError("管理员已初始化，请使用已有管理员账号登录")
     if repository.find_user_by_email(normalized_email) is not None:
         raise FirstAdminBootstrapError("该邮箱已经绑定历史账户，不能用于首次管理员初始化")
 
@@ -68,7 +70,7 @@ def bootstrap_first_admin(
         )
     except PermissionError as exc:
         # 数据库事务中的二次检查处理并发管理员终端或其他 bootstrap 路径的竞争。
-        raise FirstAdminBootstrapError("平台已由其他操作完成初始化，请使用已有管理员账号登录") from exc
+        raise FirstAdminBootstrapError("平台已由其他操作完成管理员初始化，请使用已有管理员账号登录") from exc
 
 
 def _build_bootstrap_username(email: str) -> str:

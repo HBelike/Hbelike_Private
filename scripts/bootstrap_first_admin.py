@@ -4,7 +4,8 @@
     docker compose --env-file .env.production -f docker-compose.production.yml \
       exec -it career-api python scripts/bootstrap_first_admin.py
 
-该脚本不接受密码或 API Key 命令行参数，也不会输出数据库 URL、邮箱、密码或摘要。
+该脚本不接受密码或 API Key 命令行参数，也不会输出数据库 URL、密码或摘要；
+固定管理员邮箱可以作为操作提示显示。
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.career_assistant.persistence.database import CareerDatabase
 from src.platform_access.bootstrap import FirstAdminBootstrapError, bootstrap_first_admin
+from src.platform_access.contracts import PLATFORM_ADMIN_EMAIL
 from src.platform_access.repository import PlatformAccessRepository
 
 
@@ -50,15 +52,15 @@ def main() -> int:
         database = CareerDatabase(database_url)
         repository = PlatformAccessRepository(database)
         if arguments.check:
-            if repository.has_active_users():
+            if repository.has_active_admin():
                 print("first_admin_bootstrap_already_initialized")
             else:
                 print("first_admin_bootstrap_pending")
             return 0
 
         _require_interactive_terminal()
-        print("将创建唯一的首个管理员。密码不会显示、记录或作为命令行参数传递。")
-        email = _prompt_required("管理员登录邮箱: ")
+        print(f"将创建唯一管理员 {PLATFORM_ADMIN_EMAIL}。密码不会显示、记录或作为命令行参数传递。")
+        email = PLATFORM_ADMIN_EMAIL
         display_name = _prompt_required("管理员显示名称: ")
         password = getpass.getpass("管理员密码（至少 8 位）: ")
         confirmed_password = getpass.getpass("再次输入管理员密码: ")
@@ -106,7 +108,7 @@ def _prompt_required(label: str) -> str:
 
     value = input(label).strip()
     if not value:
-        raise FirstAdminBootstrapError("管理员邮箱和显示名称不能为空")
+        raise FirstAdminBootstrapError("输入不能为空")
     return value
 
 

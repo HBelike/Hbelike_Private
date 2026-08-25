@@ -69,6 +69,9 @@ export class JobLibraryBridgeError extends Error {
     this.code = code
     this.retryable = details.retryable === true
     this.stopBatch = details.stopBatch === true
+    this.retryMode = typeof details.retryMode === 'string' ? details.retryMode : ''
+    this.submissionState = typeof details.submissionState === 'string' ? details.submissionState : ''
+    this.defaultGreetingSent = details.defaultGreetingSent === true
   }
 }
 
@@ -107,9 +110,30 @@ function requestExtension(action, payload = {}, timeoutMs = DEFAULT_TIMEOUT_MS) 
   })
 }
 
+export async function pingExtensionWithRetry(
+  pingOnce,
+  { attempts = 2, wait = () => new Promise((resolve) => window.setTimeout(resolve, 160)) } = {}
+) {
+  let lastError
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      return await pingOnce()
+    } catch (error) {
+      lastError = error
+      if (!(error instanceof JobLibraryBridgeError)
+        || error.code !== 'extension_unavailable'
+        || attempt >= attempts - 1) {
+        throw error
+      }
+      await wait()
+    }
+  }
+  throw lastError
+}
+
 export const jobLibraryBridge = {
   ping() {
-    return requestExtension('ping', {}, 1800)
+    return pingExtensionWithRetry(() => requestExtension('ping', {}, 1800))
   },
   listCities() {
     return requestExtension('list_cities')
@@ -130,5 +154,11 @@ export const jobLibraryBridge = {
   },
   sendGreeting(job, message) {
     return requestExtension('send_greeting', createGreetingRequestPayload(job, message), 60000)
+  },
+  retryGreetingMessage(job, message, context = {}) {
+    return requestExtension('retry_greeting_message', {
+      ...createGreetingRequestPayload(job, message),
+      defaultGreetingSent: context.defaultGreetingSent === true
+    }, 60000)
   }
 }

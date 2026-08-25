@@ -4,7 +4,7 @@
 
 本文件定义当前个人平台的首个公网部署形态：在一台香港 Linux VPS 上完整运行 GitHub 周榜公众号工作流、审核台、技能库、求职助手、面经库、登录/管理台与 PostgreSQL + pgvector，同时不把数据库、FastAPI 或临时附件直接暴露到公网。
 
-首发采用“闭合运营模式”：只有管理员登录后可以调用业务 API。这样在 Career 细粒度租户授权与旧审核模块的角色授权尚未完全拆分前，仍可安全保留所有既有功能。
+平台采用二元角色：固定邮箱管理员负责路由与运行配置，其余账号统一为普通用户。所有业务 API 必须先登录；普通用户按管理员保存的模块开关访问普通页面，管理员专属接口继续由 FastAPI 服务端角色依赖保护。
 
 ## 架构与调用链
 
@@ -32,7 +32,7 @@ pipeline-scheduler（唯一副本）
 - **双数据库过渡**：Career/账号/RAG 使用 PostgreSQL + pgvector；原公众号工作流继续使用 SQLite。此次上线不改变旧业务数据模型，优先确保稳定发布。
 - **媒体与附件**：周榜产物使用 Docker 命名卷持久化；原始简历附件使用 API tmpfs，在 Turn 完成后删除。生产环境必须保持 `CAREER_REDACTION_ENABLED=true`。
 - **Skill 持久化**：`deploy/skill-seeds` 是随镜像发布、经过审查的 `SKILL.md` 快照；一次性 `skill-seed` 容器会先将缺失种子复制到独立 `application_skills` 卷并授予 API 进程写入权限。`deploy/skill-seeds/.skill-lock.json` 仅记录已核验的公开 GitHub 来源，用于恢复真实 Star 数据。API 与单一 Scheduler 共用该卷和 `application_data`，Scheduler 启动及每周内容任务会刷新已过期的 GitHub Star 快照。之后 WebUI 的保存结果优先且永不被重新部署覆盖；生产服务器不依赖开发电脑的 `~/.agents`、`~/.codex` 或插件缓存。
-- **认证边界**：生产设 `PLATFORM_AUTH_REQUIRED=true` 与 `PLATFORM_CLOSED_OPERATOR_MODE=true`。登录通过 HttpOnly Cookie，认证中间件会把真实平台用户映射为 Career Actor，避免所有登录用户共用默认对话身份。
+- **认证边界**：生产设 `PLATFORM_AUTH_REQUIRED=true`。登录通过 HttpOnly Cookie，认证中间件会把真实平台用户映射为 Career Actor，避免所有登录用户共用默认对话身份；`admin` 仅允许 `2963613812@qq.com` 持有，其余账号统一为 `user`。
 
 ## 部署前置条件
 
@@ -91,4 +91,4 @@ docker compose --env-file .env.production -f docker-compose.production.yml exec 
 - Caddy 的 `caddy_data`、`caddy_config` 卷必须保留，否则会丢失证书账户状态。
 - 首发不启用 GPU Docling；有 NVIDIA GPU 的服务器再使用 `document-processing` profile。
 - 仓库和本地默认配置保持 `video.submit_enabled=false`、`audio.enabled=false`，避免开发调试产生费用。当前生产环境显式设置 `VIDEO_SUBMIT_ENABLED=true`、`AUDIO_ENABLED=true`，运行完整音视频链路；每次调整后必须重建 API 与 Scheduler 并执行上面的容器内检查。
-- 旧公众号 SQLite 工作流、Skill 文件持久化、多用户 Career 角色授权、Docker secrets 与 CI/CD 是下一阶段演进项，不应在未验证的情况下横向扩容。
+- 旧公众号 SQLite 工作流、Skill 文件持久化、更细粒度的用户资源授权、Docker secrets 与 CI/CD 是下一阶段演进项，不应在未验证的情况下横向扩容。

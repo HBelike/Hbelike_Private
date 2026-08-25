@@ -2147,7 +2147,6 @@ def search_skill_mentions(
                 "description_zh": item.description_zh,
                 "source_label": item.source_label,
                 "command": f"/{item.name}",
-                "mention": f"@{item.name}",
             }
             for item in items
         ],

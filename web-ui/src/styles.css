@@ -1049,6 +1049,16 @@ button {
   white-space: nowrap;
 }
 
+.account-profile-panel > .account-identifier-row {
+  align-items: flex-start;
+}
+
+.account-identifier-row strong {
+  overflow-wrap: anywhere;
+  text-align: right;
+  white-space: normal;
+}
+
 .account-logout {
   min-height: 32px;
   margin-top: 2px;

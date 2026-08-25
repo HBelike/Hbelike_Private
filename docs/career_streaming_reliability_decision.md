@@ -9,7 +9,7 @@
 - 浏览器点击发送后立即清空输入框，并先插入本地 `sending` 用户消息。
 - LangGraph 每完成一个确定性节点就推送 `progress`：校验输入、解析附件、读取职位信息、保存历史、生成回复。进展不包含也不伪造模型的内部思维链。
 - 用户消息写入 PostgreSQL 后，后端推送 `accepted`，前端以持久化消息原位替换临时消息；因此不会出现“已发送内容仍留在输入框”或同一条消息重复显示。
-- 文本模型的正文通过 `delta` 事件逐段推送；最终由 `done` 写入完整助手消息与 Turn 状态。发送期间禁止切换会话，避免响应落入错误会话。
+- 文本模型的正文通过 `delta` 事件逐段推送；最终由 `done` 写入完整助手消息与 Turn 状态。页面允许在服务端接受 Turn 后切换会话，每条 SSE 由会话 ID 与观察代次隔离，避免响应落入错误会话。
 
 调用链：
 
@@ -93,5 +93,13 @@ Docling、OCR 与上游模型都可能在首个结果前持续几十秒。浏览
 - `scripts/verify_career_sse_heartbeat.py`：长处理期间的协议保活、预期耗时提示和后台线程异常映射。
 - `scripts/verify_career_latest_turn_recovery.py`：真实 PostgreSQL 的最近 Turn 恢复查询。
 - `npm --prefix web-ui run build`：前端 SSE 状态渲染构建。
+
+## 2026-08-25：生成期间切换会话与恢复
+
+- 根因：旧实现切换会话时只清空 `pendingTurns` 和 `activeObservedTurnId`，没有取消旧 SSE；旧观察器结束后的回调与 `finally` 仍可覆盖新会话状态。同时，会话详情读取为 `queued/running`、随后 active-turns 已为空的完成竞态不会启动恢复轮询，造成页面长期显示旧状态。
+- 生命周期：每次 Turn 观察绑定 `conversationId / turnId / AbortController`。切换会话或卸载页面时只取消浏览器 SSE，并使旧观察器全部晚到回调失效；PostgreSQL 队列和独立 Worker 不受影响。
+- 恢复：切回会话时先读取持久消息与 active-turns。仍在执行的 Turn 从持久事件重新回放 progress/delta 并继续展示；已经完成的 Turn 直接读取最终消息。详情与 active-turns 出现终态竞态时，每 3 秒重新校准，取得终态后停止。
+- 交互：Turn 尚未收到服务端 `202` 前暂时禁止切换，避免消息归属不确定；服务端受理后即使模型仍在生成，也允许切换会话或新建会话。
+- 验证：`career-turn-observation.test.js` 覆盖旧 SSE 取消、观察代次隔离、晚到完成保护和终态校准条件；Web UI 全量测试与 production build 验证组件接线。
 
 后续高并发部署时，90 页文档应由持久化任务队列执行，并用任务状态轮询或 SSE 续连提供进度；当前同步 SSE 链路仍适合个人平台的低并发场景。

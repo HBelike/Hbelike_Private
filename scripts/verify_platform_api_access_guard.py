@@ -1,4 +1,4 @@
-"""验证生产 API 访问保护、闭合运营模式与 Career Actor 注入。
+"""验证生产 API 登录保护、二元角色与 Career Actor 注入。
 
 本脚本不连接 PostgreSQL、不读取真实密钥，也不会发送邮件或模型请求；它使用内存中的
 会话服务替身，专门覆盖上线前最关键的服务端授权边界。
@@ -22,6 +22,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.career_assistant.web.router import get_request_actor
 from src.platform_access.contracts import PlatformRole, PlatformUser, SessionResolution
+from src.platform_access.web import require_admin
 from src.web.api import create_app
 
 
@@ -61,12 +62,10 @@ def main() -> None:
 
     original_values = {
         "PLATFORM_AUTH_REQUIRED": os.environ.get("PLATFORM_AUTH_REQUIRED"),
-        "PLATFORM_CLOSED_OPERATOR_MODE": os.environ.get("PLATFORM_CLOSED_OPERATOR_MODE"),
     }
     os.environ.update(
         {
             "PLATFORM_AUTH_REQUIRED": "true",
-            "PLATFORM_CLOSED_OPERATOR_MODE": "true",
         }
     )
     try:
@@ -85,11 +84,23 @@ def main() -> None:
                 assert client.get("/api/health").status_code == 200
                 assert client.get("/api/_deployment-auth-check").status_code == 401
 
-        viewer_session = _session_for(PlatformRole.VIEWER)
-        with patch("src.web.api.get_platform_access_service", return_value=FakeAccessService(viewer_session)):
+        user_session = _session_for(PlatformRole.USER)
+        with patch("src.web.api.get_platform_access_service", return_value=FakeAccessService(user_session)):
             with TestClient(app) as client:
                 client.cookies.set("platform_session", "test-session")
-                assert client.get("/api/_deployment-auth-check").status_code == 403
+                response = client.get("/api/_deployment-auth-check")
+                assert response.status_code == 200
+                assert response.json() == {
+                    "organization_id": str(user_session.user.organization_id),
+                    "actor_id": str(user_session.user.id),
+                }
+
+        try:
+            require_admin(user_session.user)
+        except Exception as exc:
+            assert getattr(exc, "status_code", None) == 403
+        else:
+            raise AssertionError("普通用户不应通过管理员接口校验")
 
         admin_session = _session_for(PlatformRole.ADMIN)
         with patch("src.web.api.get_platform_access_service", return_value=FakeAccessService(admin_session)):

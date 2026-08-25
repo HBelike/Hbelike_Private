@@ -10,7 +10,7 @@ from sqlalchemy import text
 
 from src.career_assistant.persistence.conversation_repository import DEFAULT_ORGANIZATION_ID
 from src.career_assistant.persistence.database import CareerDatabase
-from src.platform_access.contracts import PlatformRole, PlatformUser, SessionResolution
+from src.platform_access.contracts import PLATFORM_ADMIN_EMAIL, PlatformRole, PlatformUser, SessionResolution
 from src.platform_access.security import digest_session_token, normalize_email, normalize_username
 
 
@@ -21,7 +21,7 @@ class PlatformAccessRepository:
         self._database = database
 
     def has_active_users(self) -> bool:
-        """判断系统是否已完成首个管理员初始化。"""
+        """判断系统是否存在任意可登录账号。"""
 
         with self._database.transaction() as connection:
             return bool(
@@ -34,6 +34,26 @@ class PlatformAccessRepository:
                         )
                         """,
                     ),
+                ).scalar_one(),
+            )
+
+    def has_active_admin(self) -> bool:
+        """判断固定管理员是否已经初始化。"""
+
+        with self._database.transaction() as connection:
+            return bool(
+                connection.execute(
+                    text(
+                        """
+                        SELECT EXISTS (
+                            SELECT 1 FROM career_assistant.platform_users
+                            WHERE is_active = TRUE
+                              AND role = 'admin'
+                              AND email_normalized = :email
+                        )
+                        """,
+                    ),
+                    {"email": PLATFORM_ADMIN_EMAIL},
                 ).scalar_one(),
             )
 
@@ -52,6 +72,8 @@ class PlatformAccessRepository:
         normalized_username = normalize_username(username)
         normalized_display_name = display_name.strip() or normalized_username
         normalized_email = normalize_email(email) if email else None
+        if normalized_email != PLATFORM_ADMIN_EMAIL:
+            raise ValueError(f"管理员邮箱必须是 {PLATFORM_ADMIN_EMAIL}")
         if len(normalized_display_name) > 120:
             raise ValueError("显示名称不能超过 120 个字符")
 
@@ -68,7 +90,7 @@ class PlatformAccessRepository:
                     """
                     SELECT EXISTS (
                         SELECT 1 FROM career_assistant.platform_users
-                        WHERE is_active = TRUE
+                        WHERE is_active = TRUE AND role = 'admin'
                     )
                     """,
                 ),
@@ -145,12 +167,13 @@ class PlatformAccessRepository:
         email: str,
         display_name: str,
         password_hash: str,
-        role: PlatformRole = PlatformRole.VIEWER,
     ) -> PlatformUser:
         """创建已验证邮箱的普通账号，并为 Career 模块建立同 ID actor。"""
 
         user_id = uuid4()
         normalized_email = normalize_email(email)
+        if normalized_email == PLATFORM_ADMIN_EMAIL:
+            raise ValueError("管理员专用邮箱不能注册为普通用户")
         normalized_display_name = display_name.strip() or normalized_email.split("@", 1)[0]
         if len(normalized_display_name) > 120:
             raise ValueError("显示名称不能超过 120 个字符")
@@ -177,7 +200,7 @@ class PlatformAccessRepository:
                     "email": normalized_email,
                     "email_normalized": normalized_email,
                     "email_verified_at": now,
-                    "role": role.value,
+                    "role": PlatformRole.USER.value,
                 },
             )
             connection.execute(

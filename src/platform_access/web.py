@@ -39,16 +39,6 @@ def platform_auth_required() -> bool:
     return _read_boolean_environment("PLATFORM_AUTH_REQUIRED", default=False)
 
 
-def platform_closed_operator_mode() -> bool:
-    """判断是否处于单管理员运营模式。
-
-    当前公众号审核、Skill 维护和 Career 多租户细粒度权限尚未完全拆分。公网首发时
-    使用该模式把所有业务 API 限制为管理员，后续再按页面与资源补齐角色授权。
-    """
-
-    return _read_boolean_environment("PLATFORM_CLOSED_OPERATOR_MODE", default=False)
-
-
 def public_registration_enabled() -> bool:
     """控制是否允许首个管理员之外的公开注册。"""
 
@@ -291,7 +281,7 @@ def verify_bootstrap_code(payload: VerifyEmailCodeRequest, request: Request, res
 
 @router.post("/api/auth/register/send-code")
 def send_registration_code(payload: SendRegistrationCodeRequest, request: Request) -> dict[str, object]:
-    """公开注册入口：邮箱验证码确认后以 viewer 角色创建账号。"""
+    """公开注册入口：邮箱验证码确认后以 user 角色创建账号。"""
 
     if not public_registration_enabled():
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="当前平台未开放公开注册")
@@ -308,7 +298,7 @@ def send_registration_code(payload: SendRegistrationCodeRequest, request: Reques
 
 @router.post("/api/auth/register/verify")
 def verify_registration_code(payload: VerifyEmailCodeRequest, request: Request, response: Response) -> dict[str, object]:
-    """确认注册验证码、创建 viewer 账号并写入会话。"""
+    """确认注册验证码、创建 user 账号并写入会话。"""
 
     try:
         session = get_platform_access_service(request).verify_registration_code(

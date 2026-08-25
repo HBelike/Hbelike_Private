@@ -3,8 +3,10 @@ import assert from 'node:assert/strict'
 import {
   advanceGreetingSend,
   createGreetingItems,
+  findGreetingFailureAction,
   needsGreetingRiskWarning,
   normalizeGreetingLimit,
+  recordGreetingAttempt,
   regenerateGreetingItem,
   retryGreetingItems,
   stopGreetingItems,
@@ -90,6 +92,13 @@ test('串行发送状态按预检、发送、完成推进', () => {
   assert.deepEqual(sent.map((item) => item.status), ['sent', 'queued'])
 })
 
+test('每个岗位记录发送尝试次数和最近处理时间', () => {
+  const [item] = createGreetingItems([job('1')])
+  const attempted = recordGreetingAttempt([item], item.id, '2026-08-24T10:00:00.000Z')
+  assert.equal(attempted[0].attemptCount, 1)
+  assert.equal(attempted[0].lastAttemptAt, '2026-08-24T10:00:00.000Z')
+})
+
 test('停止批次会停止未发送和预检中的岗位，但不篡改已提交项', () => {
   const items = createGreetingItems([job('1'), job('2'), job('3')]).map((item, index) => ({
     ...item,
@@ -102,15 +111,67 @@ test('安全失败可重试当前项并恢复后续串行队列', () => {
   const items = createGreetingItems([job('1'), job('2'), job('3')]).map((item, index) => ({
     ...item,
     status: ['sent', 'failed', 'stopped'][index],
-    retryable: index === 1
+    retryable: index === 1,
+    retryMode: index === 1 ? 'message' : ''
   }))
   const retried = retryGreetingItems(items, items[1].id)
   assert.deepEqual(retried.map((item) => item.status), ['sent', 'queued', 'queued'])
   assert.equal(retried[1].retryable, false)
+  assert.equal(retried[1].nextAttemptMode, 'message')
 })
 
 test('结果未知的失败项不会进入重试队列', () => {
   const [item] = createGreetingItems([job('1')])
   const retried = retryGreetingItems([{ ...item, status: 'failed', retryable: false }], item.id)
   assert.equal(retried[0].status, 'failed')
+})
+
+test('失败操作不受当前选中的已停止岗位影响', () => {
+  const items = createGreetingItems([job('1'), job('2')]).map((item, index) => ({
+    ...item,
+    status: index === 0 ? 'failed' : 'stopped',
+    retryable: index === 0,
+    errorCode: index === 0 ? 'verification_required' : ''
+  }))
+  assert.deepEqual(findGreetingFailureAction(items), {
+    itemId: items[0].id,
+    type: 'retry'
+  })
+})
+
+test('浏览器标签页忙且文案未提交时显示重新发送入口', () => {
+  const [item] = createGreetingItems([job('1')])
+  assert.deepEqual(findGreetingFailureAction([{
+    ...item,
+    status: 'failed',
+    retryable: true,
+    retryMode: 'message',
+    errorCode: 'browser_tab_busy',
+    submissionState: 'not_submitted',
+    defaultGreetingSent: true
+  }]), {
+    itemId: item.id,
+    type: 'retry'
+  })
+})
+
+test('旧版助手产生的安全验证失败引导更新而不盲目重发', () => {
+  const [item] = createGreetingItems([job('1')])
+  assert.deepEqual(findGreetingFailureAction([{
+    ...item,
+    status: 'failed',
+    retryable: false,
+    errorCode: 'verification_required',
+    submissionState: ''
+  }]), {
+    itemId: item.id,
+    type: 'update_extension'
+  })
+  assert.equal(findGreetingFailureAction([{
+    ...item,
+    status: 'failed',
+    retryable: false,
+    errorCode: 'send_unknown',
+    submissionState: 'unknown'
+  }]), null)
 })

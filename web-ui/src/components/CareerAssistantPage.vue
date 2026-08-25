@@ -19,6 +19,17 @@ import {
   upsertServerTurn
 } from '../career-turn-client-queue.js'
 import {
+  createTurnObservationCoordinator,
+  shouldReconcileConversationTurn
+} from '../career-turn-observation.js'
+import {
+  observedTurnStatus,
+  presentTurnProgress,
+  publicTurnError,
+  submissionFeedback,
+  turnStatusText
+} from '../career-turn-presentation.js'
+import {
   DEFAULT_HISTORY_PAGE_SIZE,
   HISTORY_PAGE_SIZE_OPTIONS,
   normalizeHistoryPage,
@@ -118,15 +129,9 @@ const contextButtonLabel = computed(() => {
   const completed = Number(hasCandidateContext.value) + Number(hasTargetContext.value)
   return completed ? `求职资料：已添加 ${completed}/2` : '补充求职资料（可选）'
 })
-const composerPlaceholder = computed(() => {
-  if (!selectedConversation.value) return '请先开启一个对话'
-  if (hasCandidateContext.value && hasTargetContext.value) {
-    return '基于当前简历与目标岗位提问，例如：这个岗位最可能追问我哪段项目？'
-  }
-  if (hasCandidateContext.value) return '可以直接提问；当前回答会参考已添加的简历'
-  if (hasTargetContext.value) return '可以直接提问；当前回答会参考已添加的目标岗位'
-  return '直接询问求职问题；简历和 JD 可以稍后再添加'
-})
+const composerPlaceholder = computed(() => (
+  selectedConversation.value ? '输入你想咨询的问题…' : '请先开启一个对话'
+))
 const welcomeMessage = computed(() => {
   if (hasCandidateContext.value && hasTargetContext.value) {
     return '基准简历和目标岗位已经就绪。你可以询问岗位差距、简历表达、面试问题，或结合面经准备回答。'
@@ -150,6 +155,7 @@ let interviewMentionDebounceTimer = null
 let interviewMentionRequestId = 0
 let skillMentionDebounceTimer = null
 let skillMentionRequestId = 0
+const turnObservationCoordinator = createTurnObservationCoordinator()
 
 function dismissError() {
   errorMessage.value = ''
@@ -176,6 +182,7 @@ onBeforeUnmount(() => {
   document.removeEventListener('pointerdown', handleConversationActionPointerDown)
   window.removeEventListener('resize', updateCareerViewportWidth)
   stopContextRailResize()
+  stopActiveTurnObservation()
   stopTurnRecoveryPolling()
   stopAssessmentPolling()
 })
@@ -360,8 +367,8 @@ function removeInterviewMention(experienceId) {
 }
 
 function activeSkillInvocation(text) {
-  const match = text.match(/(?:^|\s)([@/])([A-Za-z0-9_-]{0,80})$/)
-  return match ? { trigger: match[1], query: match[2].trim() } : null
+  const match = text.match(/(?:^|\s)\/([A-Za-z0-9_-]{0,80})$/)
+  return match ? { query: match[1].trim() } : null
 }
 
 async function loadSkillMentionResults(query) {
@@ -396,9 +403,9 @@ function selectSkillMention(skill) {
     errorMessage.value = '单轮最多调用 3 个 Skill。'
     return
   }
-  const trigger = activeSkillInvocation(messageText.value)?.trigger ?? '@'
+  const trigger = '/'
   selectedSkillInvocations.value = [...selectedSkillInvocations.value, skill]
-  messageText.value = messageText.value.replace(/(?:^|\s)[@/][A-Za-z0-9_-]{0,80}$/, ' ').trimEnd()
+  messageText.value = messageText.value.replace(/(?:^|\s)\/[A-Za-z0-9_-]{0,80}$/, ' ').trimEnd()
   messageText.value = `${messageText.value}${messageText.value ? ' ' : ''}${trigger}${skill.name} `
   skillMentionQuery.value = ''
   skillMentionResults.value = []
@@ -411,7 +418,7 @@ function removeSkillInvocation(skillId) {
   if (skill) {
     const escapedName = skill.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
     messageText.value = messageText.value
-      .replace(new RegExp(`(^|\\s)[@/]${escapedName}(?=\\s|$)`, 'gi'), ' ')
+      .replace(new RegExp(`(^|\\s)/${escapedName}(?=\\s|$)`, 'gi'), ' ')
       .replace(/\s{2,}/g, ' ')
       .trim()
   }
@@ -419,7 +426,7 @@ function removeSkillInvocation(skillId) {
 
 function skillInvocationPresent(text, skill) {
   const escapedName = skill.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  return new RegExp(`(^|\\s)[@/]${escapedName}(?=\\s|$)`, 'i').test(text)
+  return new RegExp(`(^|\\s)/${escapedName}(?=\\s|$)`, 'i').test(text)
 }
 
 function activeSelectedSkillInvocations(text) {
@@ -700,20 +707,28 @@ function clearResumeFile() {
   if (resumeInput.value) resumeInput.value.value = ''
 }
 
+function clearObservedTurnDisplay() {
+  activeTemporaryMessageId.value = ''
+  activeObservedTurnId.value = ''
+  streamedAssistantText.value = ''
+  streamStatus.value = ''
+  streamProgress.value = []
+}
+
+function stopActiveTurnObservation() {
+  turnObservationCoordinator.cancel()
+  clearObservedTurnDisplay()
+}
+
 function resetConversationDraft() {
   // 清理只能服务当前浏览器会话的临时输入，避免跨会话串材料。
-
+  stopActiveTurnObservation()
   messageText.value = ''
   jobUrl.value = ''
   showJobUrl.value = false
   clearResumeFile()
   clearInterviewMentions()
   clearSkillInvocations()
-  streamedAssistantText.value = ''
-  streamStatus.value = ''
-  streamProgress.value = []
-  activeTemporaryMessageId.value = ''
-  activeObservedTurnId.value = ''
   pendingTurns.value = []
   sending.value = false
   lastTurn.value = null
@@ -721,17 +736,6 @@ function resetConversationDraft() {
 
 function isActiveTurn(turn) {
   return turn?.status === 'queued' || turn?.status === 'running'
-}
-
-function turnStatusText(turn) {
-  if (!turn) return ''
-  return {
-    queued: '任务已排队，正在等待处理',
-    running: '任务仍在后台处理中，页面可安全刷新',
-    succeeded: '本轮任务已完成',
-    failed: '本轮任务未完成，请查看对话中的说明',
-    cancelled: '本轮任务已取消'
-  }[turn.status] ?? `任务状态：${turn.status}`
 }
 
 function stopTurnRecoveryPolling() {
@@ -742,7 +746,8 @@ function stopTurnRecoveryPolling() {
 
 function scheduleTurnRecoveryPolling() {
   stopTurnRecoveryPolling()
-  if (!selectedConversation.value || pendingTurns.value.length === 0) return
+  if (!selectedConversation.value
+    || !shouldReconcileConversationTurn(lastTurn.value, pendingTurns.value)) return
   turnRecoveryPollTimer = setTimeout(() => {
     void refreshActiveConversationTurn()
   }, 3000)
@@ -757,12 +762,13 @@ async function restoreServerQueue(conversationId) {
     void observeNextServerTurn()
   } else {
     syncSendingState()
+    scheduleTurnRecoveryPolling()
   }
 }
 
 async function refreshActiveConversationTurn() {
   const conversationId = selectedConversation.value?.id
-  if (!conversationId || sending.value) return
+  if (!conversationId || pendingTurns.value.length > 0 || activeObservedTurnId.value) return
   try {
     const payload = await requestJson(`/api/career/conversations/${conversationId}`)
     if (selectedConversation.value?.id !== conversationId) return
@@ -957,7 +963,7 @@ async function refreshData() {
 }
 
 async function selectConversation(conversationId, clearFeedback = true) {
-  if (savingJobSearch.value) return
+  if (savingJobSearch.value || submittingTurnCount.value > 0) return
   resetJobSearch()
   closeConversationActions()
   const requestId = ++conversationSelectionRequestId
@@ -1037,7 +1043,7 @@ async function createConversation({
 }
 
 async function startNewConversation() {
-  if (savingJobSearch.value) return
+  if (savingJobSearch.value || submittingTurnCount.value > 0) return
   resetJobSearch()
   const conversation = await createConversation({ title: '新的求职咨询' })
   if (conversation) feedback.value = '新对话已开启，可以直接提问；简历和 JD 均可稍后补充。'
@@ -1398,10 +1404,7 @@ async function submitPreparedTurn(preparedTurn) {
       attachmentProcessing: payload.attachment_processing ?? null
     })
     lastTurn.value = serverTurn
-    const ahead = Number(serverTurn.conversation_position ?? 0)
-    feedback.value = ahead > 0
-      ? `消息已保存到服务端队列，前方还有 ${ahead} 个 Turn。`
-      : '消息已保存到服务端，正在等待 Worker 处理。'
+    feedback.value = submissionFeedback(serverTurn.conversation_position)
     void observeNextServerTurn()
   } catch (error) {
     if (temporaryMessageMounted) {
@@ -1429,18 +1432,23 @@ function syncObservedTurnDisplay(item) {
   if (!item || activeObservedTurnId.value !== item.id) return
   streamedAssistantText.value = item.streamedText
   streamProgress.value = item.progress
-  streamStatus.value = item.serverTurn.status === 'queued'
-    ? `已进入服务端队列，前方 ${Number(item.serverTurn.conversation_position ?? 0)} 个 Turn`
-    : 'Worker 正在处理本轮任务…'
+  streamStatus.value = observedTurnStatus(item.serverTurn)
 }
 
 async function observeNextServerTurn() {
   if (activeObservedTurnId.value) return
+  const conversationId = selectedConversation.value?.id
+  if (!conversationId) return
   const item = firstServerTurn(pendingTurns.value)
   if (!item) {
     syncSendingState()
     return
   }
+  const observation = turnObservationCoordinator.begin(conversationId, item.id)
+  const observationIsCurrent = () => (
+    turnObservationCoordinator.isCurrent(observation)
+    && selectedConversation.value?.id === conversationId
+  )
   activeObservedTurnId.value = item.id
   activeTemporaryMessageId.value = item.temporaryMessageId
   syncSendingState()
@@ -1450,28 +1458,34 @@ async function observeNextServerTurn() {
   let terminalObserved = false
   let retryObservation = false
   try {
-    await requestSse(`/api/career/turns/${item.id}/events`, { method: 'GET' }, {
+    await requestSse(`/api/career/turns/${item.id}/events`, {
+      method: 'GET',
+      signal: observation.signal
+    }, {
       queued: (event) => {
+        if (!observationIsCurrent()) return
         updateObservedTurn(item.id, { status: event.state ?? 'queued' })
         syncObservedTurnDisplay(item)
       },
       started: () => {
+        if (!observationIsCurrent()) return
         updateObservedTurn(item.id, { status: 'running' })
         syncObservedTurnDisplay(item)
       },
       progress: (event) => {
+        if (!observationIsCurrent()) return
         const current = pendingTurns.value.find((candidate) => candidate.id === item.id)
         if (!current) return
-        const key = event.step ?? event.key ?? `step-${current.progress.length + 1}`
-        const label = event.label ?? `已完成：${String(event.step ?? '处理步骤')}`
+        const presentedProgress = presentTurnProgress(event)
         const progress = [
-          ...current.progress.filter((entry) => entry.key !== key),
-          { key, label, state: event.state ?? 'completed' }
+          ...current.progress.filter((entry) => entry.key !== presentedProgress.key),
+          presentedProgress
         ]
         updateObservedTurn(item.id, { progress })
         syncObservedTurnDisplay(current)
       },
       delta: (event) => {
+        if (!observationIsCurrent()) return
         const current = pendingTurns.value.find((candidate) => candidate.id === item.id)
         if (!current) return
         updateObservedTurn(item.id, {
@@ -1479,20 +1493,24 @@ async function observeNextServerTurn() {
         })
         syncObservedTurnDisplay(current)
       },
-      done: (event) => { payload = event },
+      done: (event) => {
+        if (observationIsCurrent()) payload = event
+      },
       error: (event) => {
+        if (!observationIsCurrent()) return
         if (event.assistant_message) payload = event
-        else streamFailure = event.detail ?? event.message ?? '服务端 Turn 未完成。'
+        else streamFailure = publicTurnError(event.detail ?? event.message)
       }
     })
-    if (!payload) throw new Error(streamFailure || '服务端 Turn 未返回最终结果。')
+    if (!observationIsCurrent()) return
+    if (!payload) throw new Error(streamFailure || '暂未收到完整回复。')
     terminalObserved = true
     replaceOrAppendMessage(payload.message, item.temporaryMessageId)
     replaceOrAppendMessage(payload.assistant_message)
     lastTurn.value = payload.turn ?? { ...item.serverTurn, status: payload.state }
     feedback.value = payload.turn?.status === 'succeeded'
-      ? '已完成本轮模型回复。'
-      : '本轮内容已保存，但模型调用未完成；具体原因已显示在对话内。'
+      ? '本轮回复已完成。'
+      : '本轮内容已保存，但回复未完成；具体原因已显示在对话内。'
     const jobSource = payload.job_source ?? {}
     if (jobSource.status === 'unavailable' || jobSource.status === 'not_configured') {
       feedback.value = `${feedback.value} ${jobSource.message || '职位链接暂时无法读取，请直接粘贴职位描述。'}`
@@ -1500,8 +1518,10 @@ async function observeNextServerTurn() {
     historyPage.value = 1
     void loadConversationPage(1)
   } catch (error) {
+    if (!observationIsCurrent() || error?.name === 'AbortError') return
     try {
       const statusPayload = await requestJson(`/api/career/turns/${item.id}`)
+      if (!observationIsCurrent()) return
       const latestTurn = statusPayload.turn
       lastTurn.value = latestTurn
       if (isActiveTurn(latestTurn)) {
@@ -1511,28 +1531,42 @@ async function observeNextServerTurn() {
           temporaryMessageId: item.temporaryMessageId
         })
         retryObservation = true
-        feedback.value = '任务仍在服务端执行，正在重新连接进度。'
+        feedback.value = '回复仍在继续，正在恢复显示进度。'
+      } else if (latestTurn.status === 'succeeded') {
+        const conversationPayload = await requestJson(`/api/career/conversations/${conversationId}`)
+        if (!observationIsCurrent()) return
+        messages.value = conversationPayload.messages ?? []
+        conversationContext.value = conversationPayload.context ?? null
+        restoreConversationModelSelection(conversationPayload.last_model_selection)
+        lastTurn.value = conversationPayload.latest_turn ?? latestTurn
+        terminalObserved = true
+        feedback.value = '本轮回复已恢复。'
       } else {
         terminalObserved = true
         markTemporaryMessageFailed(item.temporaryMessageId)
-        errorMessage.value = latestTurn.error_message || '服务端 Turn 未完成。'
+        errorMessage.value = publicTurnError(latestTurn.error_message)
       }
-    } catch {
+    } catch (statusError) {
+      if (!observationIsCurrent()) return
       retryObservation = true
-      errorMessage.value = error instanceof Error ? error.message : '服务端 Turn 观察失败'
+      errorMessage.value = publicTurnError(
+        statusError instanceof Error
+          ? statusError.message
+          : (error instanceof Error ? error.message : '')
+      )
     }
   } finally {
+    if (!observationIsCurrent()) return
     if (terminalObserved) {
       pendingTurns.value = removeServerTurn(pendingTurns.value, item.id)
     }
-    activeObservedTurnId.value = ''
-    activeTemporaryMessageId.value = ''
-    streamedAssistantText.value = ''
-    streamStatus.value = ''
-    streamProgress.value = []
+    turnObservationCoordinator.finish(observation)
+    clearObservedTurnDisplay()
     syncSendingState()
     if (retryObservation) {
-      setTimeout(() => { void observeNextServerTurn() }, 1000)
+      setTimeout(() => {
+        if (selectedConversation.value?.id === conversationId) void observeNextServerTurn()
+      }, 1000)
     } else if (pendingTurns.value.length > 0) {
       void observeNextServerTurn()
     }
@@ -1639,7 +1673,7 @@ async function deleteConversation(conversation) {
       resetConversationDraft()
       useFreeQuotaFirstSelection()
     }
-    feedback.value = '会话及其服务端历史已永久删除。'
+    feedback.value = '会话及其历史记录已永久删除。'
     closeConversationActions()
     void loadConversationPage(historyPage.value)
   } catch (error) {
@@ -1860,12 +1894,12 @@ onMounted(() => {
     <aside class="career-history-panel" :class="{ collapsed: historyCollapsed }">
       <template v-if="historyCollapsed">
         <button class="history-rail-button" type="button" aria-label="展开会话历史" title="展开会话历史" @click="toggleHistoryPanel">›</button>
-        <button class="history-rail-button primary" type="button" :disabled="creating || sending || savingJobSearch" aria-label="开启新对话" title="开启新对话" @click="startNewConversation">＋</button>
+        <button class="history-rail-button primary" type="button" :disabled="creating || submittingTurnCount > 0 || savingJobSearch" aria-label="开启新对话" title="开启新对话" @click="startNewConversation">＋</button>
         <span class="history-rail-count" :title="`${historyTotal} 个会话`">{{ historyTotal }}</span>
       </template>
       <template v-else>
         <div class="history-actions">
-          <button class="primary-button" type="button" :disabled="creating || sending || savingJobSearch" @click="startNewConversation">
+          <button class="primary-button" type="button" :disabled="creating || submittingTurnCount > 0 || savingJobSearch" @click="startNewConversation">
             ＋ {{ creating ? '正在建立...' : '开启新对话' }}
           </button>
           <button class="history-collapse-button" type="button" aria-label="折叠会话历史" title="折叠会话历史" @click="toggleHistoryPanel">‹</button>
@@ -1883,7 +1917,7 @@ onMounted(() => {
           <button
             type="button"
             class="conversation-item-main"
-            :disabled="sending || savingJobSearch || conversationActionLoadingId === conversation.id"
+            :disabled="submittingTurnCount > 0 || savingJobSearch || conversationActionLoadingId === conversation.id"
             @click="selectConversation(conversation.id)"
           >
             <strong>{{ conversation.title }}</strong>
@@ -2034,7 +2068,7 @@ onMounted(() => {
         <article v-for="message in messages" :key="message.id" class="message" :class="[message.role === 'user' ? 'from-user' : 'from-agent', message.local_state ? `message-${message.local_state}` : '']" :aria-label="message.role === 'user' ? '你的消息' : '求职助手消息'">
           <header v-if="message.role !== 'user'" class="message-role"><i aria-hidden="true">职</i><strong>求职助手</strong></header>
           <CareerMessageContent :content="message.content" />
-          <small class="message-time">{{ formatDate(message.created_at) }}<template v-if="message.local_state === 'sending'"> · 正在提交</template><template v-else-if="message.local_state === 'queued'"> · 已保存并排队</template><template v-else-if="message.local_state === 'failed'"> · 发送失败</template></small>
+          <small class="message-time">{{ formatDate(message.created_at) }}<template v-if="message.local_state === 'sending'"> · 正在发送</template><template v-else-if="message.local_state === 'queued'"> · 等待回复</template><template v-else-if="message.local_state === 'failed'"> · 发送失败</template></small>
         </article>
         <article v-if="sending" class="agent-message agent-pending">
           <div class="stream-pending-heading"><div class="message-role"><i aria-hidden="true">职</i><strong>求职助手</strong></div><span>正在思考</span></div>
@@ -2044,8 +2078,8 @@ onMounted(() => {
           <CareerMessageContent v-if="streamedAssistantText" class="streamed-answer" :content="streamedAssistantText" />
           <p v-else class="stream-status">{{ streamStatus || '正在思考…' }}</p>
         </article>
-        <section v-if="pendingTurns.length" class="turn-queue-preview" aria-label="服务端排队消息">
-          <strong>服务端队列（{{ pendingTurns.length }}）</strong>
+        <section v-if="pendingTurns.length" class="turn-queue-preview" aria-label="待回复消息">
+          <strong>待回复消息（{{ pendingTurns.length }}）</strong>
           <article v-for="(pendingTurn, index) in pendingTurns" :key="pendingTurn.id">
             <span>{{ Number(pendingTurn.serverTurn.conversation_position ?? index) + 1 }}</span>
             <p>{{ pendingTurn.content }}</p>
@@ -2102,7 +2136,7 @@ onMounted(() => {
             <small>{{ experience.job_name }}<template v-if="experience.interview_date"> · {{ experience.interview_date }}</template></small>
           </button>
         </div>
-        <div class="composer-footer"><small>当前模型：{{ modelLabel }}。输入 @ 可引用面经或 Skill，输入 / 可调用 Skill；每条消息会立即保存到服务端并按顺序执行。</small><button class="send-button" type="button" :disabled="!selectedConversation" @click="sendMessage">{{ sending ? '发送并排队' : '发送' }}</button></div>
+        <div class="composer-footer"><small>当前模型：{{ modelLabel }}。输入 @ 可引用面经，输入 / 可调用 Skill；每条消息都会保存，并按发送顺序回复。</small><button class="send-button" type="button" :disabled="!selectedConversation" @click="sendMessage">{{ sending ? '继续发送' : '发送' }}</button></div>
       </footer>
     </section>
 
@@ -2279,7 +2313,7 @@ onMounted(() => {
 .career-workspace.history-collapsed { grid-template-columns:52px minmax(0,1fr); }
 .career-workspace.has-context-rail.history-collapsed { grid-template-columns:52px minmax(560px,1fr) var(--context-rail-width,620px); }
 .career-history-panel,.career-chat-panel { border:1px solid #e0e6d8; border-radius:20px; background:#fff; box-shadow:none; }
-.context-rail-slot{position:relative;height:100%;min-width:0;min-height:0;overflow:hidden}.context-rail-slot>:deep(.context-rail){height:100%;max-height:100%}.context-rail-resizer{position:absolute;z-index:30;top:0;bottom:0;left:-13px;width:12px;border:0;background:transparent;padding:0;cursor:col-resize;touch-action:none}.context-rail-resizer:before{position:absolute;top:0;bottom:0;left:5px;width:2px;border-radius:999px;background:transparent;content:"";transition:background .15s ease,box-shadow .15s ease}.context-rail-resizer i{position:absolute;top:50%;left:1px;display:block;width:10px;height:42px;transform:translateY(-50%);border:1px solid var(--ui-line-strong);border-radius:999px;background:var(--ui-surface);box-shadow:0 3px 12px rgba(31,60,96,.1)}.context-rail-resizer i:after{position:absolute;top:50%;left:3px;width:2px;height:18px;transform:translateY(-50%);border-radius:999px;background:var(--ui-accent);content:""}.context-rail-resizer:hover:before,.context-rail-resizer:focus-visible:before,.resizing-context-rail .context-rail-resizer:before{background:var(--ui-accent);box-shadow:0 0 0 3px var(--ui-focus)}.context-rail-resizer:focus-visible{outline:0}
+.context-rail-slot{position:relative;height:100%;min-width:0;min-height:0;overflow:visible}.context-rail-slot>:deep(.context-rail){height:100%;max-height:100%}.context-rail-resizer{position:absolute;z-index:30;top:0;bottom:0;left:-13px;width:12px;border:0;background:transparent;padding:0;cursor:col-resize;touch-action:none}.context-rail-resizer:before{position:absolute;top:0;bottom:0;left:5px;width:2px;border-radius:999px;background:transparent;content:"";transition:background .15s ease,box-shadow .15s ease}.context-rail-resizer i{position:absolute;top:50%;left:1px;display:block;width:10px;height:42px;transform:translateY(-50%);border:1px solid var(--ui-line-strong);border-radius:999px;background:var(--ui-surface);box-shadow:0 3px 12px rgba(31,60,96,.1)}.context-rail-resizer i:after{position:absolute;top:50%;left:3px;width:2px;height:18px;transform:translateY(-50%);border-radius:999px;background:var(--ui-accent);content:""}.context-rail-resizer:hover:before,.context-rail-resizer:focus-visible:before,.resizing-context-rail .context-rail-resizer:before{background:var(--ui-accent);box-shadow:0 0 0 3px var(--ui-focus)}.context-rail-resizer:focus-visible{outline:0}
 .career-history-panel { display:flex; height:100%; min-height:0; flex-direction:column; gap:0; overflow:hidden; padding:14px; }
 .career-history-panel.collapsed{align-items:center;gap:9px;padding:10px 7px;border-radius:16px}.history-actions{display:grid;grid-template-columns:minmax(0,1fr) 34px;gap:7px;margin-bottom:14px}.history-collapse-button,.history-rail-button{display:grid;place-items:center;border:1px solid var(--ui-line);border-radius:10px;background:var(--ui-surface-soft);color:var(--ui-text-secondary);font-size:22px;font-weight:850;cursor:pointer}.history-collapse-button:hover,.history-rail-button:hover{border-color:var(--ui-accent);background:var(--ui-surface-active);color:var(--ui-accent-ink)}.history-rail-button{width:36px;height:36px}.history-rail-button.primary{border-color:var(--ui-accent);background:var(--ui-accent);color:#fff;font-size:18px}.history-rail-button:disabled{cursor:wait;opacity:.6}.history-rail-count{display:grid;min-width:25px;height:25px;place-items:center;border-radius:999px;background:var(--ui-surface-soft);color:var(--ui-text-muted);font-size:10px;font-weight:850}
 .primary-button,.send-button { border:0; border-radius:13px; background:#89a93e; color:#fff; font-weight:800; }

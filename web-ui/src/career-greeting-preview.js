@@ -63,6 +63,12 @@ export function createGreetingItems(jobs) {
     revision: 1,
     included: true,
     status: 'ready',
+    attemptCount: 0,
+    lastAttemptAt: '',
+    sentAt: '',
+    retryMode: '',
+    nextAttemptMode: 'full',
+    defaultGreetingSent: false,
     evidence: [...PREVIEW_EVIDENCE],
     jdHighlights: Array.isArray(job?.skills) && job.skills.length
       ? job.skills.slice(0, 4)
@@ -83,8 +89,19 @@ export function regenerateGreetingItem(item) {
 export function queueGreetingItems(items) {
   return (Array.isArray(items) ? items : []).map((item) => ({
     ...item,
-    status: item.included ? 'queued' : 'excluded'
+    status: item.included ? 'queued' : 'excluded',
+    nextAttemptMode: 'full'
   }))
+}
+
+export function recordGreetingAttempt(items, id, attemptedAt = new Date().toISOString()) {
+  return (Array.isArray(items) ? items : []).map((item) => item.id === id
+    ? {
+        ...item,
+        attemptCount: Number(item.attemptCount || 0) + 1,
+        lastAttemptAt: attemptedAt
+      }
+    : item)
 }
 
 export function advanceGreetingSend(items) {
@@ -114,10 +131,40 @@ export function retryGreetingItems(items, id) {
   const retryIndex = currentItems.findIndex((item) => item.id === id && item.status === 'failed' && item.retryable)
   if (retryIndex < 0) return currentItems.map((item) => ({ ...item }))
   return currentItems.map((item, index) => {
-    if (index === retryIndex) return { ...item, status: 'queued', error: '', errorCode: '', retryable: false }
+    if (index === retryIndex) {
+      return {
+        ...item,
+        status: 'queued',
+        error: '',
+        errorCode: '',
+        retryable: false,
+        nextAttemptMode: item.retryMode === 'message' ? 'message' : 'full'
+      }
+    }
     if (index > retryIndex && item.included && item.status === 'stopped') {
-      return { ...item, status: 'queued', error: '', errorCode: '', retryable: false }
+      return {
+        ...item,
+        status: 'queued',
+        error: '',
+        errorCode: '',
+        retryable: false,
+        retryMode: '',
+        nextAttemptMode: 'full'
+      }
     }
     return { ...item }
   })
+}
+
+export function findGreetingFailureAction(items) {
+  const currentItems = Array.isArray(items) ? items : []
+  const retryableItem = currentItems.find((item) => item.status === 'failed' && item.retryable === true)
+  if (retryableItem) return { itemId: retryableItem.id, type: 'retry' }
+
+  const legacyVerificationItem = currentItems.find((item) => item.status === 'failed'
+    && ['verification_required', 'login_or_verification_required'].includes(item.errorCode)
+    && !item.submissionState)
+  return legacyVerificationItem
+    ? { itemId: legacyVerificationItem.id, type: 'update_extension' }
+    : null
 }

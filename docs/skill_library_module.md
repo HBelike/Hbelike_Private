@@ -20,7 +20,7 @@
 ## 2026-08-20：求职助手调用适配
 
 - `SkillLibraryService` 仍是 Skill 发现和读取的唯一文件层入口；`CareerSkillRuntime` 不自行扫描第二套目录，避免名称优先级和去重规则分叉。
-- `/api/career/skills/mentions` 只返回候选元数据。首次挂载必须由输入中的精确 `@skill-name`、`/skill-name` 触发，`selected_skill_ids` 中已经从文字删除的旧选择会被忽略；挂载成功后，该 Skill 会在当前会话后续轮次持续生效，直到用户显式调用另一个 Skill 或开启新会话。
+- `/api/career/skills/mentions` 只返回候选元数据。首次挂载必须由输入中的精确 `/skill-name` 触发；`@` 仅用于求职助手引用面经。`selected_skill_ids` 中已经从文字删除的旧选择会被忽略；挂载成功后，该 Skill 会在当前会话后续轮次持续生效，直到用户显式调用另一个 Skill 或开启新会话。
 - 所有 Skill 统一按文件语义挂载：移除 YAML frontmatter 后，将正文作为独立 `system` 上下文交给模型，并把命令后正文展开到 `$ARGUMENTS` / `${ARGUMENTS}`，把 Skill 目录展开到 `${SKILL_DIR}` / `${CLAUDE_SKILL_DIR}`。
 - 不再存在 `find-skills → skill_search` 的名称硬编码。`/find-skills` 与 `/tech-resume-optimizer` 使用完全相同的加载路径，因此模型收到的行为规则始终以用户选中的 `SKILL.md` 为准。
 - `SkillToolRegistry` 以通用能力而不是 Skill 名称绑定工具：skills.sh 实时搜索、GitHub Skill 仓库检查、项目级完整目录安装。仓库检查优先识别标准 `skills/`、`.agents/skills/`、`.claude/skills/`，避免把仓库维护用内部 Skill 与公开分发目录混装。

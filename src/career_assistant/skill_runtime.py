@@ -33,7 +33,7 @@ class CareerSkillRuntime:
 
     _frontmatter_pattern = re.compile(r"\A---\s*\r?\n.*?\r?\n---\s*(?:\r?\n)?", re.DOTALL)
     _explicit_token_pattern = re.compile(
-        r"(?<!\S)[@/](?P<name>[A-Za-z0-9][A-Za-z0-9_-]{0,79})(?=\s|$)",
+        r"(?<!\S)/(?P<name>[A-Za-z0-9][A-Za-z0-9_-]{0,79})(?=\s|$)",
     )
     _leading_slash_pattern = re.compile(
         r"\A\s*/(?P<name>[A-Za-z0-9][A-Za-z0-9_-]{0,79})(?=\s|$)",
@@ -113,9 +113,8 @@ class CareerSkillRuntime:
         for match in matches:
             skill = by_name.get(match.group("name").casefold())
             if skill is not None and skill.id not in seen_ids:
-                # selected_skill_ids 只是 UI 一致性提示；文本标记才是服务端事实来源。
-                # 因此即使前端未带 ID，用户手写 /name 或 @name 仍可正常调用。
-                source = "slash" if match.group(0).startswith("/") else "mention"
+                # selected_skill_ids 只是 UI 一致性提示；文本中的 /name 才是服务端事实来源。
+                source = "slash"
                 primary = bool(
                     leading_slash
                     and match.start() == leading_slash.start()
@@ -207,7 +206,7 @@ class CareerSkillRuntime:
 
             inherited_prompt = " ".join(
                 [f"/{inherited_names[0]}"]
-                + [f"@{name}" for name in inherited_names[1:]]
+                + [f"/{name}" for name in inherited_names[1:]]
             )
             inherited = self.resolve(
                 (),
@@ -229,7 +228,7 @@ class CareerSkillRuntime:
         user_text: str,
         by_name: dict[str, SkillSummary],
     ) -> str:
-        """只删除已安装 Skill 的调用标记，普通 @文本不受影响。"""
+        """只删除已安装 Skill 的 / 调用标记，普通 @面经文本不受影响。"""
 
         def replace(match: re.Match[str]) -> str:
             return "" if match.group("name").casefold() in by_name else match.group(0)

@@ -1,5 +1,29 @@
 # 求职助手模块边界
 
+## 2026-08-25：任务进度文案去技术化
+
+- 设计目标：求职用户只看到等待、整理资料、分析回复和完成等可理解状态，不暴露 `Worker`、`Turn`、服务端队列或 LangGraph 节点名。
+- 技术取舍：新增 `career-turn-presentation.js` 作为纯前端展示适配层，后台事件、状态码、持久化队列和执行顺序保持不变；未知步骤与含内部术语的失败信息使用安全的通用文案。
+- 调用链：持久化进度事件 → `presentTurnProgress()` 把内部节点折叠为整理、分析、完成三个阶段 → `CareerAssistantPage.vue` 去重并展示；任务状态与等待数量通过同一适配层转换。
+- 交互调整：“服务端队列”改为“待回复消息”，“发送并排队”改为“继续发送”；单条消息仍可在上一轮回复期间继续提交。
+- 验证：新增步骤折叠、未知步骤、状态提示、错误清洗和页面禁用词测试；前端 91 项测试全部通过，Vite 生产构建通过。
+
+## 2026-08-25：岗位分区标题与序号展示修复
+
+- 设计目标：岗位画布只展示有效职责、要求和福利正文，不把“岗位职责”“任职要求”“职位福利”等章节标题当作业务条目。
+- 技术取舍：保留后端 Judge 的原始引用和计分结果，在前端 `career-assessment-view.js` 适配层去除 Markdown、列表标记、重复项及纯标题；因此已有评估记录无需重新分析即可修复。
+- 调用链：岗位评估结果 → `assessmentCanvasSections()` 清洗并按类别聚合 → `CareerJobCanvas.vue` 根据有效条目数生成序号；单条不编号，多条连续编号。
+- 依赖与边界：不修改 Judge Prompt、数据库结构、后端评分或“关键要求缺口率”卡片及依据弹窗；确定性 JD 解析降级链路保持不变。
+- 验证：新增纯标题、原始序号、福利正文、单条与多条编号及正文保护测试；前端 84 项测试全部通过，Vite 生产构建通过。
+
+## 2026-08-25：本地开发 Turn 队列无人消费修复
+
+- 目标：本地验证生成中切换会话时，让已经写入 PostgreSQL 的 Turn 持续执行，切回后能够恢复进度或最终回复。
+- 根因：`scripts/start_dev_backend.ps1` 只启动了 `preview_server.py` Web API，没有启动独立 `career-agent-worker`；前端切回会话后从 `active-turns` 读到的 `queued` 是真实状态，但本地没有 Worker 领取，因此长期停在“前方 0 个 Turn”。
+- 技术取舍：保持 API 与 Worker 的独立进程边界；本地启动脚本以隐藏子进程启动 `scripts/run_career_agent_worker.py`，API 退出时只停止该脚本创建的 Worker。生产 Compose 和数据库结构不变。
+- 调用链：本地启动脚本 → 隐藏 Worker + 前台 API → API 将 Turn 写入 PostgreSQL → Worker 独立领取并写入持久事件 → 前端切回会话后重放事件或读取最终消息。
+- 验证：启动脚本契约测试覆盖 Worker 入口、隐藏启动、进程句柄和 `finally` 清理；继续运行 Turn Worker、前端会话恢复测试和 Vite 构建。
+
 ## 2026-08-24：Agent Worker 过期租约恢复修复
 
 - 目标：恢复生产 `career-agent-worker` 的正常启动，确保进程重启后能回收过期 Turn 租约。
@@ -175,10 +199,10 @@ Career WebUI
 
 ## 2026-08-20：`/命令`确定性挂载 SKILL.md
 
-- 目标：在求职助手输入框中使用 `@skill-name` 或 `/skill-name` 调用技能库中已经安装的 Skill；原有 `@面经` 引用继续可用。
+- 目标：在求职助手输入框中使用 `/skill-name` 调用技能库中已经安装的 Skill；`@` 仅用于引用面经资料。
 - 技术取舍：参照 [Agent Skills 客户端实现](https://github.com/agentskills/agentskills/blob/main/docs/client-implementation/adding-skills-support.mdx) 的渐进披露方式，候选接口只返回 `name + description`，激活后才读取完整 `SKILL.md`。未引入新的 Skill 格式或第三方运行时。
 - 调用链：`CareerAssistantPage.vue` 候选/Chip → `CareerSkillRuntime.resolve` 服务端解析 → 按稳定 ID 读取对应 `SKILL.md` → 移除 frontmatter、展开参数变量 → `ActivatedSkill` → 独立 `system` 消息 → DeepSeek 多轮 `tool_calls → role=tool` Agent Loop → 最终回复。
-- 文本是首次激活事实来源：前端仍兼容提交稳定 Skill ID，但服务端只接受用户输入中真实存在的 `@name`、`/name` 作为新挂载。挂载后会话后续普通追问继承最近一次显式 Skill；本轮显式调用新 Skill 时替换继承项，新会话不继承。用户在首次发送前手工删除调用标记时，旧 Chip/ID 不会暗中激活；原始消息照常持久化，交给模型和工具的任务正文会移除调用标记。
+- 文本是首次激活事实来源：`@` 只用于选择面经资料，`/name` 是唯一的 Skill 唤醒入口。前端仍兼容提交稳定 Skill ID，但服务端只接受用户输入中真实存在的 `/name` 作为新挂载。挂载后会话后续普通追问继承最近一次显式 Skill；本轮显式调用新 Skill 时替换继承项，新会话不继承。用户在首次发送前手工删除调用标记时，旧 Chip/ID 不会暗中激活；原始消息照常持久化，交给模型和工具的任务正文会移除调用标记。
 - 上下文预算：单轮最多 3 个 Skill，单份展开后正文最多 48000 字符，总计最多 80000 字符；该上限已覆盖当前扫描到的最大 `SKILL.md`。预算内必须完整挂载，禁止静默截断；超过预算时在调用模型前明确报错。候选阶段不读取正文；最终 API 只返回激活的名称和说明，不向浏览器泄露 `SKILL.md` 内容或本机路径。
 - 挂载语义：所有 Skill（包括 `find-skills`）统一使用自身 `SKILL.md` 正文，不再根据 Skill 名称硬编码替换为平台工具。正文中的 `$ARGUMENTS`、`${ARGUMENTS}` 会展开为去掉调用标记后的任务文本；`${SKILL_DIR}`、`${CLAUDE_SKILL_DIR}` 会展开为该 Skill 所在目录。
 - Prompt 优先级：求职助手基础规则是第一条 `system`；本轮显式或会话继承的 Skill 使用第二条独立 `system`；历史对话随后加入；任务正文始终作为最后一条 `user`。会话继承时会重新读取 `SKILL.md` 并用当前追问重新展开 `$ARGUMENTS`，不会复用上一轮参数。Skill 必须被用于完成任务，而不是被模型介绍或总结。
@@ -266,3 +290,18 @@ Career WebUI
 - API 与前端：新增 Turn 入队、状态、active-turns、持久化 Event SSE 和取消接口。页面每次发送都立即创建服务端 Turn，可连续提交；刷新从 active-turns 恢复，SSE 通过 Last-Event-ID 续传。
 - 部署：生产 Compose 新增 `career-agent-worker`，默认全局并发 8、单 Worker 并发 4、租约 90 秒、20 秒 heartbeat。API 和 Worker 可独立扩容，全局并发不会随副本数倍增。
 - 验证：2 个 Worker 模拟 100 个用户、每人连续 2 个 Turn，200 个任务全部完成；峰值全局并发 8，任一会话峰值并发 1，所有会话均保持提交顺序。
+
+## 2026-08-25：会话切换不再中断回复观察
+
+- 设计目标：会话 A 生成期间可以切换到会话 B；切回 A 时，如果仍在生成则恢复已有增量并继续，如果已经结束则展示最终回复，不能停留在无限 loading。
+- 前端实现：新增 `career-turn-observation.js` 管理当前 `conversationId / turnId / AbortController`。会话切换和组件卸载只中断旧 SSE；所有事件回调与结束清理在修改共享状态前都校验当前观察代次，杜绝旧会话结果写入新会话。
+- 恢复策略：选择会话后从 `GET /conversations/{id}` 与 `GET /conversations/{id}/active-turns` 恢复。活动 Turn 重新连接持久事件流；若详情仍为活动状态但 active-turns 已为空，启动 3 秒校准轮询，解决完成瞬间的双请求竞态。
+- 交互边界：POST Turn 尚未返回 `202` 时禁止切换；受理后取消 `sending` 对历史会话按钮的禁用，允许在 Worker 继续执行时查看或新建其他会话。
+- 后端边界：不修改数据库、队列或 Worker。`/turns/{id}/events` 已从数据库事件 ID 回放，浏览器断线不会触发取消，因此无需复制任务或重新调用模型。
+
+## 2026-08-25：职位信息栏拖拽手柄恢复
+
+- 设计目标：恢复 PC 端聊天区与职位信息栏之间可见、可命中的拖拽分隔线，不改变现有宽度范围、双击复位和本地记忆行为。
+- 技术取舍：外层 `context-rail-slot` 改为允许手柄溢出显示；职位信息内容仍由内部 `context-rail` 负责横向裁切和纵向滚动，避免放开外层裁切后影响 JD 内容布局。未新增依赖。
+- 调用链：分隔线 `pointerdown` → 页面级 `pointermove` 更新 `contextRailWidth` → CSS 变量 `--context-rail-width` 更新 Grid 列宽 → `pointerup` 写入 `localStorage`。
+- 验证与边界：新增源码布局回归测试，WebUI 106 项 Node 测试、Vite production build 和 `git diff --check` 通过。手机端继续隐藏手柄；本地预览缺少已登录会话，因此本轮未执行带真实职位上下文的浏览器拖拽实测，也未部署生产。

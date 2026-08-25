@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-from src.platform_access.contracts import PlatformRole, PlatformUser, SessionResolution
+from src.platform_access.contracts import PLATFORM_ADMIN_EMAIL, PlatformRole, PlatformUser, SessionResolution
 from src.platform_access.email_delivery import EmailDeliveryError, ResendEmailDelivery
 from src.platform_access.navigation_config import normalize_route_module_settings, route_modules_for_ui
 from src.platform_access.repository import PlatformAccessRepository
@@ -56,18 +56,22 @@ class PlatformAccessService:
         self._absolute_session_ttl_hours = absolute_session_ttl_hours
 
     def requires_bootstrap(self) -> bool:
-        """返回系统是否尚未存在有效用户。"""
+        """返回系统是否尚未存在固定管理员。"""
 
-        return not self._repository.has_active_users()
+        return not self._repository.has_active_admin()
 
     def send_registration_code(self, *, email: str, display_name: str, password: str, bootstrap: bool = False) -> dict[str, object]:
         """保存密码散列至一次性挑战并投递验证码，注册前不创建可登录账号。"""
 
+        normalized_email = normalize_email(email)
+        if bootstrap and normalized_email != PLATFORM_ADMIN_EMAIL:
+            raise ValueError(f"管理员邮箱必须是 {PLATFORM_ADMIN_EMAIL}")
+        if not bootstrap and normalized_email == PLATFORM_ADMIN_EMAIL:
+            raise ValueError("管理员专用邮箱不能注册为普通用户")
         if bootstrap and not self.requires_bootstrap():
             raise PermissionError("管理员已初始化，请使用普通注册或登录")
         if not bootstrap and self.requires_bootstrap():
             raise PermissionError("请先完成首个管理员初始化")
-        normalized_email = normalize_email(email)
         if self._repository.find_user_by_email(normalized_email) is not None:
             raise ValueError("该邮箱已注册，请直接登录或重置密码")
         purpose = "bootstrap" if bootstrap else "register"
@@ -87,6 +91,8 @@ class PlatformAccessService:
         if not password_hash:
             raise ValueError("注册会话无效，请重新获取验证码")
         if bootstrap:
+            if normalize_email(str(challenge["email"])) != PLATFORM_ADMIN_EMAIL:
+                raise ValueError(f"管理员邮箱必须是 {PLATFORM_ADMIN_EMAIL}")
             user = self._repository.create_first_admin(
                 username=f"admin-{UUID(challenge_id).hex[:20]}",
                 display_name=str(payload.get("display_name", "")),
@@ -95,6 +101,8 @@ class PlatformAccessService:
                 email_verified_at=datetime.now(UTC),
             )
         else:
+            if normalize_email(str(challenge["email"])) == PLATFORM_ADMIN_EMAIL:
+                raise ValueError("管理员专用邮箱不能注册为普通用户")
             user = self._repository.create_registered_user(
                 email=challenge["email"],
                 display_name=str(payload.get("display_name", "")),
@@ -140,6 +148,10 @@ class PlatformAccessService:
         """为旧用户名账号补充邮箱，方便后续使用统一邮箱登录。"""
 
         normalized_email = normalize_email(email)
+        if normalized_email == PLATFORM_ADMIN_EMAIL and user.role is not PlatformRole.ADMIN:
+            raise ValueError("管理员专用邮箱不能绑定到普通用户")
+        if user.role is PlatformRole.ADMIN and normalized_email != PLATFORM_ADMIN_EMAIL:
+            raise ValueError(f"管理员邮箱必须是 {PLATFORM_ADMIN_EMAIL}")
         existing = self._repository.find_user_by_email(normalized_email)
         if existing is not None and existing[0].id != user.id:
             raise ValueError("该邮箱已绑定其他账号")

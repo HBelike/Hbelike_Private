@@ -6,7 +6,8 @@ const ALLOWED_ACTIONS = new Set([
   'search_jobs',
   'get_job_detail',
   'preflight_greeting',
-  'send_greeting'
+  'send_greeting',
+  'retry_greeting_message'
 ])
 
 function postResponse(requestId, payload) {

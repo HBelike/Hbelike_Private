@@ -12,6 +12,12 @@ import AdminConsolePage from './components/AdminConsolePage.vue'
 import ManualPipelinePanel from './components/ManualPipelinePanel.vue'
 import ThemeSwitcher from './components/ThemeSwitcher.vue'
 import { decorateOpenableImages } from './image-preview.js'
+import {
+  DEFAULT_APP_ROUTE,
+  buildNavigationFallback,
+  canAccessNavigationItem,
+  normalizeAppRoute
+} from './navigation-access.js'
 
 const preview = ref(null)
 const mediaLibrary = ref({ items: [], pending_video_clips: [], summary: {} })
@@ -51,6 +57,7 @@ const isMobileViewport = ref(false)
 const uiTheme = ref(document.documentElement.dataset.uiTheme === 'green' ? 'green' : 'blue')
 const navigationModules = ref([])
 const navigationReady = ref(false)
+const navigationError = ref('')
 const accountMenuRef = ref(null)
 const accountMenuOpen = ref(false)
 const accountMenuSection = ref('')
@@ -62,7 +69,8 @@ const vOpenableImages = {
 }
 
 const accountDisplayName = computed(() => authUser.value?.display_name || authUser.value?.username || '用户')
-const accountRoleLabel = computed(() => authUser.value?.role === 'admin' ? '管理员' : (authUser.value?.role || '用户'))
+const accountIdentifier = computed(() => authUser.value?.email || '未绑定')
+const accountRoleLabel = computed(() => authUser.value?.role === 'admin' ? '管理员' : '普通用户')
 const accountInitial = computed(() => accountDisplayName.value.trim().slice(0, 1).toUpperCase() || 'U')
 const navigationModuleMap = computed(() => new Map(navigationModules.value.map((item) => [item.key, item])))
 
@@ -115,19 +123,25 @@ const pipelineTaskNames = [
   'CatTask'
 ]
 
+// 短视频蓝图仍由后端生成并供视频流水线消费，但当前不作为独立审核页面展示。
+// 后续若重新启用人工蓝图审核，只需恢复此开关，不必重建页面和数据链路。
+const isStoryboardReviewVisible = false
+
 const routeItems = [
   { path: '/review', label: '工作台', description: '公众号审核总览' },
   { path: '/review/article', label: '文章预览', description: '只读审核' },
   { path: '/review/pipeline', label: '任务流程', description: '运行状态' },
   { path: '/review/assets', label: '媒体素材', description: '图片音视频' },
   { path: '/review/history', label: '执行历史', description: '推文与素材归档' },
-  { path: '/review/storyboard', label: '短视频蓝图', description: '分镜规划' },
+  ...(isStoryboardReviewVisible
+    ? [{ path: '/review/storyboard', label: '短视频蓝图', description: '分镜规划' }]
+    : []),
   { path: '/review/prompts', label: '生成提示词', description: '文图视频' }
 ]
 
 const appNavItems = [
-  { moduleKey: 'workbench', label: '工作台', icon: '▣', path: '/review', enabled: true },
   { moduleKey: 'career_assistant', label: '求职助手', icon: '◉', path: '/career', enabled: true },
+  { moduleKey: 'workbench', label: '工作台', icon: '▣', path: '/review', enabled: true },
   { moduleKey: 'resume_assistant', label: '简历助手', icon: '✦', path: '/resume-assistant', enabled: true },
   { moduleKey: 'interview_library', label: '面经库', icon: '⌘', path: '/interviews', enabled: true },
   { moduleKey: 'job_library', label: '职位库', icon: '⌕', path: '/interviews/jobs', enabled: true },
@@ -356,23 +370,7 @@ function contentIdFromLocation() {
 }
 
 function normalizeRoute(pathname) {
-  if (!pathname || pathname === '/') return '/review'
-  if (pathname === '/login' || pathname === '/register' || pathname === '/forgot-password') return pathname
-  if (pathname === '/career') return '/career'
-  if (pathname === '/career/interview-master') return '/career/interview-master'
-  if (pathname === '/resume-assistant' || pathname.startsWith('/resume-assistant/')) return '/resume-assistant'
-  if (pathname === '/interviews/jobs') return '/interviews/jobs'
-  if (pathname === '/interviews') return '/interviews'
-  if (pathname === '/skills' || pathname.startsWith('/skills/')) return '/skills'
-  if (pathname === '/observability') return '/observability'
-  if (pathname === '/evaluations' || pathname.startsWith('/evaluations/')) return '/evaluations'
-  if (pathname === '/admin') return '/admin/modules'
-  if (['/admin/modules', '/admin/github', '/admin/prompts'].includes(pathname)) return pathname
-  if (pathname.startsWith('/admin/')) return '/admin/modules'
-  if (pathname.startsWith('/review')) {
-    return routeItems.some((item) => item.path === pathname) ? pathname : '/review'
-  }
-  return '/review'
+  return normalizeAppRoute(pathname, routeItems.map((item) => item.path))
 }
 
 function isAuthRoute(route) {
@@ -452,10 +450,8 @@ function isAppNavActive(item) {
 }
 
 function canAccessNavItem(item) {
-  if (!item.enabled) return false
-  if (item.requiredRole && authUser.value?.role !== item.requiredRole) return false
   const configuredModule = navigationModuleMap.value.get(item.moduleKey)
-  return configuredModule ? Boolean(configuredModule.accessible) : false
+  return canAccessNavigationItem(item, configuredModule, authUser.value?.role)
 }
 
 function navItemForRoute(route) {
@@ -492,27 +488,29 @@ function applyNavigationConfig(items) {
 }
 
 function applyNavigationFallback() {
-  const isAdmin = authUser.value?.role === 'admin'
-  navigationModules.value = appNavItems.map((item) => ({
-    key: item.moduleKey,
-    enabled: item.moduleKey === 'admin_console',
-    accessible: isAdmin && item.moduleKey === 'admin_console'
-  }))
+  navigationModules.value = buildNavigationFallback(appNavItems, authUser.value?.role)
   ensureCurrentRouteAccess()
 }
 
 async function loadNavigationConfig() {
   navigationReady.value = false
+  navigationError.value = ''
   try {
     const response = await fetch('/api/navigation/modules', { credentials: 'include', cache: 'no-store' })
     if (!response.ok) throw new Error('无法读取路由模块配置')
     applyNavigationConfig((await response.json()).items)
   } catch {
-    // 配置读取失败时默认拒绝业务模块，仅为管理员保留恢复入口。
+    navigationError.value = '无法读取可用模块，请检查网络后重试。'
+    // 读取失败时保持拒绝访问；错误状态会提供明确提示与重试入口。
     applyNavigationFallback()
   } finally {
     navigationReady.value = true
   }
+}
+
+async function retryNavigationConfig() {
+  await loadNavigationConfig()
+  if (!navigationError.value) await refreshCurrentPage()
 }
 
 async function loadCurrentUser() {
@@ -534,7 +532,7 @@ async function loadCurrentUser() {
 async function handleAuthenticated(user) {
   authUser.value = user
   authReady.value = true
-  const nextPath = isAuthRoute(currentRoute.value) ? '/review' : currentRoute.value
+  const nextPath = isAuthRoute(currentRoute.value) ? DEFAULT_APP_ROUTE : currentRoute.value
   window.history.replaceState({}, '', nextPath)
   currentRoute.value = nextPath
   await loadNavigationConfig()
@@ -550,6 +548,7 @@ async function logoutPlatform() {
     authUser.value = null
     navigationModules.value = []
     navigationReady.value = false
+    navigationError.value = ''
     window.history.replaceState({}, '', '/login')
     currentRoute.value = '/login'
   }
@@ -1185,7 +1184,7 @@ onMounted(async () => {
   document.addEventListener('pointerdown', handleAccountMenuPointerDown)
   syncMobileViewport()
   if (window.location.pathname === '/' && authUser.value) {
-    window.history.replaceState({}, '', '/review')
+    window.history.replaceState({}, '', DEFAULT_APP_ROUTE)
   }
   await loadCurrentUser()
   if (!authUser.value) {
@@ -1196,8 +1195,8 @@ onMounted(async () => {
     return
   }
   if (window.location.pathname === '/') {
-    window.history.replaceState({}, '', '/review')
-    currentRoute.value = '/review'
+    window.history.replaceState({}, '', DEFAULT_APP_ROUTE)
+    currentRoute.value = DEFAULT_APP_ROUTE
   }
   if (window.location.pathname === '/admin') {
     window.history.replaceState({}, '', '/admin/modules')
@@ -1231,6 +1230,13 @@ onBeforeUnmount(() => {
   <section v-else-if="!navigationReady" class="platform-route-loading" aria-live="polite">
     <span aria-hidden="true"></span>
     <p>正在加载可用模块…</p>
+  </section>
+
+  <section v-else-if="navigationError" class="route-access-state" role="alert">
+    <span aria-hidden="true">!</span>
+    <h2>无法加载可用模块</h2>
+    <p>{{ navigationError }}</p>
+    <button type="button" class="secondary-button" @click="retryNavigationConfig">重新加载模块</button>
   </section>
 
   <BrowserInterviewMasterPage v-else-if="currentRoute === '/career/interview-master'" />
@@ -1338,7 +1344,8 @@ onBeforeUnmount(() => {
               <i aria-hidden="true"></i>
             </button>
             <div v-if="accountMenuSection === 'profile'" class="account-menu-panel account-profile-panel">
-              <div><span>账户</span><strong>{{ accountDisplayName }}</strong></div>
+              <div><span>名称</span><strong>{{ accountDisplayName }}</strong></div>
+              <div class="account-identifier-row"><span>账号</span><strong :title="accountIdentifier">{{ accountIdentifier }}</strong></div>
               <div><span>角色</span><strong>{{ accountRoleLabel }}</strong></div>
               <button type="button" class="account-logout" @click="logoutPlatform">退出登录</button>
             </div>
@@ -1682,7 +1689,7 @@ onBeforeUnmount(() => {
           </article>
         </section>
 
-        <section class="storyboard-home" role="button" tabindex="0" @click="navigateTo('/review/storyboard')" @keydown.enter.prevent="navigateTo('/review/storyboard')">
+        <section v-if="isStoryboardReviewVisible" class="storyboard-home" role="button" tabindex="0" @click="navigateTo('/review/storyboard')" @keydown.enter.prevent="navigateTo('/review/storyboard')">
           <div>
             <h2>短视频蓝图</h2>
             <p>查看 7 段分镜、递进口播和视频提示词</p>

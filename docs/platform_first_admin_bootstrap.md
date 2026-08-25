@@ -4,7 +4,7 @@
 
 公网首发阶段不允许通过浏览器创建首个管理员。因为管理员尚不存在时，任何可访问登录页的人都可能抢先完成邮箱 bootstrap。生产环境通过服务器本机的交互式终端完成这项一次性操作；完成后，常规登录、会话续期和密码找回仍沿用既有账户模块。
 
-本方案不新增数据库迁移，也不存储明文密码、API Key 或数据库连接串。
+管理员邮箱固定为 `2963613812@qq.com`。迁移 `20260825_20` 同时保证角色只允许 `admin/user`、全平台最多一个管理员，并禁止其他邮箱持有 `admin`。系统不存储明文密码、API Key 或数据库连接串。
 
 ## 调用链
 
@@ -19,7 +19,7 @@
   -> 浏览器使用初始化邮箱和密码登录
 ```
 
-`pg_advisory_xact_lock` 在数据库事务结束时自动释放。它将“是否已有活动用户”的检查与管理员/Actor 写入放进同一个跨进程临界区，避免两个 SSH 终端或旧 HTTP 路径并发时创建多个首管理员。
+`pg_advisory_xact_lock` 在数据库事务结束时自动释放。它将“是否已有活动管理员”的检查与管理员/Actor 写入放进同一个跨进程临界区，避免两个 SSH 终端或旧 HTTP 路径并发时创建多个管理员。数据库已有普通用户但尚无管理员时，仍可通过受控 CLI 创建固定管理员。
 
 ## 生产开关
 
@@ -28,7 +28,6 @@
 ```dotenv
 PLATFORM_CLI_BOOTSTRAP_ONLY=true
 PLATFORM_AUTH_REQUIRED=true
-PLATFORM_CLOSED_OPERATOR_MODE=true
 PLATFORM_PUBLIC_REGISTRATION_ENABLED=false
 ```
 
@@ -50,7 +49,7 @@ docker compose --env-file .env.production -f docker-compose.production.yml \
   exec -it career-api python scripts/bootstrap_first_admin.py
 ```
 
-脚本会依次在 TTY 中读取登录邮箱、显示名称、密码、密码确认和 `INITIALIZE` 二次确认。密码不作为命令行参数，不会显示、写入 shell history、日志或数据库明文列。成功时只输出：
+脚本固定使用 `2963613812@qq.com`，并在 TTY 中读取显示名称、密码、密码确认和 `INITIALIZE` 二次确认。密码不作为命令行参数，不会显示、写入 shell history、日志或数据库明文列。成功时只输出：
 
 ```text
 first_admin_bootstrap_ok role=admin

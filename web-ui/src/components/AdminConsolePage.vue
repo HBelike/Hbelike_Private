@@ -14,7 +14,7 @@ const adminSections = [
   {
     path: '/admin/modules',
     label: '可见模块',
-    description: '控制用户登录后可以看到和直接访问的顶级模块。'
+    description: '控制普通用户登录后可以看到和直接访问的顶级模块。'
   },
   {
     path: '/admin/github',
@@ -56,7 +56,7 @@ const form = reactive({
 
 const sectionStatus = computed(() => {
   if (activeSection.value.path === '/admin/modules') {
-    return `${enabledRouteModuleCount.value}/${routeModules.value.length || 8} 已启用`
+    return `${enabledRouteModuleCount.value}/${routeModules.value.length || 9} 已启用`
   }
   return version.value ? `当前版本 v${version.value}` : '尚未保存版本'
 })
@@ -260,7 +260,7 @@ async function responseError(response, fallback) {
       <div class="admin-card-heading">
         <div>
           <h3>用户可见模块</h3>
-          <p>角色权限优先于模块开关；管理员专属模块不会向普通用户开放。</p>
+          <p>模块开关只影响普通用户；平台管理员始终可以访问全部页面。</p>
         </div>
       </div>
 
@@ -287,7 +287,7 @@ async function responseError(response, fallback) {
       </div>
 
       <footer class="admin-route-footer">
-        <p>保存后，普通用户的导航和直接地址访问会同步更新。</p>
+        <p>保存后，普通用户的导航和直接地址访问会同步更新，不影响管理员当前访问。</p>
         <button class="refresh-button" type="button" :disabled="routeConfigLoading || routeConfigSaving" @click="saveRouteModules">
           {{ routeConfigSaving ? '正在保存…' : '保存模块配置' }}
         </button>

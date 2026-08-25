@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import sys
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
@@ -22,23 +23,24 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.platform_access.bootstrap import FirstAdminBootstrapError, bootstrap_first_admin
-from src.platform_access.contracts import PlatformRole, PlatformUser
+from src.platform_access.contracts import PLATFORM_ADMIN_EMAIL, PlatformRole, PlatformUser
+from src.platform_access.service import PlatformAccessService
 from src.platform_access.web import router
 
 
 class FakeFirstAdminRepository:
     """内存仓储替身，只记录初始化用例的输入而不持久化敏感信息。"""
 
-    def __init__(self, *, active: bool = False, existing_email: bool = False, deny_create: bool = False) -> None:
-        self.active = active
+    def __init__(self, *, active_admin: bool = False, existing_email: bool = False, deny_create: bool = False) -> None:
+        self.active_admin = active_admin
         self.existing_email = existing_email
         self.deny_create = deny_create
         self.created: dict[str, object] | None = None
 
-    def has_active_users(self) -> bool:
-        """模拟平台是否已有可登录用户。"""
+    def has_active_admin(self) -> bool:
+        """模拟平台是否已有可登录管理员。"""
 
-        return self.active
+        return self.active_admin
 
     def find_user_by_email(self, email: str) -> tuple[PlatformUser, str] | None:
         """模拟邮箱是否已绑定历史账号。"""
@@ -74,7 +76,7 @@ def _fake_user() -> PlatformUser:
         organization_id=UUID("22222222-2222-2222-2222-222222222222"),
         username="admin-test",
         display_name="部署验证管理员",
-        email="deployment-check@example.invalid",
+        email=PLATFORM_ADMIN_EMAIL,
         email_verified_at=now,
         role=PlatformRole.ADMIN,
         is_active=True,
@@ -86,6 +88,7 @@ def main() -> None:
     """验证正常、拒绝与生产 Web 隔离三条安全路径。"""
 
     _verify_bootstrap_use_case()
+    _verify_reserved_admin_email_cannot_register_as_user()
     _verify_cli_only_web_guard()
     print("platform_first_admin_bootstrap_ok")
 
@@ -96,26 +99,26 @@ def _verify_bootstrap_use_case() -> None:
     repository = FakeFirstAdminRepository()
     user = bootstrap_first_admin(
         repository,
-        email="Admin@Example.com",
+        email=PLATFORM_ADMIN_EMAIL.upper(),
         display_name="部署管理员",
         password="safe-password-123",
     )
     assert user.role is PlatformRole.ADMIN
     assert repository.created is not None
-    assert repository.created["email"] == "admin@example.com"
+    assert repository.created["email"] == PLATFORM_ADMIN_EMAIL
     assert str(repository.created["username"]).startswith("admin-")
     assert str(repository.created["password_hash"]).startswith("scrypt$")
     assert repository.created["password_hash"] != "safe-password-123"
 
     for rejected_repository in (
-        FakeFirstAdminRepository(active=True),
+        FakeFirstAdminRepository(active_admin=True),
         FakeFirstAdminRepository(existing_email=True),
         FakeFirstAdminRepository(deny_create=True),
     ):
         try:
             bootstrap_first_admin(
                 rejected_repository,
-                email="admin@example.com",
+                email=PLATFORM_ADMIN_EMAIL,
                 display_name="部署管理员",
                 password="safe-password-123",
             )
@@ -123,6 +126,47 @@ def _verify_bootstrap_use_case() -> None:
             pass
         else:
             raise AssertionError("首个管理员拒绝路径未生效")
+
+    try:
+        bootstrap_first_admin(
+            FakeFirstAdminRepository(),
+            email="other@example.com",
+            display_name="错误管理员",
+            password="safe-password-123",
+        )
+    except FirstAdminBootstrapError as exc:
+        assert PLATFORM_ADMIN_EMAIL in str(exc)
+    else:
+        raise AssertionError("非固定邮箱不应被创建为管理员")
+
+
+def _verify_reserved_admin_email_cannot_register_as_user() -> None:
+    """固定管理员邮箱不能通过普通注册链路占用为 user。"""
+
+    repository = FakeFirstAdminRepository(active_admin=True)
+    service = PlatformAccessService(repository)
+    try:
+        service.send_registration_code(
+            email=PLATFORM_ADMIN_EMAIL,
+            display_name="错误普通用户",
+            password="safe-password-123",
+        )
+    except ValueError as exc:
+        assert "管理员专用" in str(exc)
+    else:
+        raise AssertionError("管理员专用邮箱不应进入普通注册链路")
+
+    ordinary_user = replace(
+        _fake_user(),
+        email="ordinary@example.com",
+        role=PlatformRole.USER,
+    )
+    try:
+        service.send_bind_email_code(user=ordinary_user, email=PLATFORM_ADMIN_EMAIL)
+    except ValueError as exc:
+        assert "管理员专用" in str(exc)
+    else:
+        raise AssertionError("管理员专用邮箱不应绑定到普通用户")
 
 
 def _verify_cli_only_web_guard() -> None:

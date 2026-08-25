@@ -9,18 +9,18 @@ from src.platform_access.contracts import PlatformRole
 
 ROUTE_MODULE_DEFINITIONS: tuple[dict[str, Any], ...] = (
     {
-        "key": "workbench",
-        "label": "工作台",
-        "path": "/review",
-        "description": "公众号内容审核与媒体工作流",
-        "admin_only": False,
-        "locked": False,
-    },
-    {
         "key": "career_assistant",
         "label": "求职助手",
         "path": "/career",
         "description": "简历匹配、岗位分析与职业咨询",
+        "admin_only": False,
+        "locked": False,
+    },
+    {
+        "key": "workbench",
+        "label": "工作台",
+        "path": "/review",
+        "description": "公众号内容审核与媒体工作流",
         "admin_only": False,
         "locked": False,
     },
@@ -107,7 +107,7 @@ def normalize_route_module_settings(value: dict[str, object] | None) -> dict[str
 
 
 def route_modules_for_ui(value: dict[str, object] | None, role: PlatformRole) -> list[dict[str, object]]:
-    """返回 UI 可直接渲染的有序模块列表，并计算当前角色是否可访问。"""
+    """返回 UI 可直接渲染的有序模块列表；管理员不受展示开关限制。"""
 
     settings = normalize_route_module_settings(value)
     is_admin = role.allows(PlatformRole.ADMIN)
@@ -115,7 +115,9 @@ def route_modules_for_ui(value: dict[str, object] | None, role: PlatformRole) ->
         {
             **definition,
             "enabled": settings[str(definition["key"])],
-            "accessible": settings[str(definition["key"])] and (is_admin or not definition["admin_only"]),
+            "accessible": is_admin or (
+                settings[str(definition["key"])] and not definition["admin_only"]
+            ),
         }
         for definition in ROUTE_MODULE_DEFINITIONS
     ]
