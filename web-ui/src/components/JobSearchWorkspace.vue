@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { JobLibraryBridgeError, jobLibraryBridge } from '../job-library-bridge.js'
 import {
   normalizeBossExtensionConnection,
@@ -10,6 +10,13 @@ import {
   normalizeGreetingLimit,
   toggleGreetingJob
 } from '../career-greeting-preview.js'
+import {
+  beginSelectionIntent,
+  cancelSelectionIntent,
+  createSelectionIntentState,
+  isCurrentSelectionIntent,
+  resetSelectionIntents
+} from '../job-search-multi-selection.js'
 import {
   DEFAULT_JOB_CITY,
   mergeJobCityCatalog,
@@ -55,6 +62,8 @@ const searchError = ref('')
 const detailError = ref('')
 const selectedJobs = ref([])
 const multiSelectionError = ref('')
+const selectionLoadingKeys = ref([])
+const selectionErrors = ref({})
 const bridgeStatus = ref('checking')
 const bridgeVersion = ref('')
 const installDialogOpen = ref(false)
@@ -66,6 +75,8 @@ const hotCities = ref(normalizeHotJobCities())
 const cityLoading = ref(false)
 let searchSequence = 0
 let detailSequence = 0
+let selectionClosed = false
+const selectionIntents = createSelectionIntentState()
 
 const bridgeStatusText = computed(() => ({
   checking: '正在连接助手',
@@ -123,16 +134,96 @@ function isJobInSelection(job) {
   return selectedJobs.value.some((item) => greetingJobKey(item) === key)
 }
 
-function toggleSelectedJob() {
-  if (!props.multiSelectionMode || !selectedJob.value?.description) return
+function removeSelectedJob(job) {
   const result = toggleGreetingJob(
     selectedJobs.value,
-    selectedJob.value,
+    job,
     normalizedSelectionLimit.value
   )
   selectedJobs.value = result.jobs
   multiSelectionError.value = result.error
   publishSelectionList()
+}
+
+function isSelectionLoading(job) {
+  return selectionLoadingKeys.value.includes(greetingJobKey(job))
+}
+
+function selectionError(job) {
+  return selectionErrors.value[greetingJobKey(job)] || ''
+}
+
+function setSelectionLoading(key, loading) {
+  selectionLoadingKeys.value = loading
+    ? [...new Set([...selectionLoadingKeys.value, key])]
+    : selectionLoadingKeys.value.filter((item) => item !== key)
+}
+
+function clearSelectionError(key) {
+  const next = { ...selectionErrors.value }
+  delete next[key]
+  selectionErrors.value = next
+}
+
+function mergeJobDetail(detail) {
+  jobs.value = jobs.value.map((item) => (
+    greetingJobKey(item) === greetingJobKey(detail) ? { ...item, ...detail } : item
+  ))
+  if (selectedJob.value && greetingJobKey(selectedJob.value) === greetingJobKey(detail)) {
+    selectedJob.value = { ...selectedJob.value, ...detail }
+  }
+}
+
+async function toggleJobFromCard(job) {
+  if (!props.multiSelectionMode) return
+  const key = greetingJobKey(job)
+  multiSelectionError.value = ''
+  clearSelectionError(key)
+
+  if (isJobInSelection(job)) {
+    cancelSelectionIntent(selectionIntents, key)
+    setSelectionLoading(key, false)
+    removeSelectedJob(job)
+    return
+  }
+  if (isSelectionLoading(job)) {
+    cancelSelectionIntent(selectionIntents, key)
+    setSelectionLoading(key, false)
+    return
+  }
+  if (selectedJobs.value.length >= normalizedSelectionLimit.value) {
+    multiSelectionError.value = `本批最多选择 ${normalizedSelectionLimit.value} 个岗位。`
+    return
+  }
+
+  const token = beginSelectionIntent(selectionIntents, key)
+  setSelectionLoading(key, true)
+  try {
+    const detail = job.description ? job : await jobLibraryBridge.getJobDetail(job)
+    if (selectionClosed || !isCurrentSelectionIntent(selectionIntents, key, token)) return
+    mergeJobDetail(detail)
+    if (isJobInSelection(detail)) return
+    const result = toggleGreetingJob(
+      selectedJobs.value,
+      detail,
+      normalizedSelectionLimit.value
+    )
+    selectedJobs.value = result.jobs
+    multiSelectionError.value = result.error
+    if (!result.error) publishSelectionList()
+  } catch (error) {
+    if (selectionClosed || !isCurrentSelectionIntent(selectionIntents, key, token)) return
+    markBridgeAttention(error)
+    selectionErrors.value = {
+      ...selectionErrors.value,
+      [key]: readableBridgeError(error, '岗位详情获取失败，请重试。')
+    }
+  } finally {
+    if (isCurrentSelectionIntent(selectionIntents, key, token)) {
+      cancelSelectionIntent(selectionIntents, key)
+      setSelectionLoading(key, false)
+    }
+  }
 }
 
 function resetJobResults() {
@@ -150,6 +241,9 @@ function resetJobResults() {
   searching.value = false
   loadingMore.value = false
   detailLoading.value = false
+  resetSelectionIntents(selectionIntents)
+  selectionLoadingKeys.value = []
+  selectionErrors.value = {}
   publishSelection(null)
 }
 
@@ -257,7 +351,7 @@ async function selectJob(job) {
     const detail = await jobLibraryBridge.getJobDetail(job)
     if (sequence !== detailSequence) return
     selectedJob.value = detail
-    jobs.value = jobs.value.map((item) => item.id === detail.id ? { ...item, ...detail } : item)
+    mergeJobDetail(detail)
     if (isJobInSelection(detail)) {
       selectedJobs.value = selectedJobs.value.map((item) => (
         greetingJobKey(item) === greetingJobKey(detail) ? detail : item
@@ -300,6 +394,11 @@ async function loadMore() {
 onMounted(() => {
   void checkBridge()
   nextTick(() => searchInput.value?.focus())
+})
+
+onBeforeUnmount(() => {
+  selectionClosed = true
+  resetSelectionIntents(selectionIntents)
 })
 </script>
 
@@ -395,16 +494,31 @@ onMounted(() => {
         </div>
 
         <div v-if="jobs.length" class="job-card-list">
-          <button
+          <article
             v-for="job in jobs"
             :key="job.id"
-            type="button"
             class="job-card"
-            :class="{ active: selectedJobId === job.id, selected: isJobInSelection(job) }"
+            :class="{ active: selectedJobId === job.id, selected: isJobInSelection(job), 'has-selection': multiSelectionMode }"
+            role="button"
+            tabindex="0"
             @click="selectJob(job)"
+            @keydown.enter.prevent="selectJob(job)"
+            @keydown.space.prevent="selectJob(job)"
           >
             <span class="card-track-node" aria-hidden="true"></span>
-            <span v-if="multiSelectionMode && isJobInSelection(job)" class="batch-selected-mark">已加入</span>
+            <button
+              v-if="multiSelectionMode"
+              type="button"
+              class="job-selection-checkbox"
+              :class="{ checked: isJobInSelection(job), loading: isSelectionLoading(job) }"
+              role="checkbox"
+              :aria-checked="isJobInSelection(job)"
+              :aria-label="`${isJobInSelection(job) ? '移除' : '选择'}岗位：${job.title}`"
+              @click.stop="toggleJobFromCard(job)"
+            >
+              <span v-if="isSelectionLoading(job)" class="button-loader" aria-hidden="true"></span>
+              <span v-else aria-hidden="true">{{ isJobInSelection(job) ? '✓' : '' }}</span>
+            </button>
             <span class="job-card-topline">
               <strong>{{ job.title }}</strong>
               <em>{{ job.salary }}</em>
@@ -419,7 +533,10 @@ onMounted(() => {
               <span class="company-name">{{ job.companyShort }}</span>
               <span class="company-location">{{ job.district || job.city }}</span>
             </span>
-          </button>
+            <span v-if="selectionError(job)" class="job-selection-error" role="alert">
+              {{ selectionError(job) }}
+            </span>
+          </article>
         </div>
 
         <button v-if="jobs.length && hasMore" type="button" class="load-more" :disabled="loadingMore" @click="loadMore">
@@ -457,17 +574,6 @@ onMounted(() => {
               <span><i aria-hidden="true"></i>详情已更新</span>
               <small>{{ detailFetchedAt || '本次会话' }}</small>
             </div>
-            <button
-              v-if="multiSelectionMode"
-              type="button"
-              class="batch-toggle-button"
-              :class="{ selected: isJobInSelection(selectedJob) }"
-              :aria-pressed="isJobInSelection(selectedJob)"
-              :disabled="detailLoading || !selectedJob.description"
-              @click="toggleSelectedJob"
-            >
-              {{ isJobInSelection(selectedJob) ? '移出本批' : '加入本批' }}
-            </button>
           </div>
         </header>
 
@@ -614,10 +720,17 @@ onMounted(() => {
 .job-card:hover { border-color: var(--job-line-strong); transform: translateY(-1px); }
 .job-card.active { border-color: var(--job-blue); box-shadow: 0 8px 22px color-mix(in srgb, var(--job-blue) 9%, transparent); }
 .job-card.selected { border-color: color-mix(in srgb, var(--job-teal) 55%, var(--job-line)); background: color-mix(in srgb, var(--job-teal) 5%, var(--job-paper)); }
+.job-card.has-selection { padding-left: 45px; }
+.job-card:focus-visible { outline: 0; border-color: var(--job-blue); box-shadow: 0 0 0 3px var(--ui-focus, rgba(8,105,216,.13)); }
 .card-track-node { position: absolute; top: 17px; bottom: 17px; left: 0; width: 3px; border-radius: 0 3px 3px 0; background: transparent; }
 .job-card.active .card-track-node { background: linear-gradient(var(--job-blue), var(--job-teal)); }
 .job-card.selected .card-track-node { background: var(--job-teal); }
-.batch-selected-mark { position: absolute; top: 8px; right: 8px; border-radius: 999px; background: #e6f7f5; color: #087d7d; padding: 3px 6px; font-size: 9px; font-weight: 850; }
+.job-selection-checkbox { position: absolute; z-index: 2; top: 14px; left: 13px; display: grid; width: 22px; height: 22px; place-items: center; border: 1px solid var(--job-line-strong); border-radius: 7px; background: var(--job-paper); color: #fff; padding: 0; cursor: pointer; }
+.job-selection-checkbox:hover,.job-selection-checkbox:focus-visible { border-color: var(--job-blue); outline: 0; box-shadow: 0 0 0 3px var(--ui-focus, rgba(8,105,216,.13)); }
+.job-selection-checkbox.checked { border-color: var(--job-teal); background: var(--job-teal); font-size: 13px; font-weight: 900; }
+.job-selection-checkbox.loading { cursor: wait; }
+.job-selection-checkbox .button-loader { width: 11px; height: 11px; border-width: 2px; border-color: color-mix(in srgb, var(--job-blue) 30%, transparent); border-top-color: var(--job-blue); }
+.job-selection-error { border-radius: 7px; background: #fff3f4; color: #a33b46; padding: 6px 8px; font-size: 10px; line-height: 1.45; }
 .job-card-topline { display: flex; min-width: 0; align-items: start; justify-content: space-between; gap: 12px; }
 .job-card.selected .job-card-topline { padding-right: 38px; }
 .job-card-topline strong { min-width: 0; overflow: hidden; font-size: 15px; font-weight: 750; letter-spacing: -.015em; text-overflow: ellipsis; white-space: nowrap; }
@@ -637,10 +750,6 @@ onMounted(() => {
 .job-detail { position: relative; min-width: 0; overflow: hidden; background: var(--job-paper); transition: opacity .18s ease; }
 .job-detail.refreshing > :not(.detail-refreshing) { opacity: .66; }
 .detail-hero-actions { display: flex; flex: none; align-items: center; gap: 12px; }
-.batch-toggle-button { min-width: 98px; min-height: 36px; border: 1px solid var(--job-blue); border-radius: 9px; background: var(--job-blue); color: #fff; padding: 7px 12px; cursor: pointer; font-size: 11px; font-weight: 850; }
-.batch-toggle-button:hover:not(:disabled),.batch-toggle-button:focus-visible { background: var(--ui-accent-hover, #0058c7); outline: 0; box-shadow: 0 0 0 3px var(--ui-focus, rgba(8,105,216,.13)); }
-.batch-toggle-button.selected { border-color: color-mix(in srgb, var(--job-teal) 55%, var(--job-line)); background: #edf9f7; color: #087d7d; }
-.batch-toggle-button:disabled { cursor: not-allowed; opacity: .48; }
 .detail-refreshing { position: absolute; z-index: 5; top: 14px; right: 20px; display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--job-line); border-radius: 999px; background: var(--job-paper); color: var(--job-blue-ink); padding: 6px 10px; font-size: 10px; font-weight: 750; box-shadow: 0 8px 22px rgba(20, 33, 61, .08); }
 .detail-hero { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 24px; border-bottom: 1px solid var(--job-line); padding: 22px 28px 18px; }
 .detail-title-block { position: relative; min-width: 0; }
