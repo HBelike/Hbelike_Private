@@ -33,6 +33,29 @@ class ChatMessage:
 
 
 @dataclass(frozen=True)
+class CompletionRequestOptions:
+    """仅覆盖当前一次文本请求的生成参数，不改变共享客户端默认值。"""
+
+    temperature: float = 0.25
+    max_tokens: int | None = None
+    thinking: bool | None = None
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.temperature, bool)
+            or not isinstance(self.temperature, int | float)
+            or not 0 <= float(self.temperature) <= 2
+        ):
+            raise ValueError("模型温度必须在 0 到 2 之间")
+        if self.max_tokens is not None and (
+            isinstance(self.max_tokens, bool)
+            or not isinstance(self.max_tokens, int)
+            or self.max_tokens <= 0
+        ):
+            raise ValueError("单次请求最大输出 Token 数必须大于 0")
+
+
+@dataclass(frozen=True)
 class FunctionToolDefinition:
     """一项可暴露给 OpenAI-compatible 模型的受控函数定义。"""
 
@@ -168,6 +191,8 @@ class OpenAICompatibleChatClient:
         messages: list[ChatMessage],
         *,
         api_key: str | None = None,
+        options: CompletionRequestOptions | None = None,
+        operation: str = "job_assessment",
     ) -> str:
         """请求 JSON Object 输出；调用方仍须执行领域 Schema 校验。"""
 
@@ -181,8 +206,10 @@ class OpenAICompatibleChatClient:
             model_id=profile.model_id,
             api_base_url=profile.api_base_url,
         )
+        request_options = options or CompletionRequestOptions()
+        operation_name = operation.strip() or "json"
         return trace_operation(
-            run_name="career.job_assessment.completion",
+            run_name=f"career.{operation_name}.completion",
             run_type="llm",
             execute=lambda: self._request_completion(
                 target,
@@ -190,6 +217,7 @@ class OpenAICompatibleChatClient:
                 messages,
                 max_tokens=self._completion_max_tokens,
                 response_format={"type": "json_object"},
+                options=request_options,
             ),
             summarize=lambda result: {
                 "output_characters": len(result),
@@ -198,9 +226,9 @@ class OpenAICompatibleChatClient:
             metadata={
                 **self._trace_metadata(target, streaming=False),
                 **self._trace_message_metrics(messages),
-                "operation": "job_assessment",
+                "operation": operation_name,
             },
-            tags=("career", "job-assessment", "privacy:metadata-only"),
+            tags=("career", operation_name.replace("_", "-"), "privacy:metadata-only"),
         )
 
     def complete_with_tools(
@@ -386,6 +414,7 @@ class OpenAICompatibleChatClient:
         *,
         max_tokens: int,
         response_format: dict[str, object] | None = None,
+        options: CompletionRequestOptions | None = None,
     ) -> str:
         """统一发送 OpenAI-compatible ChatCompletions 请求并清洗异常。"""
 
@@ -402,6 +431,7 @@ class OpenAICompatibleChatClient:
                     messages,
                     max_tokens=max_tokens,
                     response_format=response_format,
+                    options=options,
                 ),
             )
         except httpx.TimeoutException as exc:
@@ -605,6 +635,7 @@ class OpenAICompatibleChatClient:
         tools: tuple[FunctionToolDefinition, ...] = (),
         tool_choice: str | dict[str, object] | None = None,
         response_format: dict[str, object] | None = None,
+        options: CompletionRequestOptions | None = None,
     ) -> dict[str, object]:
         """构造不包含凭证的 Chat Completions 请求体。
 
@@ -613,14 +644,15 @@ class OpenAICompatibleChatClient:
         应在未来以独立的用户可见模式开启，而不是隐式拖慢每一轮聊天。
         """
 
+        request_options = options or CompletionRequestOptions()
         payload: dict[str, object] = {
             "model": target.model_id,
             "messages": [
                 OpenAICompatibleChatClient._message_payload(message)
                 for message in messages
             ],
-            "temperature": 0.25,
-            "max_tokens": max_tokens,
+            "temperature": float(request_options.temperature),
+            "max_tokens": request_options.max_tokens or max_tokens,
         }
         if stream:
             payload["stream"] = True
@@ -639,7 +671,14 @@ class OpenAICompatibleChatClient:
             payload["tool_choice"] = tool_choice or "auto"
         if response_format is not None:
             payload["response_format"] = response_format
-        if (
+        if request_options.thinking is not None and (
+            target.provider_key == "deepseek"
+            and target.model_id.lower().startswith("deepseek-v4")
+        ):
+            payload["thinking"] = {
+                "type": "enabled" if request_options.thinking else "disabled",
+            }
+        elif (
             target.provider_key == "deepseek"
             and target.model_id.lower().startswith("deepseek-v4")
         ):
