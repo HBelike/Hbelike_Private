@@ -9,6 +9,7 @@ import CareerContextSetupDialog from './CareerContextSetupDialog.vue'
 import CareerGreetingDialog from './CareerGreetingDialog.vue'
 import CareerJobSearchDialog from './CareerJobSearchDialog.vue'
 import CareerMessageContent from './CareerMessageContent.vue'
+import CareerContextMeter from './CareerContextMeter.vue'
 import { toTargetRolePayload } from '../job-library-target-role.js'
 import { isAssessmentPending } from '../career-assessment-view.js'
 import { openBrowserInterviewMaster } from '../browser-interview-launcher.js'
@@ -113,6 +114,8 @@ const historyLoading = ref(false)
 const contextRailWidth = ref(620)
 const resizingContextRail = ref(false)
 const viewportWidth = ref(typeof window === 'undefined' ? 1600 : window.innerWidth)
+const contextUsage = ref(null)
+const contextUsageLoading = ref(false)
 
 const HISTORY_COLLAPSED_STORAGE_KEY = 'career-assistant-history-collapsed'
 const HISTORY_PAGE_SIZE_STORAGE_KEY = 'career-assistant-history-page-size'
@@ -167,6 +170,7 @@ let interviewMentionDebounceTimer = null
 let interviewMentionRequestId = 0
 let skillMentionDebounceTimer = null
 let skillMentionRequestId = 0
+let contextUsageRequestId = 0
 const turnObservationCoordinator = createTurnObservationCoordinator()
 
 function dismissError() {
@@ -518,6 +522,11 @@ const modelSelectionValue = computed(() => {
   if (selectionMode.value === 'free_quota_first' && hasReadyFreeModel.value) return 'free_quota_first'
   return selectedProfile.value?.readiness === 'ready' ? selectedProfileId.value : ''
 })
+const resolvedSelectedProfileId = computed(() => (
+  selectionMode.value === 'free_quota_first'
+    ? (readyFreeModelProfiles.value[0]?.profile.id ?? '')
+    : selectedProfileId.value
+))
 const modelLabel = computed(() =>
   selectionMode.value === 'free_quota_first' && hasReadyFreeModel.value
     ? '免费模型自动选择'
@@ -857,6 +866,33 @@ watch(
   () => [selectedConversation.value?.id, conversationContext.value?.assessment?.status],
   scheduleAssessmentPolling,
 )
+
+watch(
+  () => [selectedConversation.value?.id, resolvedSelectedProfileId.value],
+  () => void loadContextUsage(),
+)
+
+async function loadContextUsage() {
+  const conversationId = selectedConversation.value?.id
+  const profileId = resolvedSelectedProfileId.value
+  const requestId = ++contextUsageRequestId
+  if (!conversationId || !profileId) {
+    contextUsage.value = null
+    contextUsageLoading.value = false
+    return
+  }
+  contextUsageLoading.value = true
+  try {
+    const payload = await requestJson(
+      `/api/career/conversations/${conversationId}/context-usage?model_profile_id=${encodeURIComponent(profileId)}`
+    )
+    if (requestId === contextUsageRequestId) contextUsage.value = payload.context_usage ?? null
+  } catch {
+    if (requestId === contextUsageRequestId) contextUsage.value = null
+  } finally {
+    if (requestId === contextUsageRequestId) contextUsageLoading.value = false
+  }
+}
 
 function useFreeQuotaFirstSelection() {
   if (!hasReadyFreeModel.value) {
@@ -1540,11 +1576,17 @@ async function observeNextServerTurn() {
         syncObservedTurnDisplay(current)
       },
       done: (event) => {
-        if (observationIsCurrent()) payload = event
+        if (observationIsCurrent()) {
+          payload = event
+          if (event.context_usage) contextUsage.value = event.context_usage
+        }
       },
       error: (event) => {
         if (!observationIsCurrent()) return
-        if (event.assistant_message) payload = event
+        if (event.assistant_message) {
+          payload = event
+          if (event.context_usage) contextUsage.value = event.context_usage
+        }
         else streamFailure = publicTurnError(event.detail ?? event.message)
       }
     })
@@ -2137,6 +2179,7 @@ onMounted(() => {
         <div class="composer-toolbar" aria-label="会话与材料工具">
           <div class="input-tools">
             <button v-if="selectedConversation" class="chip-button active-context-chip" :class="{ active: conversationContext }" type="button" @click="openContextSetup">{{ contextButtonLabel }}</button>
+            <CareerContextMeter :usage="contextUsage" :loading="contextUsageLoading" class="composer-context-meter" />
             <select class="model-select" :value="modelSelectionValue" :disabled="!hasReadyModel" aria-label="本轮模型选择" @change="chooseModel">
               <option v-if="!hasReadyModel" value="">尚未配置可用模型</option>
               <option v-if="hasReadyFreeModel" value="free_quota_first">【免费】自动选择</option>
@@ -2403,6 +2446,7 @@ onMounted(() => {
 @keyframes career-thinking-spin { to { transform:rotate(360deg); } }
 .composer { border-top:1px solid #edf0e7; background:#fff; padding:12px 16px 14px; }.composer-toolbar { min-height:36px; flex-wrap:wrap; border-bottom:1px solid #edf0e7; padding-bottom:9px; }.input-tools,.session-tools { display:flex; min-width:0; flex-wrap:wrap; align-items:center; gap:7px; }.session-tools { margin-left:auto; justify-content:flex-end; }.job-url-row { display:grid; grid-template-columns:auto 1fr; align-items:center; gap:8px; margin:10px 0 9px; color:#738068; font-size:12px; font-weight:800; }.job-url-row input,.composer textarea { padding:10px 11px; }.composer textarea { display:block; min-height:68px; resize:vertical; }.composer-footer { margin-top:9px; }.input-tools { justify-content:flex-start; }.resume-input { display:none; }.chip-button.active { max-width:240px; overflow:hidden; background:#eaf4d4; color:#5a7d21; text-overflow:ellipsis; white-space:nowrap; }.file-clear-button { border-color:#f0d5d5; background:#fff8f8; color:#a65a5a; }.free-model-entry-button { border-style:dashed; background:#fff; color:#62812d; }.free-model-entry-button:hover { border-color:#9fbd67; background:#f5f9ed; }.model-select { width:auto; max-width:300px; padding:7px 9px; color:#65775a; font-size:12px; font-weight:700; }.send-button { min-width:88px; padding:9px 13px; }.composer-footer > small { color:#98a18e; font-size:11px; }
 .composer-toolbar{min-height:32px;flex-wrap:nowrap;gap:6px;border:1px solid var(--ui-line);border-radius:10px;background:var(--ui-surface-soft);padding:5px 6px}.composer-toolbar .input-tools,.composer-toolbar .session-tools{flex-wrap:nowrap;gap:5px}.composer-toolbar .input-tools{flex:1}.composer-toolbar :is(.chip-button,.quiet-button,.model-select){height:30px;border-color:var(--ui-line);border-radius:8px;background:var(--ui-surface);padding:5px 9px;color:var(--ui-text-secondary);font-size:11px}.composer-toolbar .active-context-chip{max-width:132px!important;flex:none;border-color:var(--ui-line-strong)!important;background:var(--ui-surface-active)!important;color:var(--ui-accent-ink)!important}.composer-toolbar .model-select{min-width:132px;max-width:230px;flex:1 1 164px}.composer-toolbar .free-model-entry-button{flex:none;border-style:solid;background:var(--ui-surface);color:var(--ui-accent-ink)}.composer-toolbar .model-manager-button{flex:none}.conversation-action-options button{min-width:0;padding-right:6px;padding-left:6px}
+.composer-context-meter{flex:none}
 @media(max-width:640px){.composer-toolbar{flex-wrap:wrap}.composer-toolbar .input-tools,.composer-toolbar .session-tools{width:100%;flex-wrap:wrap}.composer-toolbar .model-select{max-width:100%;flex:1 1 150px}}
 .composer-input-shell { --composer-skill-ink: #0869d8; --composer-skill-wash: #eaf3ff; --composer-interview-ink: #b45309; --composer-interview-wash: #fff1dc; position:relative; margin-top:10px; }
 .composer-highlight-layer,.composer-input-shell textarea { box-sizing:border-box; width:100%; min-height:68px; padding:10px 11px; font:inherit; font-size:13px; line-height:1.6; letter-spacing:normal; overflow-wrap:break-word; tab-size:4; white-space:pre-wrap; word-break:break-word; }
