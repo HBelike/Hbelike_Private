@@ -22,6 +22,7 @@ from src.career_assistant.persistence.model_profile_repository import (
 from src.career_assistant.persistence.model_usage_repository import (
     CareerModelUsageRepository,
 )
+from src.career_assistant.persistence.memory_repository import CareerMemoryRepository
 from src.career_assistant.persistence.job_assessment_repository import (
     CareerJobAssessmentRepository,
     JobAssessmentRecord,
@@ -31,6 +32,8 @@ from src.career_assistant.persistence.records import (
     AgentTurnRecord,
     AgentTurnStatus,
     ConversationRecord,
+    CareerMemoryItemRecord,
+    CareerSpaceRecord,
     MessageRecord,
     MessageRole,
     SessionSummaryRecord,
@@ -60,6 +63,9 @@ __all__ = [
     "AgentTurnRecord",
     "AgentTurnStatus",
     "ConversationRecord",
+    "CareerMemoryItemRecord",
+    "CareerSpaceRecord",
+    "CareerMemoryRepository",
     "MessageRecord",
     "MessageRole",
     "SessionSummaryRecord",

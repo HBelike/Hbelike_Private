@@ -45,7 +45,7 @@ class CareerModelUsageRepository:
                       :resolved_profile_id, :resolved_provider_key,
                       :resolved_model_id, 'started'
                     )
-                    ON CONFLICT (turn_id, operation_kind) DO UPDATE
+                    ON CONFLICT (turn_id, operation_kind) WHERE turn_id IS NOT NULL DO UPDATE
                     SET turn_id = EXCLUDED.turn_id
                     RETURNING id
                     """,

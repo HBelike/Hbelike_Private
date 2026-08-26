@@ -247,6 +247,7 @@ class CreateConversationRequest(BaseModel):
     title: str = Field(min_length=1, max_length=160)
     candidate_profile_id: UUID | None = None
     target_role_profile_id: UUID | None = None
+    career_space_id: UUID | None = None
 
 
 class CreateCandidateProfileRequest(BaseModel):
@@ -1182,11 +1183,19 @@ def create_conversation(
         services = None
         agent_loop = CareerAgentLoop(read_services.conversation_repository)
 
-    conversation = agent_loop.open_conversation(
-        actor.organization_id,
-        actor.actor_id,
-        request_body.title,
-    )
+    if request_body.career_space_id is None:
+        conversation = agent_loop.open_conversation(
+            actor.organization_id,
+            actor.actor_id,
+            request_body.title,
+        )
+    else:
+        conversation = agent_loop.open_conversation(
+            actor.organization_id,
+            actor.actor_id,
+            request_body.title,
+            request_body.career_space_id,
+        )
     context = None
     if services is not None:
         try:
@@ -1243,9 +1252,15 @@ def get_conversation(
         actor.actor_id,
         conversation_id,
     )
-    turn_limit = CareerTurnJobRepository(read_services.database).get_turn_limit(
-        actor.actor_id,
-        conversation_id,
+    count_successful_turns = getattr(
+        read_services.conversation_repository,
+        "count_successful_turns",
+        None,
+    )
+    successful_turns = (
+        count_successful_turns(actor.actor_id, conversation_id)
+        if callable(count_successful_turns)
+        else 0
     )
     context = read_services.context_repository.get_conversation_context(
         actor.actor_id,
@@ -1277,10 +1292,10 @@ def get_conversation(
         "last_model_selection": _model_selection_payload(last_model_selection),
         "latest_turn": _turn_payload(latest_turn) if latest_turn is not None else None,
         "turn_limit": {
-            "successful_turns": turn_limit.successful_turns,
-            "remaining_turns": turn_limit.remaining_turns,
-            "max_turns": turn_limit.max_turns,
-            "reached": turn_limit.reached,
+            "successful_turns": successful_turns,
+            "remaining_turns": max(0, 30 - successful_turns),
+            "max_turns": 30,
+            "reached": successful_turns >= 30,
         },
         "context": (
             _conversation_context_payload(
@@ -3547,6 +3562,7 @@ def _conversation_payload(conversation) -> dict[str, object]:
         "id": str(conversation.id),
         "title": conversation.title,
         "status": conversation.status,
+        "career_space_id": str(conversation.career_space_id) if conversation.career_space_id else None,
         "created_at": conversation.created_at.isoformat(),
         "updated_at": conversation.updated_at.isoformat(),
         "archived_at": conversation.archived_at.isoformat() if conversation.archived_at else None,

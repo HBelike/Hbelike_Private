@@ -41,6 +41,41 @@ class ConversationRecord:
     created_at: datetime
     updated_at: datetime
     archived_at: datetime | None
+    career_space_id: UUID | None = None
+
+
+@dataclass(frozen=True)
+class CareerSpaceRecord:
+    id: UUID
+    organization_id: UUID
+    actor_id: UUID
+    name: str
+    normalized_name: str
+    is_default: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True)
+class CareerMemoryItemRecord:
+    id: UUID
+    organization_id: UUID
+    actor_id: UUID
+    memory_type: str
+    normalized_value: dict[str, object]
+    display_text: str
+    source_kind: str
+    status: str
+    valid_from: datetime
+    created_at: datetime
+    updated_at: datetime
+    career_space_id: UUID | None = None
+    source_message_id: UUID | None = None
+    source_conversation_id: UUID | None = None
+    candidate_profile_id: UUID | None = None
+    candidate_profile_version: int | None = None
+    supersedes_memory_id: UUID | None = None
+    valid_to: datetime | None = None
 
 
 @dataclass(frozen=True)
