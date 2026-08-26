@@ -10,6 +10,7 @@ import CareerGreetingDialog from './CareerGreetingDialog.vue'
 import CareerJobSearchDialog from './CareerJobSearchDialog.vue'
 import CareerMessageContent from './CareerMessageContent.vue'
 import CareerContextMeter from './CareerContextMeter.vue'
+import CareerMemoryUsageDrawer from './CareerMemoryUsageDrawer.vue'
 import { toTargetRolePayload } from '../job-library-target-role.js'
 import { isAssessmentPending } from '../career-assessment-view.js'
 import { openBrowserInterviewMaster } from '../browser-interview-launcher.js'
@@ -47,6 +48,8 @@ import {
   pageRequestUrl,
   resolveHistoryPageSize
 } from '../career-history-pagination.js'
+
+const emit = defineEmits(['navigate'])
 
 const conversations = ref([])
 const candidateProfiles = ref([])
@@ -121,6 +124,9 @@ const viewportWidth = ref(typeof window === 'undefined' ? 1600 : window.innerWid
 const contextUsage = ref(null)
 const contextUsageLoading = ref(false)
 const turnLimit = ref(normalizeTurnLimit())
+const memoryUsageDrawerOpen = ref(false)
+const memoryUsageDrawerLoading = ref(false)
+const memoryUsageItems = ref([])
 
 const HISTORY_COLLAPSED_STORAGE_KEY = 'career-assistant-history-collapsed'
 const HISTORY_PAGE_SIZE_STORAGE_KEY = 'career-assistant-history-page-size'
@@ -1121,7 +1127,10 @@ async function createConversation({
       body: JSON.stringify({
         title,
         candidate_profile_id: candidateProfileId || null,
-        target_role_profile_id: targetRoleProfileId || null
+        target_role_profile_id: targetRoleProfileId || null,
+        career_space_id: selectedConversation.value?.career_space_id
+          || window.localStorage.getItem('career-selected-space-id')
+          || null
       })
     })
     historyPage.value = 1
@@ -1786,13 +1795,14 @@ function startConversationDelete(conversationId) {
   deletingConversationId.value = conversationId
 }
 
-async function deleteConversation(conversation) {
+async function deleteConversation(conversation, forgetDerivedMemories = false) {
   if (conversationActionLoadingId.value || savingJobSearch.value) return
   resetJobSearch()
   conversationActionLoadingId.value = conversation.id
   errorMessage.value = ''
   try {
-    await requestJson(`/api/career/conversations/${conversation.id}`, { method: 'DELETE' })
+    const suffix = forgetDerivedMemories ? '?forget_derived_memories=true' : ''
+    const result = await requestJson(`/api/career/conversations/${conversation.id}${suffix}`, { method: 'DELETE' })
     conversations.value = conversations.value.filter((item) => item.id !== conversation.id)
     historyTotal.value = Math.max(0, historyTotal.value - 1)
     historyPage.value = Math.min(historyPage.value, historyTotalPages.value)
@@ -1806,13 +1816,30 @@ async function deleteConversation(conversation) {
       resetConversationDraft()
       useFreeQuotaFirstSelection()
     }
-    feedback.value = '会话及其历史记录已永久删除。'
+    feedback.value = forgetDerivedMemories
+      ? `会话已删除，并遗忘 ${result.forgotten_memory_count || 0} 条由本对话产生的求职记忆。`
+      : '会话及其历史记录已永久删除，长期求职记忆已保留。'
     closeConversationActions()
     void loadConversationPage(historyPage.value)
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '会话删除失败'
   } finally {
     conversationActionLoadingId.value = ''
+  }
+}
+
+async function openMemoryUsageDrawer(turnId) {
+  if (!turnId) return
+  memoryUsageDrawerOpen.value = true
+  memoryUsageDrawerLoading.value = true
+  memoryUsageItems.value = []
+  try {
+    const payload = await requestJson(`/api/career/turns/${turnId}/memory-usages`)
+    memoryUsageItems.value = payload.items || []
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '回答来源读取失败'
+  } finally {
+    memoryUsageDrawerLoading.value = false
   }
 }
 
@@ -2089,11 +2116,14 @@ onMounted(() => {
             </template>
 
             <template v-else-if="deletingConversationId === conversation.id">
-              <p><strong>永久删除该会话？</strong><span>消息、摘要和运行记录将同步删除，无法恢复。</span></p>
+              <p><strong>永久删除该会话？</strong><span>你可以保留长期求职记忆，或同时遗忘本对话产生的记忆。</span></p>
               <div class="conversation-action-buttons">
                 <button type="button" @click="closeConversationActions">取消</button>
                 <button type="button" class="danger" :disabled="conversationActionLoadingId === conversation.id" @click="deleteConversation(conversation)">
-                  {{ conversationActionLoadingId === conversation.id ? '删除中…' : '确认删除' }}
+                  {{ conversationActionLoadingId === conversation.id ? '删除中…' : '仅删除对话' }}
+                </button>
+                <button type="button" class="danger" :disabled="conversationActionLoadingId === conversation.id" @click="deleteConversation(conversation, true)">
+                  删除并遗忘本对话记忆
                 </button>
               </div>
             </template>
@@ -2141,6 +2171,9 @@ onMounted(() => {
           </p>
         </div>
         <div v-if="selectedConversation" class="chat-material-actions" aria-label="求职资料快捷操作">
+          <button type="button" class="chat-material-button" title="查看和管理长期求职信息" @click="emit('navigate', '/career/memories')">
+            <span>我的求职记忆</span>
+          </button>
           <button
             type="button"
             class="chat-material-button interview-master"
@@ -2192,6 +2225,7 @@ onMounted(() => {
         <article v-for="message in messages" :key="message.id" class="message" :class="[message.role === 'user' ? 'from-user' : 'from-agent', message.local_state ? `message-${message.local_state}` : '']" :aria-label="message.role === 'user' ? '你的消息' : '求职助手消息'">
           <header v-if="message.role !== 'user'" class="message-role"><i aria-hidden="true">职</i><strong>求职助手</strong></header>
           <CareerMessageContent :content="message.content" />
+          <button v-if="message.role === 'assistant' && message.memory_usage_count > 0" class="memory-usage-link" type="button" @click="openMemoryUsageDrawer(message.turn_id)">查看本回答使用的求职记忆</button>
           <small class="message-time">{{ formatDate(message.created_at) }}<template v-if="message.local_state === 'sending'"> · 正在发送</template><template v-else-if="message.local_state === 'queued'"> · 等待回复</template><template v-else-if="message.local_state === 'failed'"> · 发送失败</template></small>
         </article>
         <article v-if="sending" class="agent-message agent-pending">
@@ -2267,6 +2301,13 @@ onMounted(() => {
         <div class="composer-footer"><small>当前模型：{{ modelLabel }}。输入 @ 可引用面经，输入 / 可调用 Skill；每条消息都会保存，并按发送顺序回复。</small><button class="send-button" type="button" :disabled="!selectedConversation || turnInputBlocked" @click="sendMessage">{{ sending ? '回复中' : '发送' }}</button></div>
       </footer>
     </section>
+
+    <CareerMemoryUsageDrawer
+      :open="memoryUsageDrawerOpen"
+      :loading="memoryUsageDrawerLoading"
+      :items="memoryUsageItems"
+      @close="memoryUsageDrawerOpen = false"
+    />
 
     <div v-if="conversationContext" class="context-rail-slot">
       <button
@@ -2488,6 +2529,7 @@ onMounted(() => {
 @keyframes career-thinking-spin { to { transform:rotate(360deg); } }
 .composer { border-top:1px solid #edf0e7; background:#fff; padding:12px 16px 14px; }.composer-toolbar { min-height:36px; flex-wrap:wrap; border-bottom:1px solid #edf0e7; padding-bottom:9px; }.input-tools,.session-tools { display:flex; min-width:0; flex-wrap:wrap; align-items:center; gap:7px; }.session-tools { margin-left:auto; justify-content:flex-end; }.job-url-row { display:grid; grid-template-columns:auto 1fr; align-items:center; gap:8px; margin:10px 0 9px; color:#738068; font-size:12px; font-weight:800; }.job-url-row input,.composer textarea { padding:10px 11px; }.composer textarea { display:block; min-height:68px; resize:vertical; }.composer-footer { margin-top:9px; }.input-tools { justify-content:flex-start; }.resume-input { display:none; }.chip-button.active { max-width:240px; overflow:hidden; background:#eaf4d4; color:#5a7d21; text-overflow:ellipsis; white-space:nowrap; }.file-clear-button { border-color:#f0d5d5; background:#fff8f8; color:#a65a5a; }.free-model-entry-button { border-style:dashed; background:#fff; color:#62812d; }.free-model-entry-button:hover { border-color:#9fbd67; background:#f5f9ed; }.model-select { width:auto; max-width:300px; padding:7px 9px; color:#65775a; font-size:12px; font-weight:700; }.send-button { min-width:88px; padding:9px 13px; }.composer-footer > small { color:#98a18e; font-size:11px; }
 .turn-limit-notice { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-top:9px; border-radius:10px; background:#f7f4e6; padding:8px 10px; color:#75672d; font-size:12px; }.turn-limit-notice.blocked { background:#fff0ee; color:#9a4b40; }
+.memory-usage-link{display:block;margin-top:8px;border:0;background:transparent;color:#66823b;padding:0;font-size:11px;font-weight:700;cursor:pointer}
 .composer-toolbar{min-height:32px;flex-wrap:nowrap;gap:6px;border:1px solid var(--ui-line);border-radius:10px;background:var(--ui-surface-soft);padding:5px 6px}.composer-toolbar .input-tools,.composer-toolbar .session-tools{flex-wrap:nowrap;gap:5px}.composer-toolbar .input-tools{flex:1}.composer-toolbar :is(.chip-button,.quiet-button,.model-select){height:30px;border-color:var(--ui-line);border-radius:8px;background:var(--ui-surface);padding:5px 9px;color:var(--ui-text-secondary);font-size:11px}.composer-toolbar .active-context-chip{max-width:132px!important;flex:none;border-color:var(--ui-line-strong)!important;background:var(--ui-surface-active)!important;color:var(--ui-accent-ink)!important}.composer-toolbar .model-select{min-width:132px;max-width:230px;flex:1 1 164px}.composer-toolbar .free-model-entry-button{flex:none;border-style:solid;background:var(--ui-surface);color:var(--ui-accent-ink)}.composer-toolbar .model-manager-button{flex:none}.conversation-action-options button{min-width:0;padding-right:6px;padding-left:6px}
 .composer-context-meter{flex:none}
 @media(max-width:640px){.composer-toolbar{flex-wrap:wrap}.composer-toolbar .input-tools,.composer-toolbar .session-tools{width:100%;flex-wrap:wrap}.composer-toolbar .model-select{max-width:100%;flex:1 1 150px}}
