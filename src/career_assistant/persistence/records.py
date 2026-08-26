@@ -67,6 +67,11 @@ class SessionSummaryRecord:
     contains_sensitive_data: bool
     created_at: datetime
     updated_at: datetime
+    covered_through_message_id: UUID | None = None
+    summary_schema_version: str = "career-conversation-summary-v2"
+    compacted_with_profile_id: UUID | None = None
+    compacted_input_tokens: int | None = None
+    compacted_output_tokens: int | None = None
 
 
 @dataclass(frozen=True)

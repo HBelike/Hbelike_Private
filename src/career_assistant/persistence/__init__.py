@@ -7,6 +7,10 @@ from src.career_assistant.persistence.conversation_repository import (
     CareerConversationRepository,
 )
 from src.career_assistant.persistence.context_repository import CareerContextRepository
+from src.career_assistant.persistence.compaction_repository import (
+    CareerCompactionRepository,
+    CompactionJobRecord,
+)
 from src.career_assistant.persistence.database import CareerDatabase
 from src.career_assistant.persistence.model_profile_repository import (
     CareerModelProfileRepository,
@@ -39,6 +43,8 @@ from src.career_assistant.persistence.turn_job_repository import (
 __all__ = [
     "CareerConversationRepository",
     "CareerContextRepository",
+    "CareerCompactionRepository",
+    "CompactionJobRecord",
     "CareerDatabase",
     "CareerModelProfileRepository",
     "ModelContextPolicy",

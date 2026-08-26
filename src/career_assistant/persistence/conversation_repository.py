@@ -384,7 +384,10 @@ class CareerConversationRepository:
                         contains_sensitive_data = FALSE,
                         updated_at = NOW()
                     RETURNING id, conversation_id, summary_text, summary_version,
-                              contains_sensitive_data, created_at, updated_at
+                              contains_sensitive_data, created_at, updated_at,
+                              covered_through_message_id, summary_schema_version,
+                              compacted_with_profile_id, compacted_input_tokens,
+                              compacted_output_tokens
                     """,
                 ),
                 {
@@ -397,6 +400,198 @@ class CareerConversationRepository:
         if row is None:
             raise LookupError("会话不存在、已归档或已删除，不能保存摘要")
         return self._to_summary_record(row)
+
+    def get_valid_summary(
+        self,
+        organization_id: UUID,
+        actor_id: UUID,
+        conversation_id: UUID,
+    ) -> SessionSummaryRecord | None:
+        """按组织和用户读取 V2 摘要，非法历史摘要视为不可用。"""
+
+        with self._database.transaction() as connection:
+            row = connection.execute(
+                text(
+                    """
+                    SELECT summary.id, summary.conversation_id, summary.summary_text,
+                           summary.summary_version, summary.contains_sensitive_data,
+                           summary.created_at, summary.updated_at,
+                           summary.covered_through_message_id,
+                           summary.summary_schema_version,
+                           summary.compacted_with_profile_id,
+                           summary.compacted_input_tokens,
+                           summary.compacted_output_tokens
+                    FROM career_assistant.session_summaries AS summary
+                    INNER JOIN career_assistant.conversations AS conversation
+                      ON conversation.id = summary.conversation_id
+                    WHERE summary.conversation_id = :conversation_id
+                      AND conversation.organization_id = :organization_id
+                      AND conversation.actor_id = :actor_id
+                      AND conversation.status <> 'deleted'
+                      AND summary.summary_schema_version = :schema_version
+                    """,
+                ),
+                {
+                    "organization_id": organization_id,
+                    "actor_id": actor_id,
+                    "conversation_id": conversation_id,
+                    "schema_version": "career-conversation-summary-v2",
+                },
+            ).mappings().one_or_none()
+        if row is None:
+            return None
+        from src.career_assistant.conversation_memory import validate_summary
+
+        try:
+            validate_summary(json.loads(row["summary_text"]))
+        except (json.JSONDecodeError, ValueError, TypeError):
+            return None
+        return self._to_summary_record(row)
+
+    def list_completed_dialogue_messages(
+        self,
+        organization_id: UUID,
+        actor_id: UUID,
+        conversation_id: UUID,
+        *,
+        exclude_turn_id: UUID | None = None,
+        limit: int = 200,
+    ) -> list[MessageRecord]:
+        """读取成功 Turn 的完整候选消息；分组完整性由领域层再次检查。"""
+
+        self._validate_limit(limit, maximum=400)
+        with self._database.transaction() as connection:
+            rows = connection.execute(
+                text(
+                    """
+                    SELECT message.id, message.conversation_id, message.turn_id,
+                           message.role, message.content_text, message.is_redacted,
+                           message.created_at
+                    FROM career_assistant.messages AS message
+                    INNER JOIN career_assistant.agent_turns AS turn
+                      ON turn.id = message.turn_id
+                    INNER JOIN career_assistant.conversations AS conversation
+                      ON conversation.id = message.conversation_id
+                    WHERE message.conversation_id = :conversation_id
+                      AND conversation.organization_id = :organization_id
+                      AND conversation.actor_id = :actor_id
+                      AND conversation.status <> 'deleted'
+                      AND turn.status = 'succeeded'
+                      AND message.role IN ('user', 'assistant')
+                      AND (:exclude_turn_id IS NULL OR turn.id <> :exclude_turn_id)
+                    ORDER BY message.created_at ASC, message.id ASC
+                    LIMIT :limit
+                    """,
+                ),
+                {
+                    "organization_id": organization_id,
+                    "actor_id": actor_id,
+                    "conversation_id": conversation_id,
+                    "exclude_turn_id": exclude_turn_id,
+                    "limit": limit,
+                },
+            ).mappings().all()
+        return [self._to_message_record(row) for row in rows]
+
+    def save_summary_if_current(
+        self,
+        organization_id: UUID,
+        actor_id: UUID,
+        conversation_id: UUID,
+        *,
+        summary_text: str,
+        covered_through_message_id: UUID,
+        expected_summary_version: int,
+        expected_covered_through_message_id: UUID | None,
+        compacted_with_profile_id: UUID,
+        compacted_input_tokens: int,
+        compacted_output_tokens: int,
+    ) -> SessionSummaryRecord | None:
+        """校验后以摘要版本和游标执行 CAS，冲突时不覆盖新摘要。"""
+
+        from src.career_assistant.conversation_memory import validate_summary
+
+        validated = validate_summary(json.loads(summary_text))
+        return self._compare_and_swap_summary(
+            organization_id=organization_id,
+            actor_id=actor_id,
+            conversation_id=conversation_id,
+            summary_text=validated.to_json(),
+            covered_through_message_id=covered_through_message_id,
+            expected_summary_version=expected_summary_version,
+            expected_covered_through_message_id=expected_covered_through_message_id,
+            compacted_with_profile_id=compacted_with_profile_id,
+            compacted_input_tokens=compacted_input_tokens,
+            compacted_output_tokens=compacted_output_tokens,
+        )
+
+    def _compare_and_swap_summary(
+        self,
+        **parameters: object,
+    ) -> SessionSummaryRecord | None:
+        parameters = {"id": uuid4(), **parameters}
+        expected_version = int(parameters["expected_summary_version"])
+        if expected_version == 0:
+            statement = """
+                INSERT INTO career_assistant.session_summaries (
+                  id, conversation_id, summary_text, summary_version,
+                  contains_sensitive_data, covered_through_message_id,
+                  summary_schema_version, compacted_with_profile_id,
+                  compacted_input_tokens, compacted_output_tokens
+                )
+                SELECT :id, conversation.id, :summary_text, 1, FALSE,
+                       :covered_through_message_id,
+                       'career-conversation-summary-v2',
+                       :compacted_with_profile_id, :compacted_input_tokens,
+                       :compacted_output_tokens
+                FROM career_assistant.conversations AS conversation
+                WHERE conversation.id = :conversation_id
+                  AND conversation.organization_id = :organization_id
+                  AND conversation.actor_id = :actor_id
+                  AND conversation.status = 'active'
+                ON CONFLICT (conversation_id) DO NOTHING
+                RETURNING id, conversation_id, summary_text, summary_version,
+                          contains_sensitive_data, created_at, updated_at,
+                          covered_through_message_id, summary_schema_version,
+                          compacted_with_profile_id, compacted_input_tokens,
+                          compacted_output_tokens
+            """
+        else:
+            statement = """
+                UPDATE career_assistant.session_summaries AS summary
+                SET summary_text = :summary_text,
+                    summary_version = summary.summary_version + 1,
+                    contains_sensitive_data = FALSE,
+                    covered_through_message_id = :covered_through_message_id,
+                    summary_schema_version = 'career-conversation-summary-v2',
+                    compacted_with_profile_id = :compacted_with_profile_id,
+                    compacted_input_tokens = :compacted_input_tokens,
+                    compacted_output_tokens = :compacted_output_tokens,
+                    updated_at = NOW()
+                FROM career_assistant.conversations AS conversation
+                WHERE summary.conversation_id = :conversation_id
+                  AND conversation.id = summary.conversation_id
+                  AND conversation.organization_id = :organization_id
+                  AND conversation.actor_id = :actor_id
+                  AND conversation.status = 'active'
+                  AND summary.summary_version = :expected_summary_version
+                  AND summary.covered_through_message_id
+                      IS NOT DISTINCT FROM :expected_covered_through_message_id
+                RETURNING summary.id, summary.conversation_id,
+                          summary.summary_text, summary.summary_version,
+                          summary.contains_sensitive_data, summary.created_at,
+                          summary.updated_at, summary.covered_through_message_id,
+                          summary.summary_schema_version,
+                          summary.compacted_with_profile_id,
+                          summary.compacted_input_tokens,
+                          summary.compacted_output_tokens
+            """
+        with self._database.transaction() as connection:
+            row = connection.execute(
+                text(statement),
+                parameters,
+            ).mappings().one_or_none()
+        return self._to_summary_record(row) if row is not None else None
 
     def archive_conversation(self, actor_id: UUID, conversation_id: UUID) -> bool:
         """将用户自己的活动会话归档，保留历史但禁止继续写入。"""
@@ -820,6 +1015,14 @@ class CareerConversationRepository:
             contains_sensitive_data=row["contains_sensitive_data"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
+            covered_through_message_id=row.get("covered_through_message_id"),
+            summary_schema_version=row.get(
+                "summary_schema_version",
+                "career-conversation-summary-v2",
+            ),
+            compacted_with_profile_id=row.get("compacted_with_profile_id"),
+            compacted_input_tokens=row.get("compacted_input_tokens"),
+            compacted_output_tokens=row.get("compacted_output_tokens"),
         )
 
     @staticmethod
