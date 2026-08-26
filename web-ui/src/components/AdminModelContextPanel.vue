@@ -1,5 +1,6 @@
 <script setup>
 import { onMounted, ref } from 'vue'
+import { modelProfilesFromAvailability } from '../admin-model-context.js'
 
 const rows = ref([])
 const loading = ref(true)
@@ -13,7 +14,7 @@ async function loadPolicies() {
   try {
     const response = await fetch('/api/career/model-profiles', { credentials: 'include', cache: 'no-store' })
     if (!response.ok) throw new Error(await responseError(response, '无法读取模型列表'))
-    const profiles = (await response.json()).items ?? []
+    const profiles = modelProfilesFromAvailability(await response.json())
     rows.value = await Promise.all(profiles.map(async (profile) => {
       const policyResponse = await fetch(
         `/api/admin/career/model-profiles/${encodeURIComponent(profile.profile_key)}/context-policy`,

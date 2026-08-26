@@ -3,6 +3,29 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 
 import { normalizeAppRoute } from './navigation-access.js'
+import { modelProfilesFromAvailability } from './admin-model-context.js'
+
+test('模型上下文页面从可用性响应中读取嵌套模型档案', () => {
+  const profiles = modelProfilesFromAvailability({
+    items: [
+      {
+        profile: {
+          profile_key: 'deepseek-deepseek-v4-flash',
+          display_name: 'DeepSeek 模型连接'
+        },
+        readiness: 'ready'
+      },
+      { readiness: 'unconfigured' }
+    ]
+  })
+
+  assert.deepEqual(profiles, [
+    {
+      profile_key: 'deepseek-deepseek-v4-flash',
+      display_name: 'DeepSeek 模型连接'
+    }
+  ])
+})
 
 test('模型上下文页面只出现在管理台并展示不可修改的95%硬限制', async () => {
   const admin = await readFile(new URL('./components/AdminConsolePage.vue', import.meta.url), 'utf8')
