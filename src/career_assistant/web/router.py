@@ -537,6 +537,9 @@ def install_career_assistant_api(
     from src.career_assistant.web.admin_context_router import router as admin_context_router
 
     app.include_router(admin_context_router)
+    from src.career_assistant.web.memory_router import router as memory_router
+
+    app.include_router(memory_router)
     from src.career_assistant.live_interview.web import router as live_interview_router
 
     app.include_router(live_interview_router)
@@ -1441,18 +1444,24 @@ def rename_conversation(
 
 
 @router.delete("/conversations/{conversation_id}")
-def delete_conversation(conversation_id: UUID, request: Request) -> dict[str, bool]:
+def delete_conversation(
+    conversation_id: UUID,
+    request: Request,
+    forget_derived_memories: bool = Query(default=False),
+) -> dict[str, object]:
     """永久删除当前用户会话及其服务端关联历史。"""
 
     actor = get_request_actor()
     services = get_career_services(request)
-    deleted = services.conversation_repository.delete_conversation_permanently(
+    deleted, forgotten = services.memory_repository.delete_conversation_with_memory_choice(
+        actor.organization_id,
         actor.actor_id,
         conversation_id,
+        forget_derived_memories=forget_derived_memories,
     )
     if not deleted:
         raise HTTPException(status_code=404, detail="会话不存在或无访问权限")
-    return {"deleted": True}
+    return {"deleted": True, "forgotten_memory_count": forgotten}
 
 
 @router.post("/conversations/{conversation_id}/archive")

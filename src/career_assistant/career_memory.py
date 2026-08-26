@@ -139,6 +139,42 @@ class CareerMemoryService:
             organization_id, actor_id, turn_id, memory_ids
         )
 
+    def correct(
+        self,
+        organization_id: UUID,
+        actor_id: UUID,
+        memory_id: UUID,
+        *,
+        display_text: str,
+        normalized_value: dict[str, object],
+    ) -> "CareerMemoryItemRecord":
+        old = self._repository.get_memory(organization_id, actor_id, memory_id)
+        if old is None or old.status not in {
+            CareerMemoryStatus.ACTIVE.value,
+            CareerMemoryStatus.CANDIDATE.value,
+        }:
+            raise LookupError("求职记忆不存在或已经失效")
+        replacement = CareerMemoryDraft(
+            memory_type=CareerMemoryType(old.memory_type),
+            normalized_value=normalized_value,
+            display_text=display_text,
+            source_kind="explicit_user_correction",
+            career_space_id=old.career_space_id,
+            source_message_id=old.source_message_id,
+            source_conversation_id=old.source_conversation_id,
+            candidate_profile_id=old.candidate_profile_id,
+            candidate_profile_version=old.candidate_profile_version,
+        )
+        if old.status == CareerMemoryStatus.CANDIDATE.value:
+            confirmed = self._repository.confirm_candidate(
+                organization_id, actor_id, memory_id
+            )
+            if confirmed is None:
+                raise LookupError("候选求职记忆不存在")
+        return self._repository.supersede_active(
+            organization_id, actor_id, memory_id, replacement
+        )
+
     def retrieve_for_prompt(
         self,
         organization_id: UUID,

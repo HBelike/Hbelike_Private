@@ -107,6 +107,178 @@ class CareerMemoryRepository:
             ).mappings().all()
         return tuple(self._space_record(row) for row in rows)
 
+    def list_memories(
+        self,
+        organization_id: UUID,
+        actor_id: UUID,
+        *,
+        career_space_id: UUID | None = None,
+        status: CareerMemoryStatus | None = None,
+    ) -> tuple[CareerMemoryItemRecord, ...]:
+        with self._database.transaction() as connection:
+            rows = connection.execute(
+                text(
+                    """
+                    SELECT * FROM career_assistant.career_memory_items
+                    WHERE organization_id = :organization_id AND actor_id = :actor_id
+                      AND (:career_space_id IS NULL OR career_space_id = :career_space_id)
+                      AND (:status IS NULL OR status = :status)
+                    ORDER BY updated_at DESC, id DESC
+                    """,
+                ),
+                {
+                    "organization_id": organization_id,
+                    "actor_id": actor_id,
+                    "career_space_id": career_space_id,
+                    "status": status.value if status is not None else None,
+                },
+            ).mappings().all()
+        return tuple(self._memory_record(row) for row in rows)
+
+    def confirm_candidate(
+        self, organization_id: UUID, actor_id: UUID, memory_id: UUID
+    ) -> CareerMemoryItemRecord | None:
+        with self._database.transaction() as connection:
+            row = connection.execute(
+                text(
+                    """
+                    UPDATE career_assistant.career_memory_items
+                    SET status = 'active', source_kind = 'user_confirmed_candidate', updated_at = NOW()
+                    WHERE id = :memory_id AND organization_id = :organization_id
+                      AND actor_id = :actor_id AND status = 'candidate'
+                    RETURNING *
+                    """,
+                ),
+                {"memory_id": memory_id, "organization_id": organization_id, "actor_id": actor_id},
+            ).mappings().one_or_none()
+        return self._memory_record(row) if row is not None else None
+
+    def disable_memory(
+        self, organization_id: UUID, actor_id: UUID, memory_id: UUID
+    ) -> CareerMemoryItemRecord | None:
+        with self._database.transaction() as connection:
+            row = connection.execute(
+                text(
+                    """
+                    UPDATE career_assistant.career_memory_items
+                    SET status = 'disabled', valid_to = NOW(), updated_at = NOW()
+                    WHERE id = :memory_id AND organization_id = :organization_id
+                      AND actor_id = :actor_id AND status IN ('active','candidate')
+                    RETURNING *
+                    """,
+                ),
+                {"memory_id": memory_id, "organization_id": organization_id, "actor_id": actor_id},
+            ).mappings().one_or_none()
+        return self._memory_record(row) if row is not None else None
+
+    def delete_memory(self, organization_id: UUID, actor_id: UUID, memory_id: UUID) -> bool:
+        with self._database.transaction() as connection:
+            result = connection.execute(
+                text(
+                    """
+                    DELETE FROM career_assistant.career_memory_items
+                    WHERE id = :memory_id AND organization_id = :organization_id AND actor_id = :actor_id
+                    """,
+                ),
+                {"memory_id": memory_id, "organization_id": organization_id, "actor_id": actor_id},
+            )
+        return result.rowcount == 1
+
+    def get_memory(
+        self, organization_id: UUID, actor_id: UUID, memory_id: UUID
+    ) -> CareerMemoryItemRecord | None:
+        with self._database.transaction() as connection:
+            row = connection.execute(
+                text(
+                    """
+                    SELECT * FROM career_assistant.career_memory_items
+                    WHERE id = :memory_id AND organization_id = :organization_id AND actor_id = :actor_id
+                    """,
+                ),
+                {"memory_id": memory_id, "organization_id": organization_id, "actor_id": actor_id},
+            ).mappings().one_or_none()
+        return self._memory_record(row) if row is not None else None
+
+    def list_turn_usages(
+        self,
+        organization_id: UUID,
+        actor_id: UUID,
+        turn_id: UUID,
+    ) -> tuple[dict[str, object], ...]:
+        with self._database.transaction() as connection:
+            rows = connection.execute(
+                text(
+                    """
+                    SELECT usage.memory_id, usage.memory_type, usage.source_kind, usage.created_at,
+                           memory.display_text, memory.candidate_profile_version,
+                           profile.display_name AS candidate_profile_name,
+                           conversation.created_at AS source_conversation_created_at
+                    FROM career_assistant.turn_memory_usages AS usage
+                    INNER JOIN career_assistant.agent_turns AS turn ON turn.id = usage.turn_id
+                    LEFT JOIN career_assistant.career_memory_items AS memory ON memory.id = usage.memory_id
+                    LEFT JOIN career_assistant.candidate_profiles AS profile
+                      ON profile.id = memory.candidate_profile_id
+                    LEFT JOIN career_assistant.conversations AS conversation
+                      ON conversation.id = memory.source_conversation_id
+                    WHERE usage.turn_id = :turn_id AND usage.organization_id = :organization_id
+                      AND usage.actor_id = :actor_id AND turn.actor_id = :actor_id
+                    ORDER BY usage.created_at
+                    """,
+                ),
+                {"turn_id": turn_id, "organization_id": organization_id, "actor_id": actor_id},
+            ).mappings().all()
+        return tuple(dict(row) for row in rows)
+
+    def delete_conversation_with_memory_choice(
+        self,
+        organization_id: UUID,
+        actor_id: UUID,
+        conversation_id: UUID,
+        *,
+        forget_derived_memories: bool,
+    ) -> tuple[bool, int]:
+        with self._database.transaction() as connection:
+            owned = connection.execute(
+                text(
+                    """
+                    SELECT id FROM career_assistant.conversations
+                    WHERE id = :conversation_id AND organization_id = :organization_id
+                      AND actor_id = :actor_id FOR UPDATE
+                    """,
+                ),
+                {"conversation_id": conversation_id, "organization_id": organization_id, "actor_id": actor_id},
+            ).mappings().one_or_none()
+            if owned is None:
+                return False, 0
+            forgotten = 0
+            if forget_derived_memories:
+                deleted_memories = connection.execute(
+                    text(
+                        """
+                        DELETE FROM career_assistant.career_memory_items
+                        WHERE organization_id = :organization_id AND actor_id = :actor_id
+                          AND source_conversation_id = :conversation_id
+                          AND source_kind <> 'confirmed_resume'
+                        """,
+                    ),
+                    {"conversation_id": conversation_id, "organization_id": organization_id, "actor_id": actor_id},
+                )
+                forgotten = deleted_memories.rowcount
+            connection.execute(
+                text(
+                    """
+                    DELETE FROM career_assistant.interview_retrieval_feedback
+                    WHERE conversation_id = :conversation_id
+                    """,
+                ),
+                {"conversation_id": conversation_id},
+            )
+            result = connection.execute(
+                text("DELETE FROM career_assistant.conversations WHERE id = :conversation_id AND actor_id = :actor_id"),
+                {"conversation_id": conversation_id, "actor_id": actor_id},
+            )
+        return result.rowcount == 1, forgotten
+
     def bind_conversation_space(
         self,
         organization_id: UUID,

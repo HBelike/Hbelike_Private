@@ -153,3 +153,43 @@ def test_supersede_active_updates_old_and_links_replacement_in_one_transaction()
     assert created.supersedes_memory_id == old_id
     assert "status = 'superseded'" in database.connection.calls[1][0]
     assert database.connection.calls[2][1]["supersedes_memory_id"] == old_id
+
+
+def test_delete_conversation_can_forget_only_message_derived_memories() -> None:
+    database = FakeDatabase([
+        FakeResult(row={"id": uuid4()}),
+        FakeResult(rowcount=3),
+        FakeResult(),
+        FakeResult(rowcount=1),
+    ])
+    repository = CareerMemoryRepository(database)
+    organization_id = uuid4()
+    actor_id = uuid4()
+    conversation_id = uuid4()
+
+    deleted, forgotten = repository.delete_conversation_with_memory_choice(
+        organization_id,
+        actor_id,
+        conversation_id,
+        forget_derived_memories=True,
+    )
+
+    assert deleted is True
+    assert forgotten == 3
+    memory_sql = database.connection.calls[1][0]
+    assert "source_conversation_id = :conversation_id" in memory_sql
+    assert "source_kind <> 'confirmed_resume'" in memory_sql
+
+
+def test_delete_conversation_defaults_to_preserving_long_term_memories() -> None:
+    database = FakeDatabase([
+        FakeResult(row={"id": uuid4()}),
+        FakeResult(),
+        FakeResult(rowcount=1),
+    ])
+    deleted, forgotten = CareerMemoryRepository(database).delete_conversation_with_memory_choice(
+        uuid4(), uuid4(), uuid4(), forget_derived_memories=False
+    )
+    assert deleted is True
+    assert forgotten == 0
+    assert all("career_memory_items" not in sql for sql, _ in database.connection.calls[1:])
