@@ -38,6 +38,14 @@ test('模型上下文页面只出现在管理台并展示不可修改的95%硬�
   assert.equal(normalizeAppRoute('/admin/model-context'), '/admin/model-context')
 })
 
+test('模型上下文页面移除重复说明并只用档案键作为卡片标题', async () => {
+  const panel = await readFile(new URL('./components/AdminModelContextPanel.vue', import.meta.url), 'utf8')
+  assert.doesNotMatch(panel, /context-rule-note/)
+  assert.match(panel, /<strong class="context-policy-title">\{\{ row\.profile_key \}\}<\/strong>/)
+  assert.doesNotMatch(panel, /<strong>\{\{ row\.display_name \}\}<\/strong>/)
+  assert.doesNotMatch(panel, /<code>\{\{ row\.profile_key \}\}<\/code>/)
+})
+
 test('策略面板在浏览器和服务端同时校验核心大小关系', async () => {
   const panel = await readFile(new URL('./components/AdminModelContextPanel.vue', import.meta.url), 'utf8')
   assert.match(panel, /outputTokens \* 2 > windowTokens/)

@@ -85,16 +85,12 @@ async function responseError(response, fallback) {
 
 <template>
   <section class="model-context-panel">
-    <div class="context-rule-note">
-      <strong>上下文安全余量</strong>
-      <p>模型达到压缩触发比例时自动滚动压缩到目标比例；95% 为系统固定硬限制，不可修改。</p>
-    </div>
     <p v-if="errorMessage" class="context-alert">{{ errorMessage }}</p>
     <p v-if="loading" class="context-loading">正在读取模型上下文策略…</p>
     <div v-else class="context-policy-list">
       <article v-for="row in rows" :key="row.profile_key" class="context-policy-card">
         <header>
-          <div><strong>{{ row.display_name }}</strong><code>{{ row.profile_key }}</code></div>
+          <strong class="context-policy-title">{{ row.profile_key }}</strong>
           <span :class="{ fallback: row.context_window_source === 'fallback' }">
             {{ row.context_window_source === 'fallback' ? '容量待核对' : '已配置' }}
           </span>
@@ -117,5 +113,5 @@ async function responseError(response, fallback) {
 </template>
 
 <style scoped>
-.model-context-panel{display:grid;gap:16px}.context-rule-note,.context-policy-card{border:1px solid var(--ui-line);border-radius:12px;background:var(--ui-surface);padding:16px}.context-rule-note p{margin:6px 0 0;color:var(--ui-text-muted)}.context-policy-list{display:grid;gap:12px}.context-policy-card header,.context-policy-card footer{display:flex;align-items:center;justify-content:space-between;gap:12px}.context-policy-card header div{display:grid;gap:4px}.context-policy-card code{color:var(--ui-text-muted);font-size:12px}.context-policy-card header>span{border-radius:999px;background:#e8f5ec;color:#237a43;padding:4px 9px;font-size:12px}.context-policy-card header>span.fallback{background:#fff3d8;color:#8a5b00}.context-field-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:16px 0}.context-field-grid label{display:grid;grid-template-columns:1fr auto;gap:5px}.context-field-grid label span{grid-column:1/-1;font-size:13px;font-weight:700}.context-field-grid input{min-width:0;border:1px solid var(--ui-line);border-radius:8px;padding:9px}.context-field-grid small{align-self:center;color:var(--ui-text-muted)}.context-policy-card footer{border-top:1px solid var(--ui-line);padding-top:12px}.context-policy-card footer p,.context-policy-card footer span{margin:0;color:var(--ui-text-muted);font-size:13px}.context-policy-card button{border:0;border-radius:8px;background:var(--ui-accent);color:#fff;padding:9px 14px;font-weight:700}.context-row-error,.context-alert{color:#a72d2d!important}.context-row-success{color:#237a43!important}@media(max-width:900px){.context-field-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.model-context-panel{display:grid;gap:16px}.context-policy-card{border:1px solid var(--ui-line);border-radius:12px;background:var(--ui-surface);padding:16px}.context-policy-list{display:grid;gap:12px}.context-policy-card header,.context-policy-card footer{display:flex;align-items:center;justify-content:space-between;gap:12px}.context-policy-title{font-size:16px;line-height:1.35;overflow-wrap:anywhere}.context-policy-card header>span{border-radius:999px;background:#e8f5ec;color:#237a43;padding:4px 9px;font-size:12px;white-space:nowrap}.context-policy-card header>span.fallback{background:#fff3d8;color:#8a5b00}.context-field-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:16px 0}.context-field-grid label{display:grid;grid-template-columns:1fr auto;gap:5px}.context-field-grid label span{grid-column:1/-1;font-size:13px;font-weight:700}.context-field-grid input{min-width:0;border:1px solid var(--ui-line);border-radius:8px;padding:9px}.context-field-grid small{align-self:center;color:var(--ui-text-muted)}.context-policy-card footer{border-top:1px solid var(--ui-line);padding-top:12px}.context-policy-card footer p,.context-policy-card footer span{margin:0;color:var(--ui-text-muted);font-size:13px}.context-policy-card button{border:0;border-radius:8px;background:var(--ui-accent);color:#fff;padding:9px 14px;font-weight:700}.context-row-error,.context-alert{color:#a72d2d!important}.context-row-success{color:#237a43!important}@media(max-width:900px){.context-field-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 </style>
