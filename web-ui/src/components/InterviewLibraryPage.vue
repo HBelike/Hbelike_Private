@@ -11,6 +11,8 @@ const detailLoading = ref(false)
 const detailError = ref('')
 const editMode = ref(false)
 const saving = ref(false)
+const editorCompanyName = ref('')
+const editorRoleName = ref('')
 const editorMarkdown = ref('')
 const editorSummary = ref('')
 const editorTags = ref('')
@@ -655,6 +657,8 @@ async function selectExperience(experienceId) {
 }
 
 function syncEditor(experience) {
+  editorCompanyName.value = experience?.company_name ?? ''
+  editorRoleName.value = experience?.role_name ?? ''
   editorMarkdown.value = experience?.markdown_content ?? ''
   editorSummary.value = experience?.summary_text ?? ''
   editorTags.value = (experience?.tags ?? []).join('，')
@@ -674,7 +678,12 @@ function cancelEditing() {
 }
 
 async function saveExperience() {
-  if (!selectedExperience.value || !editorMarkdown.value.trim()) {
+  if (!selectedExperience.value) return
+  if (!editorCompanyName.value.trim() || !editorRoleName.value.trim()) {
+    detailError.value = '公司名称和面试岗位不能为空。'
+    return
+  }
+  if (!editorMarkdown.value.trim()) {
     detailError.value = '面经正文不能为空。'
     return
   }
@@ -687,6 +696,8 @@ async function saveExperience() {
       {
         method: 'PUT',
         body: JSON.stringify({
+          company_name: editorCompanyName.value.trim(),
+          role_name: editorRoleName.value.trim(),
           markdown_content: editorMarkdown.value,
           summary_text: editorSummary.value.trim() || null,
           tags: parseTags(editorTags.value)
@@ -1118,11 +1129,15 @@ onBeforeUnmount(() => {
   <section class="interview-library-shell">
     <header class="library-header">
       <div class="library-heading">
-        <p class="library-description">把零散经历沉淀成可检索、可追溯的面试证据</p>
+        <span class="library-heading-mark" aria-hidden="true">↥</span>
+        <div>
+          <strong>导入与收录</strong>
+          <p class="library-description">把零散经历沉淀成可检索、可追溯的面试证据</p>
+        </div>
       </div>
       <div class="library-actions">
-        <button type="button" class="quiet-action collection-action" @click="openCollection('xiaohongshu')">小红书公开内容导入</button>
-        <button type="button" class="quiet-action" @click="openImport('text')">粘贴正文</button>
+        <button type="button" class="quiet-action collection-action" @click="openCollection('xiaohongshu')"><span aria-hidden="true">⌁</span>小红书URL读取</button>
+        <button type="button" class="primary-action upload-action" @click="openImport('file')"><span aria-hidden="true">↑</span>上传面经</button>
       </div>
     </header>
 
@@ -1210,7 +1225,7 @@ onBeforeUnmount(() => {
             </div>
             <div class="experience-actions">
               <span class="index-status" :class="`index-${selectedExperience.status}`">{{ statusText(selectedExperience.status) }}</span>
-              <button v-if="!editMode" type="button" class="quiet-action" @click="startEditing">编辑正文</button>
+              <button v-if="!editMode" type="button" class="quiet-action" @click="startEditing">编辑面经</button>
               <template v-else>
                 <button type="button" class="quiet-action" :disabled="saving" @click="cancelEditing">取消</button>
                 <button type="button" class="primary-action" :disabled="saving" @click="saveExperience">
@@ -1229,8 +1244,29 @@ onBeforeUnmount(() => {
           </section>
 
           <div v-if="editMode" class="editor-layout">
+            <section class="editor-identity-panel" aria-label="面经归属信息">
+              <label class="editor-field">
+                <span>公司名称</span>
+                <input
+                  v-model="editorCompanyName"
+                  type="text"
+                  maxlength="120"
+                  autocomplete="organization"
+                  placeholder="例如：小红书"
+                />
+              </label>
+              <label class="editor-field">
+                <span>面试岗位</span>
+                <input
+                  v-model="editorRoleName"
+                  type="text"
+                  maxlength="160"
+                  placeholder="例如：AI Agent 开发"
+                />
+              </label>
+            </section>
             <label class="editor-field markdown-field editor-canvas">
-              <span><i>CONTENT EDITOR</i>面经正文 <em>{{ editorMarkdown.trim().length }} 字</em></span>
+              <span>面经正文 <em>{{ editorMarkdown.trim().length }} 字</em></span>
               <textarea v-model="editorMarkdown" spellcheck="false" aria-label="编辑面经 Markdown"></textarea>
             </label>
             <details class="editor-support-panel">
@@ -1673,15 +1709,23 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .interview-library-shell { display: flex; min-height: 0; flex: 1; flex-direction: column; gap: 16px; color: #263425; }
-.library-header { display: flex; align-items: end; justify-content: space-between; gap: 24px; padding: 2px 2px 0; }
+.library-header { display: flex; align-items: center; justify-content: space-between; gap: 20px; border: 1px solid #e3eade; border-radius: 12px; background: #fff; box-shadow: 0 8px 24px rgba(69, 87, 42, .05); padding: 11px 12px; }
+.library-heading { display: flex; min-width: 0; align-items: center; gap: 10px; }
+.library-heading > div { display: grid; min-width: 0; gap: 2px; }
+.library-heading strong { color: #263425; font-size: 14px; font-weight: 800; }
+.library-heading-mark { display: grid; width: 34px; height: 34px; flex: 0 0 auto; place-items: center; border-radius: 9px; background: #eef5df; color: #6e9232; font-size: 18px; font-weight: 850; }
 .library-kicker,.section-label { margin: 0; color: #88a143; font-size: 10px; font-weight: 800; letter-spacing: .12em; }
-.library-description { margin: 0; color: #7c8b75; font-size: 14px; line-height: 1.55; }
+.library-description { margin: 0; color: #7c8b75; font-size: 12px; line-height: 1.5; }
 .library-actions,.experience-actions { display: flex; align-items: center; gap: 8px; }
+.library-actions button { display: inline-flex; min-height: 36px; align-items: center; gap: 6px; justify-content: center; padding: 8px 12px; }
+.library-actions button > span { font-size: 15px; line-height: 1; }
+.library-actions .quiet-action { background: #f8faf5; }
+.library-actions .primary-action { box-shadow: none; }
 .primary-action,.quiet-action,.tree-refresh,.close-button { border: 1px solid #dfe8d2; border-radius: 10px; cursor: pointer; font: inherit; font-weight: 750; transition: transform .16s ease, box-shadow .16s ease, background .16s ease; }
 .primary-action { border-color: #8eae37; background: #91b236; color: white; box-shadow: 0 8px 16px rgba(112, 139, 37, .18); padding: 10px 15px; }
 .quiet-action { background: #fff; color: #5d713b; padding: 9px 13px; }
 .primary-action:hover:not(:disabled),.quiet-action:hover:not(:disabled),.tree-refresh:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 8px 16px rgba(73, 94, 38, .1); }
-button:focus-visible,input:focus-visible,textarea:focus-visible { outline: 3px solid rgba(116, 155, 48, .24); outline-offset: 2px; }
+button:focus-visible,input:focus-visible,textarea:focus-visible { outline: 3px solid var(--ui-focus, rgba(0, 100, 221, .16)); outline-offset: 2px; }
 button:disabled { cursor: wait; opacity: .62; }
 .library-layout { display: grid; min-height: 0; flex: 1; grid-template-columns: minmax(250px, 295px) minmax(0, 1fr); gap: 14px; }
 .interview-tree-pane,.interview-detail-pane { min-height: 0; border: 1px solid #e3eade; border-radius: 18px; background: #fff; box-shadow: 0 14px 32px rgba(69, 87, 42, .06); }
@@ -1732,6 +1776,76 @@ button:disabled { cursor: wait; opacity: .62; }
   .candidate-list-header,.candidate-card > header { align-items: start; flex-direction: column; }
   .candidate-card header > .candidate-status { align-self: start; }
 }
+/* 编辑态与阅读态共用 900px 内容视口，避免编辑器因 grid 收缩成窄栏。 */
+.editor-layout {
+  width: 100%;
+  max-width: none;
+  box-sizing: border-box;
+  align-content: start;
+}
+
+.editor-identity-panel,
+.editor-canvas,
+.editor-support-panel {
+  width: min(900px, 100%);
+  box-sizing: border-box;
+  margin-inline: auto;
+}
+
+.editor-identity-panel {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  border: 1px solid #d7e4f6;
+  border-radius: 14px;
+  background: #f8fbff;
+  padding: 16px 18px;
+}
+
+.editor-identity-panel .editor-field,
+.editor-canvas > span {
+  color: #17223b;
+}
+
+.editor-identity-panel .editor-field input,
+.editor-support-fields .editor-field input,
+.editor-canvas textarea {
+  border-color: #d7e4f6;
+  background: #fff;
+  color: #17223b;
+}
+
+.editor-canvas {
+  border-color: #d7e4f6;
+  box-shadow: 0 12px 32px rgba(24, 62, 112, .05);
+}
+
+.editor-canvas > span em {
+  background: #eaf3ff;
+  color: #004aa8;
+}
+
+.editor-canvas textarea {
+  min-height: 560px;
+  padding: 32px clamp(22px, 4vw, 54px) 42px;
+  font-size: 16px;
+  line-height: 1.95;
+}
+
+.editor-support-panel {
+  border-color: #d7e4f6;
+  background: #f4f8fe;
+  color: #526078;
+}
+
+.editor-support-panel summary span {
+  color: #7b879c;
+}
+
+.editor-support-fields {
+  border-color: #d7e4f6;
+}
+
 @media (prefers-reduced-motion: reduce) { .thinking-orbit { animation: none; } }
 /* 手机阅读、编辑与详情使用同一纵向页面滚动；仅面经树保留受控滚动。 */
 @media (max-width:900px) {
@@ -1757,6 +1871,10 @@ button:disabled { cursor: wait; opacity: .62; }
   .reading-layout,
   .editor-layout {
     flex:none;
+  }
+
+  .editor-identity-panel {
+    grid-template-columns: 1fr;
   }
 }
 

@@ -29,6 +29,7 @@ test('已安装旧版助手保持已连接，只单独标记安全重试能力�
     version: '0.2.3',
     capabilities: [],
     greetingRetryReady: false,
+    greetingDispatchReady: false,
     missingCapabilities: BOSS_EXTENSION_REQUIRED_CAPABILITIES
   })
   assert.deepEqual(normalizeBossExtensionConnection({
@@ -40,6 +41,7 @@ test('已安装旧版助手保持已连接，只单独标记安全重试能力�
     version: '0.2.4',
     capabilities: BOSS_EXTENSION_REQUIRED_CAPABILITIES,
     greetingRetryReady: true,
+    greetingDispatchReady: true,
     missingCapabilities: []
   })
   assert.deepEqual(normalizeBossExtensionConnection(null), {
@@ -47,6 +49,7 @@ test('已安装旧版助手保持已连接，只单独标记安全重试能力�
     version: '',
     capabilities: [],
     greetingRetryReady: false,
+    greetingDispatchReady: false,
     missingCapabilities: BOSS_EXTENSION_REQUIRED_CAPABILITIES
   })
 })

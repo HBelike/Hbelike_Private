@@ -13,6 +13,7 @@ from typing import Iterable, Mapping
 from uuid import UUID, uuid4
 
 from sqlalchemy import RowMapping, text
+from sqlalchemy.exc import IntegrityError
 
 from src.career_assistant.interview_library.chunking import CHUNKING_VERSION, ChunkDraft
 from src.career_assistant.interview_library.models import (
@@ -186,25 +187,32 @@ class InterviewLibraryRepository:
         organization_id: UUID,
         experience_id: UUID,
         *,
+        company_id: UUID,
+        role_name: str,
         markdown_content: str,
         normalized_markdown: str,
         source_content_hash: str,
         summary_text: str | None,
         tags: Iterable[str],
     ) -> InterviewExperienceRecord:
-        """保存人工编辑后的 Markdown，并标记为待重新建立索引。"""
+        """保存人工编辑后的归属与 Markdown，并标记为待重新建立索引。"""
 
+        normalized_role_name = self._normalize_text(role_name, "岗位名称", 160)
         normalized_content = self._normalize_markdown(markdown_content, "面经 Markdown", 300_000)
         normalized_markdown_value = self._normalize_markdown(normalized_markdown, "规范化 Markdown", 300_000)
         normalized_hash = self._normalize_hash(source_content_hash)
         normalized_summary = self._normalize_optional_text(summary_text, "面经摘要", 12_000)
         normalized_tags = self._normalize_tags(tags, maximum_items=30, maximum_length=60)
-        with self._database.transaction() as connection:
-            row = connection.execute(
-                text(
-                    """
+        try:
+            with self._database.transaction() as connection:
+                row = connection.execute(
+                    text(
+                        """
                     UPDATE career_assistant.interview_experiences AS experience
-                    SET markdown_content = :markdown_content,
+                    SET company_id = :company_id,
+                        role_name = :role_name,
+                        normalized_role_name = :normalized_role_name,
+                        markdown_content = :markdown_content,
                         normalized_markdown = :normalized_markdown,
                         source_content_hash = :source_content_hash,
                         summary_text = :summary_text,
@@ -225,17 +233,22 @@ class InterviewLibraryRepository:
                               experience.chunking_version, experience.indexed_at,
                               experience.created_at, experience.updated_at
                     """,
-                ),
-                {
-                    "experience_id": experience_id,
-                    "organization_id": organization_id,
-                    "markdown_content": normalized_content,
-                    "normalized_markdown": normalized_markdown_value,
-                    "source_content_hash": normalized_hash,
-                    "summary_text": normalized_summary,
-                    "tags": json.dumps(normalized_tags),
-                },
-            ).mappings().one_or_none()
+                    ),
+                    {
+                        "experience_id": experience_id,
+                        "organization_id": organization_id,
+                        "company_id": company_id,
+                        "role_name": normalized_role_name,
+                        "normalized_role_name": self._normalize_key(normalized_role_name),
+                        "markdown_content": normalized_content,
+                        "normalized_markdown": normalized_markdown_value,
+                        "source_content_hash": normalized_hash,
+                        "summary_text": normalized_summary,
+                        "tags": json.dumps(normalized_tags),
+                    },
+                ).mappings().one_or_none()
+        except IntegrityError as exc:
+            raise ValueError("目标公司下已存在同名面经，不能重复归档") from exc
         if row is None:
             raise LookupError("面经不存在或无访问权限")
         return self._to_experience(row, company_name=self._company_name_for(row["company_id"], organization_id))

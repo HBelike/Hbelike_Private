@@ -19,10 +19,10 @@ window.addEventListener('message', (event) => {
       ok: true,
       data: {
         connected: true,
-        version: legacyExtensionPreview ? '0.2.3' : '0.2.6',
+        version: legacyExtensionPreview ? '0.2.3' : '0.2.7',
         capabilities: legacyExtensionPreview
           ? []
-          : ['retry_greeting_message', 'greeting_submission_state']
+          : ['retry_greeting_message', 'greeting_submission_state', 'greeting_fire_and_continue']
       }
     }, window.location.origin)
     return

@@ -147,6 +147,8 @@ class InterviewLibraryService:
         organization_id: UUID,
         experience_id: UUID,
         *,
+        company_name: str | None = None,
+        role_name: str | None = None,
         markdown_content: str,
         summary_text: str | None,
         tags: tuple[str, ...],
@@ -156,11 +158,18 @@ class InterviewLibraryService:
         current = self._repository.get_experience(organization_id, experience_id)
         if current is None:
             raise LookupError("面经不存在或无访问权限")
+        company = self._repository.upsert_company(
+            organization_id,
+            company_name if company_name is not None else current.company_name,
+        )
+        resolved_role_name = role_name if role_name is not None else current.role_name
         normalized_markdown = self._normalize_for_retrieval(markdown_content)
         content_hash = sha256(self._normalize_markdown(markdown_content).encode("utf-8")).hexdigest()
         updated = self._repository.update_experience_markdown(
             organization_id,
             experience_id,
+            company_id=company.id,
+            role_name=resolved_role_name,
             markdown_content=markdown_content,
             normalized_markdown=normalized_markdown,
             source_content_hash=content_hash,

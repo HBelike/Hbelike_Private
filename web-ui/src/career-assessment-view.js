@@ -26,7 +26,7 @@ export function buildAssessmentCards(assessment) {
   }
   const dimensions = assessment.dimensions ?? {}
   return LEGACY_KEYS
-    .filter((key) => dimensions[key])
+    .filter((key) => dimensions[key]?.status === 'ready' && dimensions[key].score !== null)
     .map((key) => ({
       key,
       short: dimensions[key].label,

@@ -32,6 +32,25 @@ test('@ 只检索面经，/ 才能唤醒 Skill', async () => {
   assert.doesNotMatch(source, /基于当前简历与目标岗位提问/)
 })
 
+test('已选 Skill 与面经在正文内使用不同颜色高亮', async () => {
+  const source = await readFile(componentUrl, 'utf8')
+  const syncComposerHighlightInput = functionSource(source, 'syncComposerHighlightInput')
+
+  assert.match(source, /class="composer-input-shell"/)
+  assert.match(source, /class="composer-highlight-layer"/)
+  assert.match(source, /composer-highlight-skill/)
+  assert.match(source, /composer-highlight-interview/)
+  assert.match(source, /--composer-skill-ink:\s*#0869d8/)
+  assert.match(source, /--composer-interview-ink:\s*#b45309/)
+  assert.match(source, /@input="syncComposerHighlightInput"/)
+  assert.match(syncComposerHighlightInput, /composerDisplayText\.value = event\.currentTarget\.value/)
+  assert.match(source, /\.composer-input-shell textarea \{[^}]*color:#324032/)
+  assert.match(source, /\.composer-highlight-layer \{[^}]*z-index:3[^}]*background:transparent[^}]*color:transparent/)
+  assert.doesNotMatch(source, /-webkit-text-fill-color:transparent/)
+  assert.doesNotMatch(source, /aria-label="已引用面经"/)
+  assert.doesNotMatch(source, /aria-label="待挂载 Skill"/)
+})
+
 test('会话工具入口保持紧凑且归档归入历史记录操作', async () => {
   const source = await readFile(componentUrl, 'utf8')
   const archiveConversation = functionSource(source, 'archiveConversation')

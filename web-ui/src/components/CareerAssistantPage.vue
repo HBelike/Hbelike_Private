@@ -13,6 +13,11 @@ import { toTargetRolePayload } from '../job-library-target-role.js'
 import { isAssessmentPending } from '../career-assessment-view.js'
 import { openBrowserInterviewMaster } from '../browser-interview-launcher.js'
 import {
+  buildComposerHighlightSegments,
+  composerReferencePresent,
+  selectedInterviewReferencePresent
+} from '../career-composer-highlights.js'
+import {
   firstServerTurn,
   removeServerTurn,
   restoreServerTurns,
@@ -62,6 +67,8 @@ const connectionTestMessage = ref('')
 const connectionTestError = ref('')
 const connectionSaveError = ref('')
 const connectionConfigRef = ref(null)
+const composerHighlightLayer = ref(null)
+const composerDisplayText = ref('')
 const messageText = ref('')
 const interviewMentionQuery = ref('')
 const interviewMentionResults = ref([])
@@ -114,6 +121,11 @@ const CONTEXT_RAIL_MIN_WIDTH = 360
 const CONTEXT_RAIL_MAX_WIDTH = 760
 const CONTEXT_RAIL_DEFAULT_WIDTH = 620
 const historyTotalPages = computed(() => Math.max(1, Math.ceil(historyTotal.value / historyPageSize.value)))
+const composerHighlightSegments = computed(() => buildComposerHighlightSegments(
+  composerDisplayText.value,
+  selectedSkillInvocations.value,
+  selectedInterviewReferences.value
+))
 
 const visibleContextRailWidth = computed(() => {
   if (viewportWidth.value <= 640) return viewportWidth.value
@@ -363,7 +375,15 @@ function selectInterviewMention(experience) {
 }
 
 function removeInterviewMention(experienceId) {
+  const experience = selectedInterviewReferences.value.find((item) => item.id === experienceId)
   selectedInterviewReferences.value = selectedInterviewReferences.value.filter((item) => item.id !== experienceId)
+  if (experience) {
+    const token = `@${experience.company_name}·${experience.role_name}`
+    messageText.value = messageText.value
+      .replace(token, ' ')
+      .replace(/\s{2,}/g, ' ')
+      .trim()
+  }
 }
 
 function activeSkillInvocation(text) {
@@ -425,8 +445,7 @@ function removeSkillInvocation(skillId) {
 }
 
 function skillInvocationPresent(text, skill) {
-  const escapedName = skill.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  return new RegExp(`(^|\\s)/${escapedName}(?=\\s|$)`, 'i').test(text)
+  return composerReferencePresent(text, `/${skill.name}`)
 }
 
 function activeSelectedSkillInvocations(text) {
@@ -434,6 +453,13 @@ function activeSelectedSkillInvocations(text) {
 }
 
 watch(messageText, (text) => {
+  composerDisplayText.value = text
+  const activeInterviews = selectedInterviewReferences.value.filter((experience) => (
+    selectedInterviewReferencePresent(text, experience)
+  ))
+  if (activeInterviews.length !== selectedInterviewReferences.value.length) {
+    selectedInterviewReferences.value = activeInterviews
+  }
   const activeSkills = activeSelectedSkillInvocations(text)
   if (activeSkills.length !== selectedSkillInvocations.value.length) {
     selectedSkillInvocations.value = activeSkills
@@ -441,6 +467,17 @@ watch(messageText, (text) => {
   scheduleInterviewMentionSearch(text)
   scheduleSkillMentionSearch(text)
 })
+
+function syncComposerHighlightInput(event) {
+  // v-model 会等中文输入法完成组合后再更新；显示层需要逐个 input 即时跟随。
+  composerDisplayText.value = event.currentTarget.value
+}
+
+function syncComposerHighlightScroll(event) {
+  if (!composerHighlightLayer.value) return
+  composerHighlightLayer.value.scrollTop = event.currentTarget.scrollTop
+  composerHighlightLayer.value.scrollLeft = event.currentTarget.scrollLeft
+}
 
 const providerOptions = [
   { key: 'deepseek', label: 'DeepSeek', short: 'DS', detail: '中文技术与推理模型', websiteUrl: 'https://platform.deepseek.com', apiBaseUrl: 'https://api.deepseek.com', defaultModelId: 'deepseek-v4-pro', modelHint: '例如：deepseek-v4-pro', vision: false },
@@ -2119,18 +2156,15 @@ onMounted(() => {
             <button class="quiet-button model-manager-button" type="button" @click="openModelDialog">模型连接</button>
           </div>
         </div>
-        <textarea v-model="messageText" aria-label="求职咨询内容" :disabled="!selectedConversation" :placeholder="composerPlaceholder" rows="3" @keydown.enter.exact.prevent="sendMessage" />
-        <div v-if="selectedInterviewReferences.length" class="interview-reference-row" aria-label="已引用面经">
-          <span v-for="experience in selectedInterviewReferences" :key="experience.id" class="interview-reference-chip">
-            <span>@{{ experience.company_name }} · {{ experience.role_name }}</span>
-            <button type="button" :aria-label="`移除 ${experience.job_name}`" @click="removeInterviewMention(experience.id)">×</button>
-          </span>
-        </div>
-        <div v-if="selectedSkillInvocations.length" class="interview-reference-row" aria-label="待挂载 Skill">
-          <span v-for="skill in selectedSkillInvocations" :key="skill.id" class="interview-reference-chip skill-invocation-chip">
-            <span>✦ 将挂载 {{ skill.name }}</span>
-            <button type="button" :aria-label="`移除 Skill ${skill.name}`" @click="removeSkillInvocation(skill.id)">×</button>
-          </span>
+        <div class="composer-input-shell">
+          <div ref="composerHighlightLayer" class="composer-highlight-layer" aria-hidden="true">
+            <template v-for="(segment, index) in composerHighlightSegments" :key="`${index}-${segment.kind}`">
+              <mark v-if="segment.kind !== 'plain'" :class="`composer-highlight-${segment.kind}`">{{ segment.text }}</mark>
+              <span v-else>{{ segment.text }}</span>
+            </template>
+            <br v-if="composerDisplayText.endsWith('\n')" />
+          </div>
+          <textarea v-model="messageText" aria-label="求职咨询内容" :disabled="!selectedConversation" :placeholder="composerPlaceholder" rows="3" @input="syncComposerHighlightInput" @scroll="syncComposerHighlightScroll" @keydown.enter.exact.prevent="sendMessage" />
         </div>
         <div v-if="skillMentionResults.length" class="interview-mention-menu skill-invocation-menu" role="listbox" aria-label="Skill 候选">
           <p class="suggestion-menu-label">技能库 · 选择后将 SKILL.md 挂载到本轮模型上下文</p>
@@ -2367,18 +2401,23 @@ onMounted(() => {
 .message-sending,.message-queued { opacity:.76; }.message-failed { border-color:#edcaca; background:#fff8f8 !important; }.message-failed small { color:#b35454; font-weight:800; }.agent-pending { width:min(560px,86%); color:var(--ui-text-secondary); }.stream-pending-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; color:var(--ui-text-secondary); }.stream-pending-heading .message-role { margin-bottom:0; }.stream-pending-heading::before { width:13px; height:13px; flex:0 0 auto; border:2px solid var(--ui-line-strong); border-top-color:var(--ui-accent); border-radius:50%; content:''; animation:career-thinking-spin .8s linear infinite; }.stream-pending-heading span { color:var(--ui-text-muted); font-size:11px; font-weight:800; }.stream-progress-list { display:grid; gap:7px; margin:11px 0 0; padding:0; list-style:none; }.stream-progress-item { display:flex; align-items:center; gap:8px; color:var(--ui-text-muted); font-size:12px; line-height:1.45; }.stream-progress-item i { width:7px; height:7px; flex:0 0 auto; border-radius:50%; background:var(--ui-line-strong); }.stream-progress-item.running { color:var(--ui-accent-ink); font-weight:750; }.stream-progress-item.running i { background:var(--ui-accent); animation:career-progress-pulse 1s ease-in-out infinite; }.stream-progress-item.completed i { background:var(--ui-success); }.stream-status,.streamed-answer { margin:10px 0 0 !important; }.streamed-answer { border-top:1px solid var(--ui-line); padding-top:10px; } @keyframes career-progress-pulse { 50% { transform:scale(.72); opacity:.55; } }
 .turn-queue-preview{display:grid;width:min(560px,86%);gap:7px;border:1px dashed var(--ui-line-strong);border-radius:12px;background:var(--ui-surface-soft);padding:10px 12px;color:var(--ui-text-secondary)}.turn-queue-preview>strong{font-size:11px}.turn-queue-preview article{display:grid;grid-template-columns:20px minmax(0,1fr) auto;align-items:start;gap:7px}.turn-queue-preview article span{display:grid;width:18px;height:18px;place-items:center;border-radius:50%;background:var(--ui-surface-active);color:var(--ui-accent-ink);font-size:10px;font-weight:850}.turn-queue-preview article p{overflow:hidden;margin:0;font-size:12px;line-height:1.45;text-overflow:ellipsis;white-space:nowrap}.turn-queue-preview article small{border-radius:999px;background:#fff;padding:2px 6px;color:var(--ui-text-muted);font-size:10px;font-weight:800}
 @keyframes career-thinking-spin { to { transform:rotate(360deg); } }
-.composer { border-top:1px solid #edf0e7; background:#fff; padding:12px 16px 14px; }.composer-toolbar { min-height:36px; flex-wrap:wrap; border-bottom:1px solid #edf0e7; padding-bottom:9px; }.input-tools,.session-tools { display:flex; min-width:0; flex-wrap:wrap; align-items:center; gap:7px; }.session-tools { margin-left:auto; justify-content:flex-end; }.job-url-row { display:grid; grid-template-columns:auto 1fr; align-items:center; gap:8px; margin:10px 0 9px; color:#738068; font-size:12px; font-weight:800; }.job-url-row input,.composer textarea { padding:10px 11px; }.composer textarea { display:block; min-height:68px; margin-top:10px; resize:vertical; }.composer-footer { margin-top:9px; }.input-tools { justify-content:flex-start; }.resume-input { display:none; }.chip-button.active { max-width:240px; overflow:hidden; background:#eaf4d4; color:#5a7d21; text-overflow:ellipsis; white-space:nowrap; }.file-clear-button { border-color:#f0d5d5; background:#fff8f8; color:#a65a5a; }.free-model-entry-button { border-style:dashed; background:#fff; color:#62812d; }.free-model-entry-button:hover { border-color:#9fbd67; background:#f5f9ed; }.model-select { width:auto; max-width:300px; padding:7px 9px; color:#65775a; font-size:12px; font-weight:700; }.send-button { min-width:88px; padding:9px 13px; }.composer-footer > small { color:#98a18e; font-size:11px; }
+.composer { border-top:1px solid #edf0e7; background:#fff; padding:12px 16px 14px; }.composer-toolbar { min-height:36px; flex-wrap:wrap; border-bottom:1px solid #edf0e7; padding-bottom:9px; }.input-tools,.session-tools { display:flex; min-width:0; flex-wrap:wrap; align-items:center; gap:7px; }.session-tools { margin-left:auto; justify-content:flex-end; }.job-url-row { display:grid; grid-template-columns:auto 1fr; align-items:center; gap:8px; margin:10px 0 9px; color:#738068; font-size:12px; font-weight:800; }.job-url-row input,.composer textarea { padding:10px 11px; }.composer textarea { display:block; min-height:68px; resize:vertical; }.composer-footer { margin-top:9px; }.input-tools { justify-content:flex-start; }.resume-input { display:none; }.chip-button.active { max-width:240px; overflow:hidden; background:#eaf4d4; color:#5a7d21; text-overflow:ellipsis; white-space:nowrap; }.file-clear-button { border-color:#f0d5d5; background:#fff8f8; color:#a65a5a; }.free-model-entry-button { border-style:dashed; background:#fff; color:#62812d; }.free-model-entry-button:hover { border-color:#9fbd67; background:#f5f9ed; }.model-select { width:auto; max-width:300px; padding:7px 9px; color:#65775a; font-size:12px; font-weight:700; }.send-button { min-width:88px; padding:9px 13px; }.composer-footer > small { color:#98a18e; font-size:11px; }
 .composer-toolbar{min-height:32px;flex-wrap:nowrap;gap:6px;border:1px solid var(--ui-line);border-radius:10px;background:var(--ui-surface-soft);padding:5px 6px}.composer-toolbar .input-tools,.composer-toolbar .session-tools{flex-wrap:nowrap;gap:5px}.composer-toolbar .input-tools{flex:1}.composer-toolbar :is(.chip-button,.quiet-button,.model-select){height:30px;border-color:var(--ui-line);border-radius:8px;background:var(--ui-surface);padding:5px 9px;color:var(--ui-text-secondary);font-size:11px}.composer-toolbar .active-context-chip{max-width:132px!important;flex:none;border-color:var(--ui-line-strong)!important;background:var(--ui-surface-active)!important;color:var(--ui-accent-ink)!important}.composer-toolbar .model-select{min-width:132px;max-width:230px;flex:1 1 164px}.composer-toolbar .free-model-entry-button{flex:none;border-style:solid;background:var(--ui-surface);color:var(--ui-accent-ink)}.composer-toolbar .model-manager-button{flex:none}.conversation-action-options button{min-width:0;padding-right:6px;padding-left:6px}
 @media(max-width:640px){.composer-toolbar{flex-wrap:wrap}.composer-toolbar .input-tools,.composer-toolbar .session-tools{width:100%;flex-wrap:wrap}.composer-toolbar .model-select{max-width:100%;flex:1 1 150px}}
-.interview-reference-row { display:flex; flex-wrap:wrap; gap:7px; margin-top:9px; }
-.interview-reference-chip { display:inline-flex; align-items:center; max-width:100%; gap:6px; border:1px solid #cfe1a9; border-radius:999px; background:#f1f8e4; color:#5d7e2a; padding:5px 7px 5px 10px; font-size:12px; font-weight:800; }
-.interview-reference-chip > span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.interview-reference-chip button { display:grid; width:18px; height:18px; place-items:center; border:0; border-radius:50%; background:transparent; color:#76954b; font:inherit; font-size:16px; line-height:1; cursor:pointer; }
-.interview-reference-chip button:hover { background:#dcecc0; color:#416217; }
+.composer-input-shell { --composer-skill-ink: #0869d8; --composer-skill-wash: #eaf3ff; --composer-interview-ink: #b45309; --composer-interview-wash: #fff1dc; position:relative; margin-top:10px; }
+.composer-highlight-layer,.composer-input-shell textarea { box-sizing:border-box; width:100%; min-height:68px; padding:10px 11px; font:inherit; font-size:13px; line-height:1.6; letter-spacing:normal; overflow-wrap:break-word; tab-size:4; white-space:pre-wrap; word-break:break-word; }
+.composer-highlight-layer { position:absolute; z-index:3; inset:0; overflow:auto; border:1px solid transparent; border-radius:10px; background:transparent; color:transparent; pointer-events:none; scrollbar-width:none; }
+.composer-highlight-layer::-webkit-scrollbar { display:none; }
+.composer-input-shell textarea { position:relative; z-index:2; margin:0; background:#fff; caret-color:#17263a; color:#324032; -webkit-text-fill-color:currentColor; }
+.composer-input-shell textarea::placeholder { color:#98a4b3; -webkit-text-fill-color:#98a4b3; }
+.composer-input-shell textarea::selection { background:rgba(8,105,216,.18); }
+.composer-highlight-layer mark { border-radius:4px; background:transparent; box-decoration-break:clone; font:inherit; -webkit-box-decoration-break:clone; }
+.composer-highlight-layer .composer-highlight-skill { background:var(--composer-skill-wash); box-shadow:0 0 0 1px rgba(8,105,216,.12); color:var(--composer-skill-ink); }
+.composer-highlight-layer .composer-highlight-interview { background:var(--composer-interview-wash); box-shadow:0 0 0 1px rgba(180,83,9,.13); color:var(--composer-interview-ink); }
 .interview-mention-menu { display:grid; max-height:206px; margin-top:8px; overflow:auto; border:1px solid #dce6ce; border-radius:12px; background:#fff; box-shadow:0 12px 28px rgba(68,84,44,.12); }
 .interview-mention-menu button { display:grid; gap:3px; border:0; border-bottom:1px solid #edf2e7; background:#fff; color:#34472a; padding:10px 12px; text-align:left; cursor:pointer; }
 .interview-mention-menu button:last-child { border-bottom:0; }.interview-mention-menu button:hover { background:#f3f8e9; }.interview-mention-menu strong { font-size:13px; }.interview-mention-menu small { color:#87977b; font-size:12px; }
-.skill-invocation-chip { border-color:#d8c9ef !important; background:#f7f2ff !important; color:#7250a0 !important; }.skill-invocation-menu { border-color:#ded1ef; }.suggestion-menu-label { margin:0; border-bottom:1px solid #eee7f6; background:#faf7fe; color:#8162a5; padding:7px 12px; font-size:10px; font-weight:900; letter-spacing:.08em; text-transform:uppercase; }.skill-invocation-menu button:hover { background:#f8f3fd; }
+.skill-invocation-menu { border-color:#bcd8f6; }.suggestion-menu-label { margin:0; border-bottom:1px solid #dceafb; background:#f2f7fd; color:#2869b5; padding:7px 12px; font-size:10px; font-weight:900; letter-spacing:.08em; text-transform:uppercase; }.skill-invocation-menu button:hover { background:#edf6ff; }
 .career-error-toast { position:fixed; z-index:1400; top:50%; left:50%; display:flex; width:min(620px,calc(100vw - 40px)); box-sizing:border-box; align-items:flex-start; justify-content:space-between; gap:18px; transform:translate(-50%,-50%); border:1px solid #efbcbc; border-radius:18px; background:#fff8f8; box-shadow:0 22px 70px rgba(114,42,42,.24); color:#943f3f; padding:19px 18px 19px 21px; animation:career-toast-in .18s ease-out; }.career-error-toast strong { display:block; font-size:17px; line-height:1.35; }.career-error-toast p { margin:5px 0 0; font-size:16px; font-weight:650; line-height:1.6; }.toast-close-button { display:grid; width:30px; height:30px; flex:0 0 auto; place-items:center; border:1px solid #edcaca; border-radius:9px; background:#fff; color:#a95050; font-size:22px; line-height:1; }.toast-close-button:hover { background:#fff0f0; }@keyframes career-toast-in { from { opacity:0; transform:translate(-50%,-46%); } to { opacity:1; transform:translate(-50%,-50%); } }
 .model-manager-button { border-color:#cfdcb7; background:#f1f7e5; color:#5c7a28; }.model-dialog-backdrop { position:fixed; z-index:1200; inset:0; display:grid; place-items:center; box-sizing:border-box; padding:28px; background:rgba(29,40,25,.42); backdrop-filter:blur(5px); }.model-dialog { display:flex; width:min(960px,100%); max-height:min(780px,calc(100vh - 56px)); flex-direction:column; overflow:hidden; border:1px solid #dce6cf; border-radius:24px; background:#fff; box-shadow:0 28px 80px rgba(23,37,20,.28); }.model-dialog-header { display:flex; align-items:flex-start; justify-content:space-between; gap:20px; border-bottom:1px solid #ecf0e5; padding:24px 28px 20px; }.model-dialog-header h2 { margin:4px 0 0; color:#243323; font-size:23px; }.dialog-close-button { display:grid; width:34px; height:34px; flex:0 0 auto; place-items:center; border:1px solid #e1e8d7; border-radius:10px; background:#fafcf7; color:#728067; font-size:23px; line-height:1; }.model-dialog-body { min-height:240px; overflow-y:auto; padding:22px 28px 26px; }.connection-toolbar { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:16px; }.connection-toolbar strong,.connection-toolbar small { display:block; }.connection-toolbar strong { color:#354333; font-size:16px; }.connection-toolbar small,.dialog-helper { margin-top:4px; color:#889281; font-size:12px; }.dialog-primary-button,.dialog-secondary-button { border:0; border-radius:11px; padding:10px 15px; font-size:13px; font-weight:850; }.dialog-primary-button { background:#89a93e; color:#fff; box-shadow:0 8px 18px rgba(112,144,51,.2); }.dialog-primary-button:disabled { cursor:wait; opacity:.6; }.dialog-secondary-button,.back-button { border:1px solid #e1e8d7; background:#fff; color:#64735a; }.connection-card-list { display:grid; gap:10px; }.connection-card { display:grid; width:100%; grid-template-columns:18px 42px minmax(0,1fr) auto; align-items:center; gap:13px; border:1px solid #e3ead9; border-radius:15px; background:#fff; color:#31402f; padding:13px 15px; text-align:left; transition:border-color .16s ease,background .16s ease,transform .16s ease; }.connection-card:hover { border-color:#a7c66d; background:#fbfdf7; transform:translateY(-1px); }.connection-drag { color:#bcc7b4; font-size:20px; letter-spacing:-3px; }.provider-avatar { display:grid; width:38px; height:38px; place-items:center; border:1px solid #dfe8d0; border-radius:12px; background:#f3f8e9; color:#6d8c33; font-size:11px; font-weight:900; }.provider-avatar.large { width:44px; height:44px; border-radius:14px; }.connection-card-copy { min-width:0; }.connection-card-copy strong,.connection-card-copy small { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.connection-card-copy strong { font-size:14px; }.connection-card-copy small { margin-top:3px; color:#899481; font-size:12px; }.connection-meta { display:grid; justify-items:end; gap:5px; }.connection-meta small { color:#98a18f; font-size:11px; }.connection-empty-state { display:grid; min-height:250px; place-content:center; justify-items:center; border:1px dashed #d9e4cb; border-radius:16px; background:#fbfdf8; color:#7a8870; text-align:center; }.connection-empty-state > span { color:#90b04c; font-size:30px; }.connection-empty-state strong { margin-top:8px; color:#526449; }.connection-empty-state p { max-width:320px; margin:7px 0 0; font-size:13px; line-height:1.6; }.back-button { border-radius:9px; padding:7px 10px; color:#66765b; font-size:12px; font-weight:800; }.model-dialog-body h3 { margin:20px 0 4px; color:#31402e; font-size:18px; }.provider-picker-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; margin-top:18px; }.provider-picker-card { display:grid; grid-template-columns:44px minmax(0,1fr); align-items:center; gap:11px; border:1px solid #e2ead8; border-radius:16px; background:#fbfcf9; color:#334131; padding:15px; text-align:left; transition:border-color .16s ease,box-shadow .16s ease; }.provider-picker-card:hover { border-color:#97ba57; box-shadow:0 10px 25px rgba(91,120,42,.1); }.provider-picker-card strong,.provider-picker-card small { display:block; }.provider-picker-card small { margin-top:4px; color:#84907c; font-size:11px; line-height:1.5; }.provider-picker-card em { grid-column:1 / -1; justify-self:start; border-radius:999px; background:#eef6df; color:#66842e; padding:4px 7px; font-size:10px; font-style:normal; font-weight:850; }.connection-form-body { padding-bottom:22px; }.selected-provider-banner { display:flex; align-items:center; gap:11px; margin-top:17px; border:1px solid #dce9c8; border-radius:15px; background:#f6faef; padding:12px; }.selected-provider-banner div { min-width:0; flex:1; }.selected-provider-banner strong,.selected-provider-banner small { display:block; }.selected-provider-banner small { margin-top:3px; color:#7d8973; font-size:12px; }.selected-provider-banner > span:last-child { border-radius:999px; background:#e7f1d4; color:#63822b; padding:5px 8px; font-size:11px; font-weight:850; }.connection-form-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; margin-top:18px; }.connection-form-grid label { display:grid; gap:5px; color:#4e5c49; font-size:13px; font-weight:850; }.connection-form-grid label > span { color:#8a9583; font-size:11px; font-weight:500; }.connection-form-grid input,.connection-form-grid select { width:100%; box-sizing:border-box; border:1px solid #dfe7d4; border-radius:10px; background:#fff; color:#354334; padding:10px 11px; font:inherit; outline:none; }.connection-form-grid input:focus,.connection-form-grid select:focus { border-color:#91b44b; box-shadow:0 0 0 3px rgba(137,169,62,.12); }.full-width { grid-column:1 / -1; }.capability-fieldset { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; margin:18px 0 0; border:0; padding:0; }.capability-fieldset legend { margin-bottom:8px; color:#4d5d48; font-size:13px; font-weight:850; }.capability-option { display:flex; align-items:flex-start; gap:8px; border:1px solid #e3ead9; border-radius:13px; background:#fbfcf9; padding:11px; }.capability-option input { margin-top:3px; accent-color:#89a93e; }.capability-option strong,.capability-option small { display:block; }.capability-option strong { color:#485846; font-size:12px; }.capability-option small { margin-top:3px; color:#899481; font-size:11px; line-height:1.45; }.connection-test-success,.connection-test-error { display:block; margin:14px 0 0; border-radius:11px; padding:10px 12px; font-size:12px; font-weight:750; line-height:1.6; }.connection-test-success { border:1px solid #cce5aa; background:#f4faea; color:#587b27; }.connection-test-error { border:1px solid #efcaca; background:#fff6f6; color:#9c4848; }.connection-test-error strong { display:block; margin-bottom:2px; }.model-dialog-footer { display:flex; justify-content:flex-end; gap:10px; border-top:1px solid #ecf0e5; background:#fbfcf9; padding:15px 28px; }
 .model-dialog { width:min(1080px,100%); max-height:min(840px,calc(100vh - 44px)); }

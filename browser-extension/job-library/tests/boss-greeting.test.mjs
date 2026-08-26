@@ -14,7 +14,6 @@ import {
   normalizeOutgoingMessageText,
   normalizeGreetingPayload,
   retryTransientTabEdit,
-  shouldStopGreetingBatch,
   updateLogicalMessageObservation,
   withGreetingRetryContext
 } from '../boss-greeting.js'
@@ -160,8 +159,8 @@ test('网页桥与后台同时开放仅重发定制文案动作', async () => {
   assert.match(serviceWorker, /createTabBusyGreetingFailure/)
   assert.match(serviceWorker, /'greeting_submission_state'/)
   assert.match(serviceWorker, /capabilities: GREETING_CAPABILITIES/)
-  assert.match(serviceWorker, /baselineOutgoingTexts/)
-  assert.match(serviceWorker, /new MutationObserver/)
+  assert.match(serviceWorker, /sendButton\.click\(\)\s*return \{ ok: true, status: 'submitted' \}/)
+  assert.doesNotMatch(serviceWorker, /new MutationObserver/)
   assert.match(serviceWorker, /data-message-direction="outgoing"/)
   assert.doesNotMatch(serviceWorker, /new WeakMap/)
 })
@@ -262,12 +261,4 @@ test('历史同文案和未清空输入框不能伪造新发送成功', () => {
     inputCleared: false,
     stableForMs: 5000
   }), 'pending')
-})
-
-test('安全状态与未知发送结果会停止整个批次', () => {
-  for (const code of ['verification_required', 'rate_limited', 'login_required', 'send_unknown']) {
-    assert.equal(shouldStopGreetingBatch(code), true)
-  }
-  assert.equal(shouldStopGreetingBatch('job_unavailable'), false)
-  assert.equal(shouldStopGreetingBatch('already_contacted'), false)
 })

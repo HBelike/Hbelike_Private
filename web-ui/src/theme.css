@@ -251,10 +251,12 @@ html[data-ui-theme="blue"] .main {
 }
 
 html[data-ui-theme="blue"] .topbar {
-  min-height: 42px;
-  margin-bottom: 16px;
-  border-bottom: 1px solid var(--ui-line);
-  padding-bottom: 14px;
+  min-height: 56px;
+  margin-bottom: 12px;
+  border-color: var(--ui-line);
+  background: linear-gradient(110deg, var(--ui-surface) 0%, var(--ui-surface) 74%, var(--ui-surface-soft) 100%);
+  padding: 9px 12px 9px 18px;
+  box-shadow: var(--ui-shadow);
 }
 
 html[data-ui-theme="blue"] .topbar h1 {
@@ -630,7 +632,6 @@ html[data-ui-theme="blue"] .interview-library-shell {
 }
 
 html[data-ui-theme="blue"] :is(
-  .library-header,
   .interview-tree-pane,
   .interview-detail-pane,
   .interview-list-pane,
@@ -669,8 +670,25 @@ html[data-ui-theme="blue"] :is(.tree-node.active, .platform-card.active, .platfo
   color: var(--ui-accent-ink);
 }
 
-html[data-ui-theme="blue"] :is(.library-header, .tree-pane-header, .experience-context-strip, .import-dialog > header, .collection-dialog-header, .import-tabs) {
+html[data-ui-theme="blue"] :is(.tree-pane-header, .experience-context-strip, .import-dialog > header, .collection-dialog-header, .import-tabs) {
   border-color: var(--ui-line);
+}
+
+html[data-ui-theme="blue"] .library-header {
+  border-color: var(--ui-line);
+  background: var(--ui-surface);
+  box-shadow: var(--ui-shadow);
+}
+
+html[data-ui-theme="blue"] .library-heading-mark {
+  background: var(--ui-surface-active);
+  color: var(--ui-accent);
+}
+
+html[data-ui-theme="blue"] .library-actions .quiet-action {
+  border-color: var(--ui-line);
+  background: var(--ui-surface-soft);
+  color: var(--ui-accent-ink);
 }
 
 html[data-ui-theme="blue"] :is(.experience-context-strip, .collection-tabs, .collection-form, .collection-section, .candidate-markdown, .editor-support-panel) {
@@ -1365,6 +1383,66 @@ html[data-ui-theme="blue"] body .interview-library-shell :is(.reading-paragraph,
 
 html[data-ui-theme="blue"] body .interview-library-shell .reading-divider {
   background: linear-gradient(90deg, var(--ui-line-strong), var(--ui-line) 70%, transparent);
+}
+
+/* 面经编辑器：归属字段、正文与辅助信息统一使用蓝白主题。 */
+html[data-ui-theme="blue"] body .interview-library-shell .editor-identity-panel {
+  border-color: var(--ui-line);
+  background: var(--ui-surface-soft);
+}
+
+html[data-ui-theme="blue"] body .interview-library-shell .editor-field {
+  color: var(--ui-text-secondary);
+}
+
+html[data-ui-theme="blue"] body .interview-library-shell :is(
+  .editor-field input,
+  .editor-canvas textarea
+) {
+  border-color: var(--ui-line);
+  background: var(--ui-surface);
+  color: var(--ui-text);
+}
+
+html[data-ui-theme="blue"] body .interview-library-shell :is(
+  .editor-field input,
+  .editor-canvas textarea
+):focus {
+  border-color: var(--ui-line-strong);
+  box-shadow: 0 0 0 3px var(--ui-focus);
+}
+
+html[data-ui-theme="blue"] body .interview-library-shell .editor-canvas {
+  border-color: var(--ui-line);
+  background: var(--ui-surface);
+  box-shadow: 0 12px 32px rgba(24, 62, 112, 0.05);
+}
+
+html[data-ui-theme="blue"] body .interview-library-shell .editor-canvas > span {
+  color: var(--ui-text);
+}
+
+html[data-ui-theme="blue"] body .interview-library-shell .editor-canvas > span em {
+  background: var(--ui-surface-active);
+  color: var(--ui-accent-ink);
+}
+
+html[data-ui-theme="blue"] body .interview-library-shell .editor-support-panel {
+  border-color: var(--ui-line);
+  background: var(--ui-surface-soft);
+  color: var(--ui-text-secondary);
+}
+
+html[data-ui-theme="blue"] body .interview-library-shell .editor-support-panel summary {
+  color: var(--ui-text-secondary);
+}
+
+html[data-ui-theme="blue"] body .interview-library-shell .editor-support-panel summary span {
+  color: var(--ui-text-muted);
+}
+
+html[data-ui-theme="blue"] body .interview-library-shell .editor-support-fields {
+  border-color: var(--ui-line);
 }
 
 /* 面经文件导入弹窗：上传、解析与确认阶段统一使用蓝白主题。 */

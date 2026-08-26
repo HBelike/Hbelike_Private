@@ -31,6 +31,28 @@ test('动态指标不再出现技术岗位固定模板', () => {
   assert.deepEqual(buildAssessmentCards(assessment).map((item) => item.short), ['才艺与表达', '关键要求缺口率'])
 })
 
+test('基础规则指标隐藏不可计算项但保留零分关键缺口率', () => {
+  const fallbackAssessment = {
+    status: 'fallback_ready',
+    algorithm_version: 'lexical-evidence-v2',
+    dimensions: {
+      skill_coverage: { label: '技能证据覆盖率', status: 'ready', score: 90.9 },
+      experience_coverage: { label: '经验要求达成率', status: 'insufficient_data', score: null },
+      project_relevance: { label: '项目场景适配率', status: 'ready', score: 92.9 },
+      critical_gap: { label: '关键要求缺口率', status: 'ready', score: 0 }
+    }
+  }
+
+  assert.deepEqual(
+    buildAssessmentCards(fallbackAssessment).map((item) => [item.key, item.score]),
+    [
+      ['skill_coverage', 90.9],
+      ['project_relevance', 92.9],
+      ['critical_gap', 0]
+    ]
+  )
+})
+
 test('关键缺口只展示尚未充分满足的硬性要求', () => {
   assert.deepEqual(itemsForDimension(assessment, 'critical_gap').map((item) => item.id), ['one'])
 })

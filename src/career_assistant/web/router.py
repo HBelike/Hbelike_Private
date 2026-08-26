@@ -363,8 +363,10 @@ class CreateInterviewExperienceRequest(BaseModel):
 
 
 class UpdateInterviewExperienceRequest(BaseModel):
-    """编辑面经正文后触发切片重建的请求。"""
+    """编辑面经归属与正文后触发切片重建的请求。"""
 
+    company_name: str = Field(min_length=1, max_length=120)
+    role_name: str = Field(min_length=1, max_length=160)
     markdown_content: str = Field(min_length=1, max_length=300_000)
     summary_text: str | None = Field(default=None, max_length=12_000)
     tags: list[str] = Field(default_factory=list, max_length=30)
@@ -2166,6 +2168,8 @@ def update_interview_experience(
         experience = services.interview_library_service.update_markdown(
             actor.organization_id,
             experience_id,
+            company_name=request_body.company_name,
+            role_name=request_body.role_name,
             markdown_content=request_body.markdown_content,
             summary_text=request_body.summary_text,
             tags=tuple(request_body.tags),

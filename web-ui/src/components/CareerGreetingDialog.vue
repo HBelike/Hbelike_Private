@@ -224,7 +224,7 @@ function requestSend() {
 
 async function startSend() {
   riskOpen.value = false
-  if (!await ensureGreetingExtensionReady()) return
+  if (!await ensureGreetingExtensionReady({ requireDispatchCapability: true })) return
   items.value = queueGreetingItems(items.value)
   stage.value = 'sending'
   sending.value = true
@@ -261,8 +261,6 @@ async function runSerialQueue() {
           defaultGreetingSent: nextItem.defaultGreetingSent
         })
       } else {
-        await jobLibraryBridge.preflightGreeting(nextItem.job, nextItem.message)
-        if (stopRequested.value) break
         items.value = updateGreetingItemStatus(items.value, nextItem.id, 'sending')
         result = await jobLibraryBridge.sendGreeting(nextItem.job, nextItem.message)
       }
@@ -291,8 +289,6 @@ async function runSerialQueue() {
         failedAt: new Date().toISOString()
       })
       sendError.value = message
-      stopRequested.value = true
-      break
     }
   }
 
@@ -317,14 +313,16 @@ async function retryFailedItem(item) {
   await runSerialQueue()
 }
 
-async function ensureGreetingExtensionReady({ requireRetryCapability = false } = {}) {
+async function ensureGreetingExtensionReady({ requireRetryCapability = false, requireDispatchCapability = false } = {}) {
   if (props.simulationMode) return true
   try {
     const connection = normalizeBossExtensionConnection(await jobLibraryBridge.ping())
-    if (connection.status === 'ready' && (!requireRetryCapability || connection.greetingRetryReady)) return true
+    const supportsRequestedAction = (!requireRetryCapability || connection.greetingRetryReady)
+      && (!requireDispatchCapability || connection.greetingDispatchReady)
+    if (connection.status === 'ready' && supportsRequestedAction) return true
     extensionGateMode.value = connection.status === 'ready' ? 'update' : 'install'
     extensionGateError.value = connection.status === 'ready'
-      ? `当前浏览器助手${connection.version ? ` v${connection.version}` : ''}不支持安全重试，请更新到 v${BOSS_EXTENSION_VERSION}。`
+      ? `当前浏览器助手${connection.version ? ` v${connection.version}` : ''}${requireDispatchCapability ? '不支持触发发送后直接继续下一条' : '不支持安全重试'}，请更新到 v${BOSS_EXTENSION_VERSION}。`
       : '未检测到浏览器助手，请安装后再发送。'
   } catch (error) {
     extensionGateMode.value = 'install'
@@ -371,7 +369,7 @@ function statusLabel(status) {
     queued: '等待发送',
     preflighting: '正在预检',
     sending: '正在发送',
-    sent: '已发送',
+    sent: '已触发发送',
     skipped: '已跳过',
     failed: '发送失败',
     stopped: '已停止'
@@ -564,7 +562,7 @@ function formatStatusTime(value) {
               <h3 v-if="sending">正在按顺序处理第 {{ finishedCount + 1 }} 条</h3>
               <h3 v-else-if="stopped">已停止剩余发送</h3>
               <h3 v-else>{{ simulationMode ? '本批模拟发送完成' : '本批真实发送完成' }}</h3>
-              <p v-if="sending">{{ simulationMode ? '当前页面只展示未来的状态变化，不会连接或操作 BOSS。' : '每次只处理一个岗位，确认本条结果后才会继续下一条。' }}</p>
+              <p v-if="sending">{{ simulationMode ? '当前页面只展示未来的状态变化，不会连接或操作 BOSS。' : '每次只处理一个岗位，触发本条发送后立即继续下一条，不等待送达回执。' }}</p>
               <p v-else-if="stopped">已完成的记录保留，未开始的岗位已标记为停止。</p>
               <p v-else>{{ simulationMode ? '所有已纳入本批的岗位均已完成本地状态演示。' : '所有已纳入本批的岗位均已完成处理。' }}</p>
 
@@ -605,9 +603,9 @@ function formatStatusTime(value) {
             <aside class="simulation-boundary" :class="{ live: !simulationMode }">
               <span class="boundary-mark">{{ simulationMode ? '本地' : 'BOSS' }}</span>
               <h4>{{ simulationMode ? '不会执行真实发送' : '真实串行发送' }}</h4>
-              <p>{{ simulationMode ? '本页未调用浏览器扩展的发送动作，也不会向 BOSS 提交消息。' : '发送前检查登录、验证与岗位状态；遇到平台异常立即停止。' }}</p>
+              <p>{{ simulationMode ? '本页未调用浏览器扩展的发送动作，也不会向 BOSS 提交消息。' : '每条发送前检查登录、验证与岗位状态；单条异常会记录失败并继续后续岗位。' }}</p>
               <ul v-if="simulationMode"><li>登录与验证码状态未检查</li><li>账号额度未读取</li><li>所有结果仅保存在当前页面</li></ul>
-              <ul v-else><li>同一时间只发送一条</li><li>会话失效时自动刷新一次</li><li>不绕过验证码或平台限制</li></ul>
+              <ul v-else><li>同一时间只发送一条</li><li>点击发送后不等待送达回执</li><li>不绕过验证码或平台限制</li></ul>
             </aside>
           </section>
         </main>
@@ -620,7 +618,7 @@ function formatStatusTime(value) {
             <small v-if="!candidateProfile?.id">请先在当前会话选择简历资料</small>
           </div>
           <div v-else class="local-boundary" :class="{ live: !simulationMode }">
-            <i aria-hidden="true"></i><span>{{ simulationMode ? '安全预览，不会发送到 BOSS' : '真实发送：逐条预检、逐条确认结果' }}</span>
+            <i aria-hidden="true"></i><span>{{ simulationMode ? '安全预览，不会发送到 BOSS' : '真实发送：逐条触发、不等待送达回执' }}</span>
           </div>
 
           <div class="footer-actions">
@@ -638,7 +636,7 @@ function formatStatusTime(value) {
           <section class="risk-dialog" role="alertdialog" aria-modal="true" aria-labelledby="greeting-risk-title">
             <span class="risk-mark" aria-hidden="true">!</span>
             <div><small>发送前确认</small><h3 id="greeting-risk-title">本批包含 {{ includedItems.length }} 个岗位</h3></div>
-            <p>连续向多个岗位发起沟通可能触发 BOSS 限流、安全验证、沟通额度限制或账号封禁。正式功能遇到任何异常会立即停止，不会尝试绕过平台限制。</p>
+            <p>连续向多个岗位发起沟通可能触发 BOSS 限流、安全验证、沟通额度限制或账号封禁。为降低集中并发风险，正式功能会保持逐岗串行；单岗异常只记录失败并继续，不会尝试绕过平台限制。</p>
             <label><input v-model="riskAcknowledged" type="checkbox" /><span>我已了解批量发送可能带来的账号风险</span></label>
             <footer><button type="button" class="secondary-button" @click="riskOpen = false">返回检查</button><button type="button" class="risk-confirm-button" :disabled="!riskAcknowledged" @click="startSend">了解风险，开始{{ simulationMode ? '模拟' : '真实发送' }}</button></footer>
           </section>

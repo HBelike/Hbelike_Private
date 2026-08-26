@@ -865,8 +865,26 @@ button {
 }
 
 .topbar {
-  min-height: 38px;
-  margin-bottom: 16px;
+  position: relative;
+  min-height: 56px;
+  margin-bottom: 12px;
+  border: 1px solid var(--ui-line);
+  border-radius: 12px;
+  background: var(--ui-surface);
+  box-shadow: var(--ui-shadow);
+  padding: 9px 12px 9px 18px;
+  transition: border-color .16s ease, box-shadow .16s ease;
+}
+
+.topbar::before {
+  position: absolute;
+  top: 14px;
+  bottom: 14px;
+  left: -1px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--ui-accent);
+  content: "";
 }
 
 .topbar-account {
@@ -3675,9 +3693,16 @@ pre {
     min-height: 56px;
     margin: -12px -14px 12px;
     padding: max(10px, env(safe-area-inset-top)) 14px 10px;
+    border: 0;
     border-bottom: 1px solid rgba(228, 231, 221, 0.92);
+    border-radius: 0;
     background: rgba(247, 248, 243, 0.94);
+    box-shadow: none;
     backdrop-filter: blur(14px);
+  }
+
+  .topbar::before {
+    display: none;
   }
 
   .topbar h1 {

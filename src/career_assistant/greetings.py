@@ -30,9 +30,9 @@ _SYSTEM_PROMPT = """你是资深中文求职沟通写手。你的任务是根据
 
 在生成前，请在内部完成以下工作，但不要输出分析过程：
 1. 提取岗位的核心职责、硬性要求、优先条件、技术或业务重点。
-2. 进行候选人优势扫描：完整阅读全部简历证据，分别识别学历、工作经验、奖项/荣誉、个人项目，以及岗位相关技能与成果。
+2. 进行候选人优势扫描：完整阅读全部简历证据，分别识别学校层次或排名（如 985、211、双一流、QS 排名）、学历层次（博士、硕士、本科）、论文/专利等学术成果、工作经验、奖项/荣誉、个人项目、个人网站、GitHub/PR 开源贡献记录，以及岗位相关技能与成果。
 3. 将岗位要求与上述候选人优势逐项匹配，但不要因为 JD 强调某项能力就忽略简历中的其他高价值优势。
-4. 从实际存在证据的类别中选择 2 至 4 项最强优势。有证据时优先覆盖学历、工作经验和个人项目；奖项或荣誉有区分度时加入。
+4. 从实际存在证据的类别中选择最强优势。有证据时，学校层次或排名、博士/硕士学历、论文/专利成果都属于高价值身份或成果证据，应在开头优先明确表达；再结合工作经验、个人项目和岗位相关成果。奖项或荣誉有区分度时加入。
 5. 如果简历存在两个及以上优势类别，尽量让招呼语覆盖至少两个类别；不得只用同一段工作或同一个项目的多个技术细节占满全文。
 6. 根据候选人的资历、岗位类型和最强证据决定表达重点、语序和开场方式，不套用固定模板。
 7. 检查每个事实、数字、公司、项目、技术和成果是否能在简历证据中找到依据。
@@ -46,6 +46,8 @@ _SYSTEM_PROMPT = """你是资深中文求职沟通写手。你的任务是根据
 - 如果匹配度一般，选择真实的可迁移经验表达兴趣，不得为了显得匹配而编造经历。
 - 简历没有足够证据时，宁可少写，也不要使用“学习能力强、抗压能力强、与岗位高度匹配”等空泛补充。
 - 学历、工作经验、奖项、个人项目都是条件信息，某类没有简历证据时必须彻底省略，不得根据 JD、示例、常识或相邻经历推断补全。
+- 简历没有明确写出 985、211、双一流、QS 排名、博士、硕士、论文或专利等信息时，不得仅凭学校名称、常识或模型记忆补全；简历明确写出时，不得弱化成普通“本科/毕业”描述。
+- 如果简历明确提供个人网站、作品集、项目地址、GitHub/GitLab/Gitee 或 PR/开源贡献记录，最终招呼语必须至少原样附上一个最有代表性的链接；不得改写、缩短或编造 URL。
 
 称呼规则：
 - 招聘者信息明确包含姓氏和称谓时，使用自然称呼，例如“彭女士您好”。
@@ -57,6 +59,7 @@ _SYSTEM_PROMPT = """你是资深中文求职沟通写手。你的任务是根据
 - 输出一段自然中文，建议 80 至 150 个汉字。
 - 让招聘者在前两句内看见候选人的身份定位和最相关证据。
 - 优先使用具体项目、真实职责、技术组合或可验证成果，少用抽象自我评价。
+- 含成果链接时，先用一句短语说明链接证明什么，再原样附上 URL；不要只贴裸链接。
 - 自然说明证据与该岗位的关联，但不要逐条复述 JD。
 - 岗位要求在招呼语中提供编号或特定信息时，应自然带上。
 - 结尾只保留一句轻量、得体的沟通邀请。
@@ -87,10 +90,59 @@ _SYSTEM_PROMPT = """你是资深中文求职沟通写手。你的任务是根据
 如果关键资料不足，仍然输出诚实、简短的招呼语，并在 warnings 中说明缺失信息。不得以缺少信息为由编造内容。"""
 
 _NUMBER_PATTERN = re.compile(r"(?<![A-Za-z])\d+(?:\.\d+)?")
-_URL_PATTERN = re.compile(r"https?://[^\s，。；！？]+", re.IGNORECASE)
+_URL_PATTERN = re.compile(r'''https?://[^\s，。；！？)\]}>"']+''', re.IGNORECASE)
 _EMAIL_PATTERN = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 _TECH_PATTERN = re.compile(r"(?<![A-Za-z0-9])[A-Za-z][A-Za-z0-9+#./_-]{1,}(?![A-Za-z0-9])")
+_TECH_STACK_SEPARATOR_PATTERN = re.compile(r"/|(?<=[A-Za-z0-9])\+(?=[A-Za-z])")
 _SPACE_PATTERN = re.compile(r"\s+")
+_ACADEMIC_ADVANTAGE_GROUPS: tuple[tuple[str, tuple[re.Pattern[str], ...]], ...] = (
+    (
+        "学校层次或排名",
+        (
+            re.compile(r"(?<!\d)985(?!\d)"),
+            re.compile(r"(?<!\d)211(?!\d)"),
+            re.compile(r"双一流"),
+            re.compile(r"(?<![A-Za-z])QS(?![A-Za-z])", re.IGNORECASE),
+        ),
+    ),
+    (
+        "博士或硕士学历",
+        (
+            re.compile(r"博士"),
+            re.compile(r"硕士"),
+        ),
+    ),
+    (
+        "论文或专利成果",
+        (
+            re.compile(r"论文"),
+            re.compile(r"专利"),
+            re.compile(r"第一作者|一作|共同一作"),
+            re.compile(r"(?<![A-Za-z])SCI(?![A-Za-z])", re.IGNORECASE),
+            re.compile(r"(?<![A-Za-z])EI(?![A-Za-z])", re.IGNORECASE),
+            re.compile(r"(?<![A-Za-z])CCF(?:-[ABC])?(?![A-Za-z])", re.IGNORECASE),
+            re.compile(r"核心期刊|顶会|顶刊"),
+        ),
+    ),
+)
+_RESULT_LINK_MARKERS = (
+    "个人网站",
+    "个人主页",
+    "作品集",
+    "项目地址",
+    "项目链接",
+    "开源",
+    "贡献记录",
+    "github",
+    "gitlab",
+    "gitee",
+    "博客",
+)
+_RESULT_LINK_DOMAINS = ("github.com", "gitlab.com", "gitee.com")
+_RESULT_LINK_ENGLISH_MARKER_PATTERN = re.compile(
+    r"\b(?:pr|pull\s+request|portfolio|homepage)\b",
+    re.IGNORECASE,
+)
 
 
 class GreetingCandidateNotFoundError(LookupError):
@@ -306,8 +358,9 @@ class CareerGreetingService:
             for index, part in enumerate(parts, start=1)
         )
 
-    @staticmethod
+    @classmethod
     def _user_prompt(
+        cls,
         job: GreetingJobInput,
         cv_evidence: tuple[GreetingEvidence, ...],
         jd_evidence: tuple[GreetingEvidence, ...],
@@ -315,10 +368,27 @@ class CareerGreetingService:
     ) -> str:
         cv_text = "\n".join(f"[{item.id}] {item.summary}" for item in cv_evidence)
         jd_text = "\n".join(f"[{item.id}] {item.summary}" for item in jd_evidence)
+        advantage_lines = [
+            f"{label}：{'、'.join(item.id for item in items)}"
+            for label, items in cls._academic_advantage_evidence(cv_evidence)
+        ]
+        link_lines = [
+            f"[{item.id}] {url}"
+            for url, item in cls._result_links(cv_evidence)
+        ]
         skills = "、".join(job.skills) or "未单独标注"
         return f"""请根据以下资料生成招呼语，并严格输出 json。
 
 先完整阅读全部 CV 证据，完成候选人优势扫描后再与 JD 匹配；不要只选择与 JD 最接近的单一工作或项目技术片段。
+
+以下是程序从 CV 中确定性检出的必写优势类别与可验证成果链接。只用于防止遗漏，具体表述仍须回到对应 CV 编号核验；标为“无”时不得补写：
+<required_resume_advantages>
+{chr(10).join(advantage_lines) or '无'}
+</required_resume_advantages>
+
+<required_result_links>
+{chr(10).join(link_lines) or '无'}
+</required_result_links>
 
 <candidate_resume>
 {cv_text}
@@ -395,6 +465,8 @@ JSON 输出示例：
             ],
         )
         self._validate_literal_tokens(message, source_text)
+        self._validate_required_resume_advantages(message, cv_evidence, resume_ids)
+        self._validate_required_result_link(message, cv_evidence, resume_ids)
         if previous_message:
             similarity = SequenceMatcher(
                 None,
@@ -441,17 +513,126 @@ JSON 输出示例：
         )
         source_lower = source_text.lower()
         for label, pattern in checks:
-            unsupported = sorted(
-                {
-                    token
-                    for token in pattern.findall(message)
-                    if token.lower() not in source_lower
-                },
-            )
+            tokens = pattern.findall(message)
+            if pattern is _TECH_PATTERN:
+                unsupported = CareerGreetingService._unsupported_tech_tokens(
+                    tokens,
+                    source_lower,
+                )
+            else:
+                unsupported = sorted(
+                    {token for token in tokens if token.lower() not in source_lower},
+                )
             if unsupported:
                 raise GreetingGenerationError(
                     f"招呼语包含资料中不存在的{label}：{','.join(unsupported)}",
                 )
+
+    @staticmethod
+    def _academic_advantage_evidence(
+        cv_evidence: tuple[GreetingEvidence, ...],
+    ) -> tuple[tuple[str, tuple[GreetingEvidence, ...]], ...]:
+        groups: list[tuple[str, tuple[GreetingEvidence, ...]]] = []
+        for label, patterns in _ACADEMIC_ADVANTAGE_GROUPS:
+            matched = tuple(
+                item
+                for item in cv_evidence
+                if any(pattern.search(item.summary) for pattern in patterns)
+            )
+            if matched:
+                groups.append((label, matched))
+        return tuple(groups)
+
+    @staticmethod
+    def _result_links(
+        cv_evidence: tuple[GreetingEvidence, ...],
+    ) -> tuple[tuple[str, GreetingEvidence], ...]:
+        links: list[tuple[str, GreetingEvidence]] = []
+        seen: set[str] = set()
+        for item in cv_evidence:
+            summary_lower = item.summary.casefold()
+            urls = _URL_PATTERN.findall(item.summary)
+            for url in urls:
+                remainder = item.summary.replace(url, "").strip(" \t:：-—|#*•（）()[]")
+                is_result_link = (
+                    any(marker in summary_lower for marker in _RESULT_LINK_MARKERS)
+                    or any(domain in url.casefold() for domain in _RESULT_LINK_DOMAINS)
+                    or _RESULT_LINK_ENGLISH_MARKER_PATTERN.search(item.summary) is not None
+                    or not remainder
+                )
+                if is_result_link and url not in seen:
+                    seen.add(url)
+                    links.append((url, item))
+        return tuple(links)
+
+    @classmethod
+    def _validate_required_resume_advantages(
+        cls,
+        message: str,
+        cv_evidence: tuple[GreetingEvidence, ...],
+        resume_ids: tuple[str, ...],
+    ) -> None:
+        selected_ids = set(resume_ids)
+        missing: list[str] = []
+        uncited: list[str] = []
+        for label, source_items in cls._academic_advantage_evidence(cv_evidence):
+            patterns = next(
+                patterns
+                for group_label, patterns in _ACADEMIC_ADVANTAGE_GROUPS
+                if group_label == label
+            )
+            if not any(pattern.search(message) for pattern in patterns):
+                missing.append(label)
+            elif not any(item.id in selected_ids for item in source_items):
+                uncited.append(label)
+        if missing:
+            raise GreetingGenerationError(
+                "招呼语遗漏简历中的高价值学历或学术成果：" + "、".join(missing),
+            )
+        if uncited:
+            raise GreetingGenerationError(
+                "高价值学历或学术成果缺少对应简历证据编号：" + "、".join(uncited),
+            )
+
+    @classmethod
+    def _validate_required_result_link(
+        cls,
+        message: str,
+        cv_evidence: tuple[GreetingEvidence, ...],
+        resume_ids: tuple[str, ...],
+    ) -> None:
+        result_links = cls._result_links(cv_evidence)
+        if not result_links:
+            return
+        included = tuple((url, item) for url, item in result_links if url in message)
+        if not included:
+            raise GreetingGenerationError("招呼语遗漏简历中已提供的个人成果链接")
+        selected_ids = set(resume_ids)
+        if not any(item.id in selected_ids for _, item in included):
+            raise GreetingGenerationError("个人成果链接缺少对应简历证据编号")
+
+    @staticmethod
+    def _unsupported_tech_tokens(tokens: list[str], source_lower: str) -> list[str]:
+        unsupported: set[str] = set()
+        for token in tokens:
+            if token.lower() in source_lower:
+                continue
+            # 整串不存在时才拆分，避免破坏 C++、C#、Node.js、CI/CD 等合法技术名。
+            components = tuple(
+                component
+                for component in _TECH_STACK_SEPARATOR_PATTERN.split(token)
+                if component
+            )
+            missing = {
+                component
+                for component in components
+                if component.lower() not in source_lower
+            }
+            if len(components) > 1:
+                unsupported.update(missing)
+            else:
+                unsupported.add(token)
+        return sorted(unsupported)
 
     @staticmethod
     def _correction_prompt(error: GreetingGenerationError | None) -> str:

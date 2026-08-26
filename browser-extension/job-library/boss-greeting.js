@@ -270,15 +270,3 @@ export function classifyFriendAddResponse(response) {
   }
   return { code: 'boss_api_error', message: message || 'BOSS 未能建立沟通关系。', stopBatch: true }
 }
-
-export function shouldStopGreetingBatch(code) {
-  return new Set([
-    'verification_required',
-    'rate_limited',
-    'login_required',
-    'send_unknown',
-    'browser_tab_busy',
-    'extension_error',
-    'boss_api_error'
-  ]).has(text(code, 80))
-}

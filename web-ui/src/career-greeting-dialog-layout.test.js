@@ -26,6 +26,18 @@ test('发送进度记录失败详情并支持选择后重发', async () => {
   assert.match(source, /installDialogOpen\.value = true/)
 })
 
+test('真实发送逐岗触发且单项失败不会停止剩余岗位', async () => {
+  const source = await readFile(componentUrl, 'utf8')
+  const queueBody = source.match(/async function runSerialQueue\(\) \{([\s\S]*?)\r?\n\}\r?\n\r?\nasync function retryFailedItem/)?.[1] ?? ''
+  const failureBody = queueBody.match(/\} catch \(error\) \{([\s\S]*?)\r?\n    \}/)?.[1] ?? ''
+
+  assert.match(queueBody, /result = await jobLibraryBridge\.sendGreeting/)
+  assert.doesNotMatch(queueBody, /await jobLibraryBridge\.preflightGreeting/)
+  assert.match(failureBody, /updateGreetingItemStatus/)
+  assert.doesNotMatch(failureBody, /stopRequested\.value = true/)
+  assert.doesNotMatch(failureBody, /\bbreak\b/)
+})
+
 test('审核弹窗调用真实招呼语接口并移除虚假 humanizer 标签', async () => {
   const source = await readFile(componentUrl, 'utf8')
 

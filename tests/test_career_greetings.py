@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from uuid import UUID, uuid4
@@ -107,11 +108,11 @@ def output(
     return json.dumps(
         {
             "message": message or (
-                "彭女士您好，我是计算机本科，参与过银行业务系统的 Java 微服务开发与投产，"
+                "彭女士您好，我是 211 院校计算机本科，参与过银行业务系统的 Java 微服务开发与投产，"
                 "也做过分布式任务平台的监控告警和上线交付。岗位关注服务开发与故障排查，"
                 "与我的实际经历比较贴近，方便的话想进一步了解团队当前项目。"
             ),
-            "resume_evidence_ids": resume_ids or ["CV-004", "CV-006"],
+            "resume_evidence_ids": resume_ids or ["CV-002", "CV-004", "CV-006"],
             "jd_evidence_ids": jd_ids or ["JD-002", "JD-004"],
             "warnings": [],
         },
@@ -214,6 +215,15 @@ def test_prompt_prioritizes_supported_candidate_advantages_without_becoming_a_te
     assert "禁止迁移到真实输出" in prompt
 
 
+def test_prompt_requires_academic_distinctions_and_verifiable_result_links() -> None:
+    prompt = greeting_module._SYSTEM_PROMPT
+
+    assert all(signal in prompt for signal in ("985", "211", "双一流", "QS", "博士", "硕士"))
+    assert all(signal in prompt for signal in ("论文", "专利", "个人网站", "GitHub", "PR"))
+    assert "至少原样附上一个" in prompt
+    assert "简历没有明确写出" in prompt
+
+
 def test_user_prompt_requires_a_full_resume_scan_before_jd_matching() -> None:
     cv_evidence = CareerGreetingService._number_evidence(candidate().resume_outline, "CV")
     jd_evidence = CareerGreetingService._number_evidence(job().description, "JD")
@@ -222,6 +232,27 @@ def test_user_prompt_requires_a_full_resume_scan_before_jd_matching() -> None:
 
     assert "先完整阅读全部 CV 证据" in prompt
     assert "不要只选择与 JD 最接近的单一工作或项目技术片段" in prompt
+
+
+def test_user_prompt_lists_required_advantage_categories_and_result_links() -> None:
+    candidate_record = replace(
+        candidate(),
+        resume_outline=(
+            "教育经历\n某大学 QS 前 200 计算机博士\n"
+            "论文成果\n第一作者发表 SCI 论文。\n"
+            "个人成果\nGitHub PR：https://github.com/pulls?q=is%3Apr+author%3Atest"
+        ),
+    )
+    cv_evidence = CareerGreetingService._number_evidence(candidate_record.resume_outline, "CV")
+    jd_evidence = CareerGreetingService._number_evidence(job().description, "JD")
+
+    prompt = CareerGreetingService._user_prompt(job(), cv_evidence, jd_evidence, "")
+
+    assert "<required_resume_advantages>" in prompt
+    assert "学校层次或排名：CV-002" in prompt
+    assert "博士或硕士学历：CV-002" in prompt
+    assert "论文或专利成果：CV-003、CV-004" in prompt
+    assert "[CV-006] https://github.com/pulls?q=is%3Apr+author%3Atest" in prompt
 
 
 def test_generate_uses_actor_resume_and_exact_deepseek_profile() -> None:
@@ -246,7 +277,7 @@ def test_generate_uses_actor_resume_and_exact_deepseek_profile() -> None:
     assert gateway.selection.required_capabilities == frozenset({ModelCapability.TEXT})
     assert result.model_id == "deepseek-v4-pro"
     assert result.provider_key == "deepseek"
-    assert [item.id for item in result.resume_evidence] == ["CV-004", "CV-006"]
+    assert [item.id for item in result.resume_evidence] == ["CV-002", "CV-004", "CV-006"]
     assert [item.id for item in result.jd_highlights] == ["JD-002", "JD-004"]
     call = client.calls[0]
     assert call["operation"] == "greeting"
@@ -319,10 +350,108 @@ def test_generate_rejects_second_invalid_response() -> None:
     assert len(client.calls) == 2
 
 
+def test_generate_retries_when_supported_academic_advantage_is_omitted() -> None:
+    academic_candidate = replace(
+        candidate(),
+        resume_outline=(
+            "教育经历\n某大学 QS前200 计算机博士\n"
+            "论文成果\n以第一作者发表 SCI论文。\n"
+            "工作经历\n参与 Java 服务开发与交付。"
+        ),
+    )
+    omitted = output(
+        message=(
+            "彭女士您好，我是计算机专业毕业，参与过 Java 服务开发与交付。"
+            "看到岗位关注微服务接口与版本交付，这与我的实际经历有交集，"
+            "方便的话想进一步了解团队目前的项目重点。"
+        ),
+        resume_ids=["CV-006"],
+    )
+    supported = output(
+        message=(
+            "彭女士您好，我是某大学 QS前200 计算机博士，以第一作者发表过 SCI论文，"
+            "也参与过 Java 服务开发与交付。看到岗位关注微服务接口与版本交付，"
+            "与我的经历有交集，想进一步沟通。"
+        ),
+        resume_ids=["CV-002", "CV-004", "CV-006"],
+    )
+    service, _, _, client = build_service(
+        [omitted, supported],
+        candidate_record=academic_candidate,
+    )
+
+    result = service.generate(ORGANIZATION_ID, ACTOR_ID, CANDIDATE_ID, job())
+
+    assert "QS前200" in result.message
+    assert "博士" in result.message
+    assert len(client.calls) == 2
+    assert "高价值学历或学术成果" in client.calls[1]["messages"][-1].content
+
+
+def test_generate_retries_when_supported_portfolio_link_is_omitted() -> None:
+    linked_candidate = replace(
+        candidate(),
+        resume_outline=(
+            "教育经历\n东华大学（211）计算机硕士\n"
+            "个人成果\n个人网站：https://example.dev\n"
+            "工作经历\n参与 Java 微服务开发与投产。"
+        ),
+    )
+    omitted = output(
+        message=(
+            "彭女士您好，我是东华大学 211 计算机硕士，参与过 Java 微服务开发与投产。"
+            "看到岗位关注服务开发、故障排查和版本交付，与我的实际经历有交集，"
+            "方便的话想进一步了解团队目前的项目。"
+        ),
+        resume_ids=["CV-002", "CV-006"],
+    )
+    supported = output(
+        message=(
+            "彭女士您好，我是东华大学 211 计算机硕士，参与过 Java 微服务开发与投产；"
+            "个人成果可查看 https://example.dev。岗位方向与我的经历有交集，"
+            "方便的话想进一步沟通。"
+        ),
+        resume_ids=["CV-002", "CV-004", "CV-006"],
+    )
+    service, _, _, client = build_service(
+        [omitted, supported],
+        candidate_record=linked_candidate,
+    )
+
+    result = service.generate(ORGANIZATION_ID, ACTOR_ID, CANDIDATE_ID, job())
+
+    assert "https://example.dev" in result.message
+    assert len(client.calls) == 2
+    assert "个人成果链接" in client.calls[1]["messages"][-1].content
+
+
+def test_literal_validation_accepts_supported_combined_tech_stacks() -> None:
+    message = "我使用 Java/SpringBoot 开发服务，并通过 Vue3+FastAPI+LangGraph 搭建应用。"
+    source_text = "技术栈包括 Java、SpringBoot、Vue3、FastAPI、LangGraph。"
+
+    CareerGreetingService._validate_literal_tokens(message, source_text)
+
+
+def test_literal_validation_preserves_special_characters_inside_tech_names() -> None:
+    message = "项目使用 C++/Python、C#、.NET、Node.js 和 CI/CD。"
+    source_text = "掌握 C++、Python、C#、.NET、Node.js、CI/CD。"
+
+    CareerGreetingService._validate_literal_tokens(message, source_text)
+
+
+def test_literal_validation_rejects_unsupported_component_in_combined_stack() -> None:
+    message = "我使用 Java/ImaginarySDK 开发服务。"
+    source_text = "项目使用 Java 和 SpringBoot。"
+
+    with pytest.raises(GreetingGenerationError, match="ImaginarySDK"):
+        CareerGreetingService._validate_literal_tokens(message, source_text)
+
+
 def test_regeneration_includes_previous_message_and_rejects_same_text() -> None:
     previous = json.loads(output())["message"]
     revised = (
-        "彭女士您好，看到岗位侧重 Java 服务交付和线上问题处理。我在银行业务系统中参与过"
+        "彭女士您好，我是 211 院校计算机本科，看到岗位侧重 Java 服务交付和线上问题处理。"
+        "我在银行业务系统中参与过"
         "微服务接口开发、投产和故障排查，也完成过分布式任务平台的监控告警建设。"
         "这些经历与岗位方向有交集，想和您进一步聊聊团队目前的工作重点。"
     )

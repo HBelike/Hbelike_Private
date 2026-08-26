@@ -72,3 +72,20 @@ test('面经库只保留空态中的文件导入主入口', () => {
     /@click="openImport\('file'\)">导入第一份材料<\/button>/
   )
 })
+
+test('面经库顶部导入区使用独立盒子并让按钮名称与功能一致', () => {
+  const header = interviewLibrary.match(
+    /<header class="library-header">([^]*?)<\/header>/
+  )?.[1]
+
+  assert.ok(header, '应保留独立的面经库顶部导入盒')
+  assert.match(header, /class="library-heading-mark"/)
+  assert.match(header, /<strong>导入与收录<\/strong>/)
+  assert.match(header, /@click="openCollection\('xiaohongshu'\)"[^>]*>[^]*?小红书URL读取<\/button>/)
+  assert.match(header, /@click="openImport\('file'\)"[^>]*>[^]*?上传面经<\/button>/)
+  assert.doesNotMatch(header, /小红书公开内容导入|粘贴正文|openImport\('text'\)/)
+
+  assert.match(interviewLibrary, /\.library-header \{[^}]*border:\s*1px solid/)
+  assert.match(interviewLibrary, /\.library-heading-mark \{/)
+  assert.match(interviewLibrary, /\.library-actions \.primary-action \{/)
+})

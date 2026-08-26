@@ -1,9 +1,10 @@
-export const BOSS_EXTENSION_VERSION = '0.2.6'
+export const BOSS_EXTENSION_VERSION = '0.2.7'
 export const BOSS_EXTENSION_DOWNLOAD_URL = `/downloads/find-job-boss-helper-v${BOSS_EXTENSION_VERSION}.zip`
 export const BOSS_EXTENSION_GUIDE_URL = '/boss-extension-guide.html'
 export const BOSS_EXTENSION_REQUIRED_CAPABILITIES = Object.freeze([
   'retry_greeting_message',
-  'greeting_submission_state'
+  'greeting_submission_state',
+  'greeting_fire_and_continue'
 ])
 
 export function normalizeBossExtensionConnection(payload) {
@@ -13,6 +14,7 @@ export function normalizeBossExtensionConnection(payload) {
       version: '',
       capabilities: [],
       greetingRetryReady: false,
+      greetingDispatchReady: false,
       missingCapabilities: [...BOSS_EXTENSION_REQUIRED_CAPABILITIES]
     }
   }
@@ -26,6 +28,7 @@ export function normalizeBossExtensionConnection(payload) {
     version: typeof payload.version === 'string' ? payload.version.trim() : '',
     capabilities,
     greetingRetryReady: missingCapabilities.length === 0,
+    greetingDispatchReady: capabilitySet.has('greeting_fire_and_continue'),
     missingCapabilities
   }
 }

@@ -25,7 +25,8 @@ import {
 const WEB_CHANNEL = 'find-job-job-library-web-v1'
 const GREETING_CAPABILITIES = Object.freeze([
   'retry_greeting_message',
-  'greeting_submission_state'
+  'greeting_submission_state',
+  'greeting_fire_and_continue'
 ])
 const ALLOWED_APP_HOSTS = new Set(['127.0.0.1', 'localhost', 'xingxingtech.cn', 'www.xingxingtech.cn'])
 const BOSS_HOME = 'https://www.zhipin.com/web/geek/jobs?city=101020100&ka=open_joblist'
@@ -395,25 +396,6 @@ async function runChatSend(tabId, message) {
       const outgoingMessages = () => [...new Set(document.querySelectorAll(outgoingRowSelector))]
         .map((row) => ({ row, text: readMessageText(row) }))
         .filter((item) => item.text)
-      const hasNewLogicalMessage = (baselineTexts, currentTexts) => {
-        const baseline = baselineTexts.map(normalizeMessageText)
-        const current = currentTexts.map(normalizeMessageText)
-        if (!current.length || current.at(-1) !== normalized) return false
-        if (baseline.length === current.length
-          && baseline.every((value, index) => value === current[index])) {
-          return false
-        }
-        const baselineMatches = baseline.filter((value) => value === normalized).length
-        const currentMatches = current.filter((value) => value === normalized).length
-        if (currentMatches > baselineMatches) return true
-        const maximumOverlap = Math.min(baseline.length, current.length - 1)
-        for (let overlap = maximumOverlap; overlap > 0; overlap -= 1) {
-          const baselineSuffix = baseline.slice(-overlap)
-          const currentPrefix = current.slice(0, overlap)
-          if (baselineSuffix.every((value, index) => value === currentPrefix[index])) return true
-        }
-        return false
-      }
       const classifyEvidence = (evidence = {}) => {
         const statusClasses = String(evidence.statusClasses ?? '').trim().slice(0, 800)
         const statusText = String(evidence.statusText ?? '').trim().slice(0, 300)
@@ -486,55 +468,6 @@ async function runChatSend(tabId, message) {
         return { ok: true, status: 'already_sent' }
       }
 
-      const baselineOutgoingTexts = outgoingMessages().map((item) => item.text)
-      let logicalObservation = {
-        firstSeenAt: 0,
-        lastSeenAt: 0,
-        stableForMs: 0,
-        isNew: false,
-        inputCleared: false
-      }
-      const sampleLogicalMessage = () => {
-        const currentMessages = outgoingMessages()
-        const now = Date.now()
-        const inputCleared = !normalizeMessageText(chatInput.textContent)
-        const isNewLogicalMessage = hasNewLogicalMessage(
-          baselineOutgoingTexts,
-          currentMessages.map((item) => item.text)
-        )
-        const previousFirstSeenAt = Number(logicalObservation.firstSeenAt) || 0
-        const previousLastSeenAt = Number(logicalObservation.lastSeenAt) || 0
-        const renderGapMs = Math.max(0, Number(evidenceRules.renderGapMs) || 0)
-        if (!inputCleared) {
-          logicalObservation = { firstSeenAt: 0, lastSeenAt: 0, stableForMs: 0, isNew: false, inputCleared: false }
-        } else if (isNewLogicalMessage) {
-          const stayedWithinRenderGap = previousFirstSeenAt > 0
-            && previousLastSeenAt > 0
-            && now - previousLastSeenAt <= renderGapMs
-          const firstSeenAt = stayedWithinRenderGap ? previousFirstSeenAt : now
-          logicalObservation = {
-            firstSeenAt,
-            lastSeenAt: now,
-            stableForMs: Math.max(0, now - firstSeenAt),
-            isNew: true,
-            inputCleared: true
-          }
-        } else if (previousFirstSeenAt > 0
-          && previousLastSeenAt > 0
-          && now - previousLastSeenAt <= renderGapMs) {
-          logicalObservation = {
-            firstSeenAt: previousFirstSeenAt,
-            lastSeenAt: previousLastSeenAt,
-            stableForMs: Math.max(0, now - previousFirstSeenAt),
-            isNew: false,
-            inputCleared: true
-          }
-        } else {
-          logicalObservation = { firstSeenAt: 0, lastSeenAt: 0, stableForMs: 0, isNew: false, inputCleared: true }
-        }
-        return { currentMessages, evidence: logicalObservation, isNewLogicalMessage }
-      }
-
       chatInput.focus()
       const selection = window.getSelection()
       const range = document.createRange()
@@ -564,44 +497,8 @@ async function runChatSend(tabId, message) {
         return { code: 'send_disabled', message: 'BOSS 发送按钮当前不可用。', stopBatch: true, submissionState: 'not_submitted' }
       }
 
-      const observer = new MutationObserver(() => {
-        sampleLogicalMessage()
-      })
-      observer.observe(document.body, { childList: true, subtree: true, characterData: true })
-      try {
-        sendButton.click()
-        for (let attempt = 0; attempt < 150; attempt += 1) {
-          const blocked = pageState('unknown')
-          if (blocked) return blocked
-          const { currentMessages, evidence, isNewLogicalMessage } = sampleLogicalMessage()
-          const currentMessage = isNewLogicalMessage && currentMessages.at(-1)?.text === normalized
-            ? currentMessages.at(-1)
-            : null
-          if (currentMessage) {
-            const status = currentMessage.row.querySelector('.status,[class*="status-"]')
-            const classified = classifyEvidence({
-              ...evidence,
-              statusClasses: `${currentMessage.row.className ?? ''} ${status?.className ?? ''}`,
-              statusText: status?.textContent ?? ''
-            })
-            if (classified === 'failed') {
-              return { code: 'send_failed', message: 'BOSS 明确返回发送失败。', stopBatch: true, submissionState: 'failed' }
-            }
-            if (classified === 'sent') {
-              return { ok: true, status: 'sent' }
-            }
-          }
-          await sleep(100)
-        }
-      } finally {
-        observer.disconnect()
-      }
-      return {
-        code: 'send_unknown',
-        message: '未能确认招呼语是否送达，已停止本批以避免重复发送。',
-        stopBatch: true,
-        submissionState: 'unknown'
-      }
+      sendButton.click()
+      return { ok: true, status: 'submitted' }
     }
   })
   return result
