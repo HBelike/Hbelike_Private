@@ -29,7 +29,7 @@ from fastapi import (
     status,
 )
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.exc import SQLAlchemyError
 
 from src.career_assistant.agent_loop import CareerAgentLoop
@@ -50,6 +50,8 @@ from src.career_assistant.contracts import (
 from src.career_assistant.context_profiles import (
     extract_job_requirements,
 )
+from src.career_assistant.context_budget import ContextBudgetService
+from src.career_assistant.conversation_memory import ConversationMemoryService
 from src.career_assistant.document_parsing import DoclingServiceDocumentParser
 from src.career_assistant.cloud_vision import CloudVisionRouter
 from src.career_assistant.free_model_catalog import build_free_model_catalog_payload
@@ -70,6 +72,8 @@ from src.career_assistant.interview_library.models import (
 from src.career_assistant.interview_library.collection import (
     CollectionOperationError,
     InterviewCollectionService,
+    XiaohongshuBrowserDiscovery,
+    XiaohongshuBrowserNote,
 )
 from src.career_assistant.interview_library.embedding import (
     OpenAICompatibleEmbeddingClient,
@@ -100,6 +104,7 @@ from src.career_assistant.model_clients import (
 )
 from src.career_assistant.privacy import SensitiveDataRedactor
 from src.career_assistant.response_runner import CareerResponseRunner
+from src.career_assistant.prompt_context import PromptContextService
 from src.career_assistant.resume_normalizer import ResumeNormalizer
 from src.career_assistant.resume_assistant import (
     ResumeOptimizationRepository,
@@ -116,10 +121,12 @@ from src.platform_access.web import get_current_platform_user
 from src.services.skill_library_service import SkillLibraryService
 from src.career_assistant.persistence import (
     CareerConversationRepository,
+    CareerCompactionRepository,
     CareerContextRepository,
     CareerDatabase,
     CareerJobAssessmentRepository,
     CareerModelProfileRepository,
+    CareerModelUsageRepository,
     CareerTurnJobRepository,
     MessageRole,
     ModelCostTier,
@@ -144,6 +151,7 @@ from src.career_assistant.settings import (
     load_interview_retrieval_settings,
     load_job_assessment_settings,
     load_response_generation_settings,
+    load_career_memory_worker_settings,
 )
 
 
@@ -201,6 +209,10 @@ class CareerAssistantServices:
     intake_graph: CareerIntakeGraph
     model_gateway: ModelGateway
     response_runner: CareerResponseRunner
+    compaction_repository: CareerCompactionRepository
+    model_usage_repository: CareerModelUsageRepository
+    conversation_memory_service: ConversationMemoryService
+    prompt_context_service: PromptContextService
     temporary_attachment_store: TemporaryAttachmentStore
     attachment_parser: AttachmentParser
     redactor: SensitiveDataRedactor
@@ -396,6 +408,64 @@ class CreateXiaohongshuImportRequest(BaseModel):
     auto_import: bool = False
 
 
+class CreateXiaohongshuBrowserImportRequest(BaseModel):
+    """创建一个由当前登录 Chrome 执行的关键词信息收集任务。"""
+
+    model_config = ConfigDict(extra="forbid")
+    keyword: str = Field(min_length=1, max_length=180)
+    requested_limit: int = Field(default=20, ge=5, le=50)
+
+
+class XiaohongshuBrowserDiscoveryRequest(BaseModel):
+    """一张已经移除临时访问参数的搜索卡片。"""
+
+    model_config = ConfigDict(extra="forbid")
+    note_id: str = Field(min_length=24, max_length=24)
+    title: str | None = Field(default=None, max_length=300)
+    author_name: str | None = Field(default=None, max_length=120)
+    liked_count: str | None = Field(default=None, max_length=40)
+
+
+class RegisterXiaohongshuBrowserDiscoveriesRequest(BaseModel):
+    """批量登记浏览器已读取的无会话卡片。"""
+
+    model_config = ConfigDict(extra="forbid")
+    items: list[XiaohongshuBrowserDiscoveryRequest] = Field(min_length=1, max_length=50)
+
+
+class ProcessXiaohongshuBrowserNoteRequest(BaseModel):
+    """提交一篇浏览器已展开的笔记；不接受签名详情 URL。"""
+
+    model_config = ConfigDict(extra="forbid")
+    note_id: str = Field(min_length=24, max_length=24)
+    title: str | None = Field(default=None, max_length=300)
+    body_text: str = Field(default="", max_length=100_000)
+    author_name: str | None = Field(default=None, max_length=120)
+    published_at: str | None = Field(default=None, max_length=80)
+    tags: list[str] = Field(default_factory=list, max_length=30)
+    image_urls: list[str] = Field(default_factory=list, max_length=20)
+
+    def to_domain(self) -> XiaohongshuBrowserNote:
+        return XiaohongshuBrowserNote(
+            note_id=self.note_id,
+            title=self.title,
+            body_text=self.body_text,
+            image_urls=tuple(self.image_urls),
+            published_at=self.published_at,
+            author_name=self.author_name,
+            tags=tuple(self.tags),
+        )
+
+
+class PauseXiaohongshuBrowserJobRequest(BaseModel):
+    """暂停需要浏览器人工处理的批次，或响应用户主动停止。"""
+
+    model_config = ConfigDict(extra="forbid")
+    error_code: str = Field(default="browser_interaction_required", min_length=1, max_length=80)
+    error_message: str = Field(default="请检查小红书页面后继续。", min_length=1, max_length=1000)
+    cancelled: bool = False
+
+
 class ImportInterviewCollectionCandidateRequest(BaseModel):
     """将已选择的候选正文写入面经库，并触发既有 RAG 建索引。"""
 
@@ -583,6 +653,23 @@ def get_career_services(request: Request) -> CareerAssistantServices:
                 completion_max_tokens=response_generation_settings.max_completion_tokens,
                 request_timeout_seconds=response_generation_settings.request_timeout_seconds,
             )
+            memory_worker_settings = load_career_memory_worker_settings()
+            compaction_repository = CareerCompactionRepository(database)
+            model_usage_repository = CareerModelUsageRepository(database)
+            conversation_memory_service = ConversationMemoryService(
+                conversation_repository,
+                compaction_repository,
+                model_connection_client,
+                model_usage_repository,
+                worker_id=memory_worker_settings.worker_id,
+                lease_seconds=max(10, int(memory_worker_settings.lease_seconds)),
+            )
+            prompt_context_service = PromptContextService(
+                conversation_repository,
+                conversation_memory_service,
+                ContextBudgetService(),
+                request.app.state.career_skill_tool_registry,
+            )
             job_assessment_repository = read_services.job_assessment_repository
             job_assessment_service = CareerJobAssessmentService(
                 repository=job_assessment_repository,
@@ -676,12 +763,18 @@ def get_career_services(request: Request) -> CareerAssistantServices:
                     chat_client=model_connection_client,
                     redactor=redactor,
                     skill_tool_registry=request.app.state.career_skill_tool_registry,
+                    prompt_context=prompt_context_service,
+                    model_usage_repository=model_usage_repository,
                     max_persisted_response_characters=(
                         response_generation_settings.max_persisted_response_characters
                     ),
                     max_attempts=response_generation_settings.max_attempts,
                     retry_backoff_seconds=response_generation_settings.retry_backoff_seconds,
                 ),
+                compaction_repository=compaction_repository,
+                model_usage_repository=model_usage_repository,
+                conversation_memory_service=conversation_memory_service,
+                prompt_context_service=prompt_context_service,
                 temporary_attachment_store=temporary_attachment_store,
                 attachment_parser=attachment_parser,
                 redactor=redactor,
@@ -1741,6 +1834,148 @@ def collect_interview_public_url(
         "job": _collection_job_payload(job),
         "candidate": _collection_candidate_payload(candidate),
     }
+
+
+@router.post(
+    "/interview-library/xiaohongshu-browser-imports",
+    status_code=status.HTTP_201_CREATED,
+)
+def create_xiaohongshu_browser_import(
+    request_body: CreateXiaohongshuBrowserImportRequest,
+    request: Request,
+) -> dict[str, object]:
+    """创建关键词任务，等待当前浏览器助手读取小红书页面。"""
+
+    actor = get_request_actor()
+    services = get_career_services(request)
+    try:
+        job = services.interview_collection_service.create_xiaohongshu_browser_collection_job(
+            actor.organization_id,
+            keyword=request_body.keyword,
+            requested_limit=request_body.requested_limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"job": _collection_job_payload(job)}
+
+
+@router.post(
+    "/interview-library/collection-jobs/{job_id}/xiaohongshu-discoveries",
+)
+def register_xiaohongshu_browser_discoveries(
+    job_id: UUID,
+    request_body: RegisterXiaohongshuBrowserDiscoveriesRequest,
+    request: Request,
+) -> dict[str, object]:
+    """保存不含 token 和图片的搜索卡片，支持任务恢复与跨批次去重。"""
+
+    actor = get_request_actor()
+    services = get_career_services(request)
+    discoveries = tuple(
+        XiaohongshuBrowserDiscovery(
+            note_id=item.note_id,
+            title=item.title,
+            author_name=item.author_name,
+            liked_count=item.liked_count,
+        )
+        for item in request_body.items
+    )
+    try:
+        candidates = services.interview_collection_service.register_xiaohongshu_browser_discoveries(
+            actor.organization_id,
+            job_id,
+            discoveries,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"candidates": [_collection_candidate_payload(item) for item in candidates]}
+
+
+@router.post(
+    "/interview-library/collection-jobs/{job_id}/xiaohongshu-notes",
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def process_xiaohongshu_browser_note(
+    job_id: UUID,
+    request_body: ProcessXiaohongshuBrowserNoteRequest,
+    background_tasks: BackgroundTasks,
+    request: Request,
+) -> dict[str, object]:
+    """接收一篇无详情 token 的笔记，并在后台复用现有 OCR/入库链路。"""
+
+    actor = get_request_actor()
+    services = get_career_services(request)
+    note = request_body.to_domain()
+    try:
+        candidate = services.interview_collection_service.queue_xiaohongshu_browser_note(
+            actor.organization_id,
+            job_id,
+            note,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if candidate.status.value == "discovered":
+        background_tasks.add_task(
+            services.interview_collection_service.process_xiaohongshu_browser_note,
+            actor.organization_id,
+            job_id,
+            note,
+        )
+    return {"candidate": _collection_candidate_payload(candidate)}
+
+
+@router.post(
+    "/interview-library/collection-jobs/{job_id}/pause",
+)
+def pause_xiaohongshu_browser_job(
+    job_id: UUID,
+    request_body: PauseXiaohongshuBrowserJobRequest,
+    request: Request,
+) -> dict[str, object]:
+    """暂停需要登录/验证的任务，或记录用户主动停止。"""
+
+    actor = get_request_actor()
+    services = get_career_services(request)
+    try:
+        job = services.interview_collection_service.pause_xiaohongshu_browser_job(
+            actor.organization_id,
+            job_id,
+            error_code=request_body.error_code,
+            error_message=request_body.error_message,
+            cancelled=request_body.cancelled,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"job": _collection_job_payload(job)}
+
+
+@router.post(
+    "/interview-library/collection-jobs/{job_id}/complete",
+)
+def complete_xiaohongshu_browser_job(
+    job_id: UUID,
+    request: Request,
+) -> dict[str, object]:
+    """确认所有搜索卡片已有结果后完成浏览器信息收集任务。"""
+
+    actor = get_request_actor()
+    services = get_career_services(request)
+    try:
+        job = services.interview_collection_service.complete_xiaohongshu_browser_job(
+            actor.organization_id,
+            job_id,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"job": _collection_job_payload(job)}
 
 
 @router.post(

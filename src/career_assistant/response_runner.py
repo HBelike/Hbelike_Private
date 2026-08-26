@@ -16,9 +16,27 @@ from src.career_assistant.contracts import (
     SkillExecutionTrace,
 )
 from src.career_assistant.intake_graph import IntakeGraphResult, ModelTurnContext
-from src.career_assistant.model_clients import ChatMessage, ModelInvocationError, OpenAICompatibleChatClient
+from src.career_assistant.context_budget import (
+    ContextBudgetService,
+    ContextHardLimitError,
+    ContextUsageSnapshot,
+    PromptComponent,
+)
+from src.career_assistant.model_clients import (
+    ChatMessage,
+    CompletionRequestOptions,
+    CompletionUsage,
+    ModelInvocationError,
+    OpenAICompatibleChatClient,
+)
 from src.career_assistant.model_gateway import ModelGateway, ModelReadiness, ModelResolution
-from src.career_assistant.persistence import AgentTurnRecord, MessageRecord, MessageRole
+from src.career_assistant.persistence import (
+    AgentTurnRecord,
+    CareerModelUsageRepository,
+    MessageRecord,
+    MessageRole,
+)
+from src.career_assistant.prompt_context import PreparedPromptContext, PromptContextService
 from src.career_assistant.privacy import SensitiveDataRedactor
 from src.career_assistant.skill_tools import SkillToolRegistry
 
@@ -31,6 +49,36 @@ class CareerResponseResult:
     turn: AgentTurnRecord
     model_resolution: ModelResolution | None
     skill_executions: tuple[SkillExecutionTrace, ...] = ()
+    context_usage: ContextUsageSnapshot | None = None
+    used_memory_ids: tuple = ()
+
+
+@dataclass
+class ModelUsageAccumulator:
+    """汇总一次回答内普通、流式或 Tool Calling 的多个 Provider 调用。"""
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    seen: bool = False
+    input_unknown: bool = False
+    output_unknown: bool = False
+
+    def observe(self, usage: CompletionUsage) -> None:
+        self.seen = True
+        if usage.input_tokens is None:
+            self.input_unknown = True
+        else:
+            self.input_tokens += usage.input_tokens
+        if usage.output_tokens is None:
+            self.output_unknown = True
+        else:
+            self.output_tokens += usage.output_tokens
+
+    def value(self) -> CompletionUsage:
+        return CompletionUsage(
+            None if not self.seen or self.input_unknown else self.input_tokens,
+            None if not self.seen or self.output_unknown else self.output_tokens,
+        )
 
 
 @dataclass(frozen=True)
@@ -52,6 +100,8 @@ class CareerResponseRunner:
         chat_client: OpenAICompatibleChatClient | None = None,
         redactor: SensitiveDataRedactor | None = None,
         skill_tool_registry: SkillToolRegistry | None = None,
+        prompt_context: PromptContextService | None = None,
+        model_usage_repository: CareerModelUsageRepository | None = None,
         *,
         max_persisted_response_characters: int = 30_000,
         max_attempts: int = 1,
@@ -72,6 +122,8 @@ class CareerResponseRunner:
         self._chat_client = chat_client or OpenAICompatibleChatClient()
         self._redactor = redactor or SensitiveDataRedactor()
         self._skill_tool_registry = skill_tool_registry
+        self._prompt_context = prompt_context
+        self._model_usage_repository = model_usage_repository
         self._max_persisted_response_characters = max_persisted_response_characters
         self._max_attempts = max_attempts
         self._retry_backoff_seconds = float(retry_backoff_seconds)
@@ -123,22 +175,44 @@ class CareerResponseRunner:
             )
 
         try:
-            prompt = self._build_prompt(active_turn, intake_result.model_context)
+            prepared = self._prepare_prompt(
+                active_turn,
+                intake_result.model_context,
+                resolution,
+            )
+        except ContextHardLimitError:
+            return self._finish_with_context_limit(active_turn, resolution)
+
+        usage_id, usage_accumulator = self._start_answer_usage(active_turn, resolution)
+        options = CompletionRequestOptions(
+            max_tokens=resolution.profile.context_policy.reserved_output_tokens,
+        )
+        try:
+            prompt = list(prepared.messages)
             if self._can_run_skill_tools(resolution, intake_result.model_context):
                 generated_reply, skill_executions = self._complete_skill_agent(
                     resolution,
                     prompt,
                     intake_result.model_context,
+                    options=options,
+                    usage_callback=usage_accumulator.observe,
                 )
             else:
                 skill_executions = ()
-                generated_reply = self._complete_with_retry(resolution, prompt)
+                generated_reply = self._complete_with_retry(
+                    resolution,
+                    prompt,
+                    options=options,
+                    usage_callback=usage_accumulator.observe,
+                )
         except (ModelInvocationError, ValueError) as exc:
+            self._finish_answer_usage(usage_id, "failed", usage_accumulator)
             if isinstance(exc, ValueError):
                 exc = ModelInvocationError(f"Skill 工具执行失败：{exc}")
             return self._finish_with_model_failure(active_turn, resolution, exc)
 
         if not generated_reply.strip():
+            self._finish_answer_usage(usage_id, "failed", usage_accumulator)
             return self._finish_with_model_failure(
                 active_turn,
                 resolution,
@@ -150,11 +224,21 @@ class CareerResponseRunner:
             active_turn.conversation.actor_id,
             active_turn.turn.id,
         )
+        self._finish_answer_usage(usage_id, "succeeded", usage_accumulator)
+        if self._prompt_context is not None:
+            post_turn = self._prompt_context.enqueue_post_turn_if_required(
+                active_turn,
+                intake_result.model_context,
+                resolution,
+            )
+            prepared = post_turn
         return CareerResponseResult(
             message,
             succeeded_turn,
             resolution,
             skill_executions,
+            prepared.context_usage,
+            prepared.used_memory_ids,
         )
 
     def stream(
@@ -199,8 +283,25 @@ class CareerResponseRunner:
             )
             return
 
+        try:
+            prepared = self._prepare_prompt(
+                active_turn,
+                intake_result.model_context,
+                resolution,
+            )
+        except ContextHardLimitError:
+            yield CareerResponseStreamEvent(
+                event_type="error",
+                result=self._finish_with_context_limit(active_turn, resolution),
+            )
+            return
+
         generated_parts: list[str] = []
-        prompt = self._build_prompt(active_turn, intake_result.model_context)
+        prompt = list(prepared.messages)
+        usage_id, usage_accumulator = self._start_answer_usage(active_turn, resolution)
+        options = CompletionRequestOptions(
+            max_tokens=resolution.profile.context_policy.reserved_output_tokens,
+        )
         try:
             skill_executions: tuple[SkillExecutionTrace, ...] = ()
             if self._can_run_skill_tools(resolution, intake_result.model_context):
@@ -212,6 +313,8 @@ class CareerResponseRunner:
                     resolution,
                     prompt,
                     intake_result.model_context,
+                    options=options,
+                    usage_callback=usage_accumulator.observe,
                 )
                 generated_parts.append(generated_reply)
                 yield CareerResponseStreamEvent(event_type="delta", content=generated_reply)
@@ -223,6 +326,8 @@ class CareerResponseRunner:
                             resolution.credential_env_name,
                             prompt,
                             api_key=resolution.credential,
+                            options=options,
+                            usage_callback=usage_accumulator.observe,
                         ):
                             generated_parts.append(content)
                             yield CareerResponseStreamEvent(event_type="delta", content=content)
@@ -237,6 +342,7 @@ class CareerResponseRunner:
                         )
                         time.sleep(self._retry_backoff_seconds)
         except (ModelInvocationError, ValueError) as exc:
+            self._finish_answer_usage(usage_id, "failed", usage_accumulator)
             if isinstance(exc, ValueError):
                 exc = ModelInvocationError(f"Skill 工具执行失败：{exc}")
             yield CareerResponseStreamEvent(
@@ -245,6 +351,7 @@ class CareerResponseRunner:
             )
             return
         except Exception:
+            self._finish_answer_usage(usage_id, "failed", usage_accumulator)
             yield CareerResponseStreamEvent(
                 event_type="error",
                 result=self._finish_with_model_failure(
@@ -257,6 +364,7 @@ class CareerResponseRunner:
 
         generated_reply = "".join(generated_parts).strip()
         if not generated_reply:
+            self._finish_answer_usage(usage_id, "failed", usage_accumulator)
             yield CareerResponseStreamEvent(
                 event_type="error",
                 result=self._finish_with_model_failure(
@@ -274,6 +382,13 @@ class CareerResponseRunner:
             active_turn.conversation.actor_id,
             active_turn.turn.id,
         )
+        self._finish_answer_usage(usage_id, "succeeded", usage_accumulator)
+        if self._prompt_context is not None:
+            prepared = self._prompt_context.enqueue_post_turn_if_required(
+                active_turn,
+                intake_result.model_context,
+                resolution,
+            )
         yield CareerResponseStreamEvent(
             event_type="done",
             result=CareerResponseResult(
@@ -281,6 +396,8 @@ class CareerResponseRunner:
                 succeeded_turn,
                 resolution,
                 skill_executions,
+                prepared.context_usage,
+                prepared.used_memory_ids,
             ),
         )
 
@@ -288,6 +405,9 @@ class CareerResponseRunner:
         self,
         resolution: ModelResolution,
         prompt: list[ChatMessage],
+        *,
+        options: CompletionRequestOptions,
+        usage_callback,
     ) -> str:
         """让普通 HTTP 路径也遵守同一套受控重试规则。"""
 
@@ -299,6 +419,8 @@ class CareerResponseRunner:
                     resolution.credential_env_name,
                     prompt,
                     api_key=resolution.credential,
+                    options=options,
+                    usage_callback=usage_callback,
                 )
             except ModelInvocationError as exc:
                 last_error = exc
@@ -332,6 +454,9 @@ class CareerResponseRunner:
         resolution: ModelResolution,
         prompt: list[ChatMessage],
         context: ModelTurnContext,
+        *,
+        options: CompletionRequestOptions | None = None,
+        usage_callback=None,
     ) -> tuple[str, tuple[SkillExecutionTrace, ...]]:
         """让模型在 SKILL.md 指引下多轮选择、执行工具，直到返回最终正文。"""
 
@@ -372,6 +497,8 @@ class CareerResponseRunner:
                 definitions,
                 tool_choice="auto",
                 api_key=resolution.credential,
+                options=options,
+                usage_callback=usage_callback,
             )
             if not response.tool_calls:
                 final_content = response.content.strip()
@@ -418,6 +545,74 @@ class CareerResponseRunner:
                     ),
                 )
         raise ModelInvocationError("Skill Agent 超过 6 轮工具调用仍未完成")
+
+    def _prepare_prompt(
+        self,
+        active_turn: ActiveAgentTurn,
+        context: ModelTurnContext,
+        resolution: ModelResolution,
+    ) -> PreparedPromptContext:
+        if self._prompt_context is not None:
+            return self._prompt_context.prepare(active_turn, context, resolution)
+        messages = tuple(self._build_prompt(active_turn, context))
+        usage = ContextBudgetService().measure(
+            (PromptComponent.pinned("legacy_prompt", messages),),
+            resolution.profile.context_policy,
+        )
+        return PreparedPromptContext(
+            messages=messages,
+            context_usage=usage,
+            component_keys=("legacy_prompt",),
+            dropped_component_keys=(),
+        )
+
+    def _start_answer_usage(
+        self,
+        active_turn: ActiveAgentTurn,
+        resolution: ModelResolution,
+    ) -> tuple[object | None, ModelUsageAccumulator]:
+        accumulator = ModelUsageAccumulator()
+        if self._model_usage_repository is None:
+            return None, accumulator
+        usage_id = self._model_usage_repository.start(
+            active_turn.turn.id,
+            "career_response",
+            active_turn.turn.requested_model_profile_id,
+            resolution.profile,
+        )
+        return usage_id, accumulator
+
+    def _finish_answer_usage(
+        self,
+        usage_id: object | None,
+        status: str,
+        accumulator: ModelUsageAccumulator,
+    ) -> None:
+        if usage_id is None or self._model_usage_repository is None:
+            return
+        self._model_usage_repository.finish(
+            usage_id,
+            status=status,
+            usage=accumulator.value(),
+            error_code=None if status == "succeeded" else "career_response_failed",
+        )
+
+    def _finish_with_context_limit(
+        self,
+        active_turn: ActiveAgentTurn,
+        resolution: ModelResolution,
+    ) -> CareerResponseResult:
+        public_message = (
+            "当前问题和资料超出所选模型可处理范围，请拆分问题或改用上下文更大的模型。"
+        )
+        failed_turn = self._agent_loop.mark_turn_failed(
+            active_turn.conversation.actor_id,
+            active_turn.turn.id,
+            "context_hard_limit_reached",
+            public_message,
+        )
+        message = self._append_assistant_message(active_turn, public_message)
+        return CareerResponseResult(message, failed_turn, resolution)
 
     def _finish_with_model_failure(
         self,
@@ -529,20 +724,16 @@ class CareerResponseRunner:
         history_messages = self._agent_loop.repository.list_messages(
             active_turn.conversation.actor_id,
             active_turn.conversation.id,
-            limit=6,
         )
         for history_message in history_messages:
             if history_message.turn_id == active_turn.turn.id:
                 continue
             if history_message.role.value not in {"user", "assistant"}:
                 continue
-            content = history_message.content_text.strip()
-            if len(content) > 1_600:
-                content = content[:1_600] + "…"
             messages.append(
                 ChatMessage(
                     role=history_message.role.value,
-                    content=content,
+                    content=history_message.content_text.strip(),
                 ),
             )
 

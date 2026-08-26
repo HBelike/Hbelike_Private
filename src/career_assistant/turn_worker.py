@@ -175,6 +175,16 @@ class CareerAgentTurnProcessor:
                     }
                     for item in final_result.skill_executions
                 ],
+                "context_usage": (
+                    {
+                        "used_percent": final_result.context_usage.used_percent,
+                        "remaining_percent": final_result.context_usage.remaining_percent,
+                        "state": final_result.context_usage.state.value,
+                        "approximate": True,
+                    }
+                    if final_result.context_usage is not None
+                    else None
+                ),
             },
         )
 

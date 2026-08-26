@@ -14,9 +14,11 @@ from pydantic import BaseModel, Field
 
 from src.career_assistant.contracts import (
     CareerInboundMessage,
+    ModelCapability,
     ModelSelectionMode,
     ModelSelectionRequest,
 )
+from src.career_assistant.agent_loop import ActiveAgentTurn
 from src.career_assistant.persistence.records import AgentTurnStatus
 from src.career_assistant.turn_payloads import (
     collect_input_kind_codes,
@@ -203,6 +205,75 @@ async def list_active_turns(
         conversation_id,
     )
     return {"items": [_queue_status_payload(item) for item in items]}
+
+
+@router.get("/conversations/{conversation_id}/context-usage")
+async def get_context_usage(
+    conversation_id: UUID,
+    request: Request,
+    model_profile_id: UUID | None = None,
+) -> dict[str, object]:
+    """返回普通用户可见的近似余量，不泄露准确容量和阈值。"""
+
+    actor = get_request_actor()
+    services = get_career_services(request)
+    conversation = await asyncio.to_thread(
+        services.conversation_repository.get_conversation,
+        actor.actor_id,
+        conversation_id,
+    )
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="会话不存在或无访问权限")
+    if model_profile_id is not None:
+        selection = ModelSelectionRequest(
+            mode=ModelSelectionMode.SPECIFIC_PROFILE,
+            profile_id=model_profile_id,
+            required_capabilities=frozenset({ModelCapability.TEXT}),
+        )
+    else:
+        selection = await asyncio.to_thread(
+            services.conversation_repository.get_last_model_selection,
+            actor.actor_id,
+            conversation_id,
+        ) or ModelSelectionRequest()
+    try:
+        resolution = await asyncio.to_thread(
+            services.model_gateway.resolve,
+            actor.organization_id,
+            selection,
+        )
+    except (LookupError, PermissionError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    latest_turn = await asyncio.to_thread(
+        services.conversation_repository.get_latest_agent_turn,
+        actor.actor_id,
+        conversation_id,
+    )
+    if latest_turn is None:
+        prepared = services.prompt_context_service.empty_snapshot(resolution)
+    else:
+        prepared = await asyncio.to_thread(
+            services.prompt_context_service.snapshot_for_conversation,
+            ActiveAgentTurn(conversation, latest_turn),
+            resolution,
+        )
+    successful_turns = await asyncio.to_thread(
+        services.conversation_repository.count_successful_turns,
+        actor.actor_id,
+        conversation_id,
+    )
+    usage = prepared.context_usage
+    return {
+        "context_usage": {
+            "used_percent": usage.used_percent,
+            "remaining_percent": usage.remaining_percent,
+            "state": usage.state.value,
+            "approximate": True,
+        },
+        "successful_turns": successful_turns,
+        "remaining_turns": max(0, 30 - successful_turns),
+    }
 
 
 @router.get("/turns/{turn_id}/events")

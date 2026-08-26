@@ -836,6 +836,29 @@ class CareerConversationRepository:
 
         return self._to_agent_turn_record(row) if row is not None else None
 
+    def count_successful_turns(self, actor_id: UUID, conversation_id: UUID) -> int:
+        """统计会话中已经成功完成的完整轮次。"""
+
+        with self._database.transaction() as connection:
+            return int(
+                connection.execute(
+                    text(
+                        """
+                        SELECT COUNT(*)
+                        FROM career_assistant.agent_turns AS turn
+                        INNER JOIN career_assistant.conversations AS conversation
+                          ON conversation.id = turn.conversation_id
+                        WHERE turn.conversation_id = :conversation_id
+                          AND turn.actor_id = :actor_id
+                          AND conversation.actor_id = :actor_id
+                          AND conversation.status <> 'deleted'
+                          AND turn.status = 'succeeded'
+                        """,
+                    ),
+                    {"conversation_id": conversation_id, "actor_id": actor_id},
+                ).scalar_one(),
+            )
+
     def get_last_model_selection(
         self,
         actor_id: UUID,
