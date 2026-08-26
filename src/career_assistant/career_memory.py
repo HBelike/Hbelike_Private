@@ -5,7 +5,13 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, replace
 from enum import StrEnum
+from collections.abc import Sequence
+from typing import TYPE_CHECKING
 from uuid import UUID
+
+if TYPE_CHECKING:
+    from src.career_assistant.persistence.memory_repository import CareerMemoryRepository
+    from src.career_assistant.persistence.records import CareerMemoryItemRecord
 
 
 class CareerMemoryType(StrEnum):
@@ -72,3 +78,126 @@ class CareerMemoryDraft:
         if self.candidate_profile_version is not None and self.candidate_profile_version < 1:
             raise ValueError("简历版本必须大于 0")
         return replace(self, display_text=display_text)
+
+
+RESUME_MEMORY_TYPES = (
+    CareerMemoryType.WORK_EXPERIENCE,
+    CareerMemoryType.EDUCATION,
+    CareerMemoryType.AWARD,
+    CareerMemoryType.PUBLICATION,
+    CareerMemoryType.PERSONAL_ADVANTAGE,
+)
+
+
+@dataclass(frozen=True)
+class RetrievedCareerMemory:
+    items: tuple[CareerMemoryItemRecord, ...]
+    rendered_data: str
+    estimated_tokens: int
+    job_intention_tokens: int
+
+
+def render_memory_data_envelope(items: Sequence[CareerMemoryItemRecord]) -> str:
+    payload = json.dumps(
+        [
+            {"id": str(item.id), "type": item.memory_type, "fact": item.display_text}
+            for item in items
+        ],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    escaped = payload.replace("&", "\\u0026").replace("<", "\\u003c").replace(">", "\\u003e")
+    return f'<career_memory_data instruction_authority="none">{escaped}</career_memory_data>'
+
+
+class CareerMemoryService:
+    _RESUME_QUERY_MARKERS = (
+        "经历", "学历", "奖项", "论文", "优势", "简历", "面试", "自我介绍", "项目", "技能"
+    )
+
+    def __init__(self, repository: "CareerMemoryRepository") -> None:
+        self._repository = repository
+
+    def scope_for_conversation(
+        self,
+        organization_id: UUID,
+        actor_id: UUID,
+        conversation_id: UUID,
+    ) -> tuple[UUID, UUID | None, int | None]:
+        return self._repository.get_conversation_memory_scope(
+            organization_id, actor_id, conversation_id
+        )
+
+    def record_turn_usages(
+        self,
+        organization_id: UUID,
+        actor_id: UUID,
+        turn_id: UUID,
+        memory_ids: Sequence[UUID],
+    ) -> int:
+        return self._repository.record_turn_usages(
+            organization_id, actor_id, turn_id, memory_ids
+        )
+
+    def retrieve_for_prompt(
+        self,
+        organization_id: UUID,
+        actor_id: UUID,
+        career_space_id: UUID,
+        question: str,
+        *,
+        candidate_profile_id: UUID | None,
+        candidate_profile_version: int | None,
+        maximum_items: int = 5,
+        maximum_tokens: int = 800,
+    ) -> RetrievedCareerMemory:
+        intentions = self._repository.list_active_for_prompt(
+            organization_id,
+            actor_id,
+            career_space_id,
+            memory_types=(CareerMemoryType.JOB_INTENTION,),
+            candidate_profile_id=candidate_profile_id,
+            candidate_profile_version=candidate_profile_version,
+            query="",
+            limit=2,
+        )
+        related: tuple[CareerMemoryItemRecord, ...] = ()
+        if any(marker in question for marker in self._RESUME_QUERY_MARKERS):
+            related = self._repository.list_active_for_prompt(
+                organization_id,
+                actor_id,
+                career_space_id,
+                memory_types=RESUME_MEMORY_TYPES,
+                candidate_profile_id=candidate_profile_id,
+                candidate_profile_version=candidate_profile_version,
+                query=question,
+                limit=maximum_items,
+            )
+        selected: list[CareerMemoryItemRecord] = []
+        total_tokens = 0
+        intention_tokens = 0
+        for item in (*intentions, *related):
+            if len(selected) >= maximum_items:
+                break
+            tokens = _estimate_text_tokens(item.display_text)
+            if item.memory_type == CareerMemoryType.JOB_INTENTION.value:
+                if intention_tokens + tokens > 300:
+                    continue
+                intention_tokens += tokens
+            if total_tokens + tokens > maximum_tokens:
+                continue
+            selected.append(item)
+            total_tokens += tokens
+        items = tuple(selected)
+        return RetrievedCareerMemory(
+            items=items,
+            rendered_data=render_memory_data_envelope(items),
+            estimated_tokens=total_tokens,
+            job_intention_tokens=intention_tokens,
+        )
+
+
+def _estimate_text_tokens(text: str) -> int:
+    chinese = sum(1 for character in text if "\u4e00" <= character <= "\u9fff")
+    other = len(text) - chinese
+    return chinese + (other + 3) // 4

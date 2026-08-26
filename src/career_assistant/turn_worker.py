@@ -198,6 +198,7 @@ class CareerAgentTurnProcessor:
                     "max_turns": turn_limit.max_turns,
                     "reached": turn_limit.reached,
                 },
+                "memory_usage_count": len(final_result.used_memory_ids),
             },
         )
 

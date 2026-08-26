@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -27,6 +28,11 @@ from src.career_assistant.model_clients import ChatMessage
 from src.career_assistant.model_gateway import ModelResolution
 from src.career_assistant.persistence.conversation_repository import CareerConversationRepository
 from src.career_assistant.skill_tools import SkillToolRegistry
+from src.career_assistant.career_memory import (
+    CareerMemoryService,
+    CareerMemoryType,
+    render_memory_data_envelope,
+)
 
 
 SYSTEM_RULES = (
@@ -56,11 +62,13 @@ class PromptContextService:
         conversation_memory: ConversationMemoryService,
         budget: ContextBudgetService | None = None,
         skill_tool_registry: SkillToolRegistry | None = None,
+        career_memory: CareerMemoryService | None = None,
     ) -> None:
         self._conversations = conversation_repository
         self._conversation_memory = conversation_memory
         self._budget = budget or ContextBudgetService()
         self._skill_tool_registry = skill_tool_registry
+        self._career_memory = career_memory
 
     def prepare(
         self,
@@ -181,6 +189,20 @@ class PromptContextService:
 
     @staticmethod
     def _prepared(fitted: ContextFitResult) -> PreparedPromptContext:
+        used_memory_ids: list[UUID] = []
+        for component in fitted.components:
+            if not component.key.startswith("career_memory"):
+                continue
+            for message in component.messages:
+                if not isinstance(message.content, str):
+                    continue
+                used_memory_ids.extend(
+                    UUID(value)
+                    for value in re.findall(
+                        r'"id":"([0-9a-fA-F-]{36})"',
+                        message.content,
+                    )
+                )
         return PreparedPromptContext(
             messages=tuple(
                 message
@@ -190,6 +212,7 @@ class PromptContextService:
             context_usage=fitted.usage,
             component_keys=tuple(component.key for component in fitted.components),
             dropped_component_keys=fitted.dropped_component_keys,
+            used_memory_ids=tuple(dict.fromkeys(used_memory_ids)),
         )
 
     def _build_components(
@@ -208,8 +231,45 @@ class PromptContextService:
                 extra_token_estimate=tool_tokens,
             ),
         )
-        # Task 11 会把检索到的六类长期事实填入此固定槽位。
-        components.append(PromptComponent.pinned("career_memory", ()))
+        memory_items = ()
+        if self._career_memory is not None and active_turn.conversation.career_space_id is not None:
+            space_id, candidate_id, candidate_version = self._career_memory.scope_for_conversation(
+                active_turn.conversation.organization_id,
+                active_turn.conversation.actor_id,
+                active_turn.conversation.id,
+            )
+            retrieved = self._career_memory.retrieve_for_prompt(
+                active_turn.conversation.organization_id,
+                active_turn.conversation.actor_id,
+                space_id,
+                context.redacted_user_text,
+                candidate_profile_id=candidate_id,
+                candidate_profile_version=candidate_version,
+            )
+            memory_items = retrieved.items
+        intentions = tuple(
+            item for item in memory_items if item.memory_type == CareerMemoryType.JOB_INTENTION.value
+        )
+        related = tuple(
+            item for item in memory_items if item.memory_type != CareerMemoryType.JOB_INTENTION.value
+        )
+        components.append(
+            PromptComponent.pinned(
+                "career_memory",
+                (
+                    ChatMessage("system", render_memory_data_envelope(intentions)),
+                ) if intentions else (),
+            ),
+        )
+        components.append(
+            PromptComponent.optional(
+                "career_memory_related",
+                (
+                    ChatMessage("system", render_memory_data_envelope(related)),
+                ) if related else (),
+                drop_rank=30,
+            ),
+        )
 
         summary_record = self._conversations.get_valid_summary(
             active_turn.conversation.organization_id,

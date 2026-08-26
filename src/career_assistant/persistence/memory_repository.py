@@ -462,7 +462,6 @@ class CareerMemoryRepository:
         query: str = "",
         limit: int = 5,
     ) -> tuple[CareerMemoryItemRecord, ...]:
-        del query
         if limit < 1 or limit > 50:
             raise ValueError("求职记忆读取数量无效")
         with self._database.transaction() as connection:
@@ -475,10 +474,22 @@ class CareerMemoryRepository:
                       AND status = 'active'
                       AND memory_type = ANY(:memory_types)
                       AND (career_space_id = :career_space_id OR career_space_id IS NULL)
-                      AND (:candidate_profile_id IS NULL OR candidate_profile_id IS NULL
-                           OR (candidate_profile_id = :candidate_profile_id
+                      AND (candidate_profile_id IS NULL
+                           OR (:candidate_profile_id IS NOT NULL
+                               AND candidate_profile_id = :candidate_profile_id
                                AND candidate_profile_version = :candidate_profile_version))
-                    ORDER BY updated_at DESC
+                      AND (:query = '' OR
+                           to_tsvector('simple', display_text) @@ plainto_tsquery('simple', :query))
+                    ORDER BY
+                      CASE source_kind
+                        WHEN 'explicit_user_correction' THEN 0
+                        WHEN 'confirmed_resume' THEN 1
+                        ELSE 2
+                      END,
+                      CASE WHEN :query = '' THEN 0 ELSE
+                        ts_rank(to_tsvector('simple', display_text), plainto_tsquery('simple', :query))
+                      END DESC,
+                      updated_at DESC
                     LIMIT :limit
                     """,
                 ),
@@ -489,10 +500,121 @@ class CareerMemoryRepository:
                     "memory_types": [item.value for item in memory_types],
                     "candidate_profile_id": candidate_profile_id,
                     "candidate_profile_version": candidate_profile_version,
+                    "query": query.strip(),
                     "limit": limit,
                 },
             ).mappings().all()
         return tuple(self._memory_record(row) for row in rows)
+
+    def get_conversation_memory_scope(
+        self,
+        organization_id: UUID,
+        actor_id: UUID,
+        conversation_id: UUID,
+    ) -> tuple[UUID, UUID | None, int | None]:
+        with self._database.transaction() as connection:
+            row = connection.execute(
+                text(
+                    """
+                    SELECT conversation.career_space_id,
+                           candidate.id AS candidate_profile_id,
+                           candidate.version AS candidate_profile_version
+                    FROM career_assistant.conversations AS conversation
+                    LEFT JOIN LATERAL (
+                      SELECT binding.candidate_profile_id
+                      FROM career_assistant.conversation_context_bindings AS binding
+                      WHERE binding.conversation_id = conversation.id
+                      ORDER BY binding.binding_version DESC LIMIT 1
+                    ) AS latest_binding ON TRUE
+                    LEFT JOIN career_assistant.candidate_profiles AS candidate
+                      ON candidate.id = latest_binding.candidate_profile_id
+                    WHERE conversation.id = :conversation_id
+                      AND conversation.organization_id = :organization_id
+                      AND conversation.actor_id = :actor_id
+                      AND conversation.status <> 'deleted'
+                    """,
+                ),
+                {
+                    "organization_id": organization_id,
+                    "actor_id": actor_id,
+                    "conversation_id": conversation_id,
+                },
+            ).mappings().one_or_none()
+        if row is None:
+            raise LookupError("会话不存在或无访问权限")
+        return (
+            row["career_space_id"],
+            row["candidate_profile_id"],
+            row["candidate_profile_version"],
+        )
+
+    def record_turn_usages(
+        self,
+        organization_id: UUID,
+        actor_id: UUID,
+        turn_id: UUID,
+        memory_ids: Sequence[UUID],
+    ) -> int:
+        with self._database.transaction() as connection:
+            count = 0
+            for memory_id in memory_ids:
+                result = connection.execute(
+                    text(
+                        """
+                        INSERT INTO career_assistant.turn_memory_usages
+                          (id, organization_id, actor_id, turn_id, memory_id, memory_type, source_kind)
+                        SELECT :id, :organization_id, :actor_id, turn.id,
+                               memory.id, memory.memory_type, memory.source_kind
+                        FROM career_assistant.agent_turns AS turn
+                        INNER JOIN career_assistant.career_memory_items AS memory
+                          ON memory.id = :memory_id
+                        WHERE turn.id = :turn_id AND turn.actor_id = :actor_id
+                          AND memory.organization_id = :organization_id
+                          AND memory.actor_id = :actor_id
+                        ON CONFLICT (turn_id, memory_id) DO NOTHING
+                        """,
+                    ),
+                    {
+                        "id": uuid4(),
+                        "organization_id": organization_id,
+                        "actor_id": actor_id,
+                        "turn_id": turn_id,
+                        "memory_id": memory_id,
+                    },
+                )
+                count += result.rowcount
+        return count
+
+    def count_turn_usages(
+        self,
+        organization_id: UUID,
+        actor_id: UUID,
+        turn_ids: Sequence[UUID],
+    ) -> dict[UUID, int]:
+        normalized = tuple(dict.fromkeys(turn_ids))
+        if not normalized:
+            return {}
+        with self._database.transaction() as connection:
+            rows = connection.execute(
+                text(
+                    """
+                    SELECT usage.turn_id, COUNT(*) AS usage_count
+                    FROM career_assistant.turn_memory_usages AS usage
+                    INNER JOIN career_assistant.agent_turns AS turn ON turn.id = usage.turn_id
+                    WHERE usage.organization_id = :organization_id
+                      AND usage.actor_id = :actor_id
+                      AND turn.actor_id = :actor_id
+                      AND usage.turn_id = ANY(:turn_ids)
+                    GROUP BY usage.turn_id
+                    """,
+                ),
+                {
+                    "organization_id": organization_id,
+                    "actor_id": actor_id,
+                    "turn_ids": list(normalized),
+                },
+            ).mappings().all()
+        return {row["turn_id"]: int(row["usage_count"]) for row in rows}
 
     @staticmethod
     def _insert_memory(

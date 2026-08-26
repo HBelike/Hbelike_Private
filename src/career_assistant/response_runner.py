@@ -44,6 +44,7 @@ from src.career_assistant.skill_tools import SkillToolRegistry
 
 LOGGER = logging.getLogger(__name__)
 from src.career_assistant.career_memory_extraction import CareerMemoryExtractionService
+from src.career_assistant.career_memory import CareerMemoryService
 
 
 @dataclass(frozen=True)
@@ -108,6 +109,7 @@ class CareerResponseRunner:
         prompt_context: PromptContextService | None = None,
         model_usage_repository: CareerModelUsageRepository | None = None,
         memory_extraction_service: CareerMemoryExtractionService | None = None,
+        memory_service: CareerMemoryService | None = None,
         *,
         max_persisted_response_characters: int = 30_000,
         max_attempts: int = 1,
@@ -131,6 +133,7 @@ class CareerResponseRunner:
         self._prompt_context = prompt_context
         self._model_usage_repository = model_usage_repository
         self._memory_extraction_service = memory_extraction_service
+        self._memory_service = memory_service
         self._max_persisted_response_characters = max_persisted_response_characters
         self._max_attempts = max_attempts
         self._retry_backoff_seconds = float(retry_backoff_seconds)
@@ -190,6 +193,8 @@ class CareerResponseRunner:
         except ContextHardLimitError:
             return self._finish_with_context_limit(active_turn, resolution)
 
+        used_memory_ids = prepared.used_memory_ids
+
         usage_id, usage_accumulator = self._start_answer_usage(active_turn, resolution)
         options = CompletionRequestOptions(
             max_tokens=resolution.profile.context_policy.reserved_output_tokens,
@@ -232,6 +237,7 @@ class CareerResponseRunner:
             active_turn.turn.id,
         )
         self._finish_answer_usage(usage_id, "succeeded", usage_accumulator)
+        self._record_memory_usages(active_turn, used_memory_ids)
         self._enqueue_memory_extraction(active_turn, resolution)
         if self._prompt_context is not None:
             post_turn = self._prompt_context.enqueue_post_turn_if_required(
@@ -246,7 +252,7 @@ class CareerResponseRunner:
             resolution,
             skill_executions,
             prepared.context_usage,
-            prepared.used_memory_ids,
+            used_memory_ids,
         )
 
     def stream(
@@ -303,6 +309,8 @@ class CareerResponseRunner:
                 result=self._finish_with_context_limit(active_turn, resolution),
             )
             return
+
+        used_memory_ids = prepared.used_memory_ids
 
         generated_parts: list[str] = []
         prompt = list(prepared.messages)
@@ -391,6 +399,7 @@ class CareerResponseRunner:
             active_turn.turn.id,
         )
         self._finish_answer_usage(usage_id, "succeeded", usage_accumulator)
+        self._record_memory_usages(active_turn, used_memory_ids)
         self._enqueue_memory_extraction(active_turn, resolution)
         if self._prompt_context is not None:
             prepared = self._prompt_context.enqueue_post_turn_if_required(
@@ -406,7 +415,7 @@ class CareerResponseRunner:
                 resolution,
                 skill_executions,
                 prepared.context_usage,
-                prepared.used_memory_ids,
+                used_memory_ids,
             ),
         )
 
@@ -623,6 +632,23 @@ class CareerResponseRunner:
             )
         except Exception:
             LOGGER.exception("长期求职记忆抽取任务入队失败：turn_id=%s", active_turn.turn.id)
+
+    def _record_memory_usages(
+        self,
+        active_turn: ActiveAgentTurn,
+        memory_ids: tuple,
+    ) -> None:
+        if self._memory_service is None or not memory_ids:
+            return
+        try:
+            self._memory_service.record_turn_usages(
+                active_turn.conversation.organization_id,
+                active_turn.conversation.actor_id,
+                active_turn.turn.id,
+                memory_ids,
+            )
+        except Exception:
+            LOGGER.exception("回答使用的求职记忆来源记录失败：turn_id=%s", active_turn.turn.id)
 
     def _finish_with_context_limit(
         self,

@@ -52,6 +52,7 @@ from src.career_assistant.context_profiles import (
 )
 from src.career_assistant.context_budget import ContextBudgetService
 from src.career_assistant.career_memory_extraction import CareerMemoryExtractionService
+from src.career_assistant.career_memory import CareerMemoryService
 from src.career_assistant.conversation_memory import ConversationMemoryService
 from src.career_assistant.document_parsing import DoclingServiceDocumentParser
 from src.career_assistant.cloud_vision import CloudVisionRouter
@@ -217,6 +218,7 @@ class CareerAssistantServices:
     conversation_memory_service: ConversationMemoryService
     memory_repository: CareerMemoryRepository
     memory_extraction_service: CareerMemoryExtractionService
+    memory_service: CareerMemoryService
     prompt_context_service: PromptContextService
     temporary_attachment_store: TemporaryAttachmentStore
     attachment_parser: AttachmentParser
@@ -668,6 +670,7 @@ def get_career_services(request: Request) -> CareerAssistantServices:
                 model_connection_client,
                 model_usage_repository,
             )
+            career_memory_service = CareerMemoryService(memory_repository)
             conversation_memory_service = ConversationMemoryService(
                 conversation_repository,
                 compaction_repository,
@@ -681,6 +684,7 @@ def get_career_services(request: Request) -> CareerAssistantServices:
                 conversation_memory_service,
                 ContextBudgetService(),
                 request.app.state.career_skill_tool_registry,
+                career_memory_service,
             )
             job_assessment_repository = read_services.job_assessment_repository
             job_assessment_service = CareerJobAssessmentService(
@@ -778,6 +782,7 @@ def get_career_services(request: Request) -> CareerAssistantServices:
                     prompt_context=prompt_context_service,
                     model_usage_repository=model_usage_repository,
                     memory_extraction_service=memory_extraction_service,
+                    memory_service=career_memory_service,
                     max_persisted_response_characters=(
                         response_generation_settings.max_persisted_response_characters
                     ),
@@ -789,6 +794,7 @@ def get_career_services(request: Request) -> CareerAssistantServices:
                 conversation_memory_service=conversation_memory_service,
                 memory_repository=memory_repository,
                 memory_extraction_service=memory_extraction_service,
+                memory_service=career_memory_service,
                 prompt_context_service=prompt_context_service,
                 temporary_attachment_store=temporary_attachment_store,
                 attachment_parser=attachment_parser,
@@ -1277,6 +1283,20 @@ def get_conversation(
         actor.actor_id,
         conversation_id,
     )
+    memory_repository = getattr(read_services, "memory_repository", None)
+    usage_counts = (
+        memory_repository.count_turn_usages(
+            actor.organization_id,
+            actor.actor_id,
+            tuple(
+                message.turn_id
+                for message in messages
+                if message.role is MessageRole.ASSISTANT and message.turn_id is not None
+            ),
+        )
+        if memory_repository is not None
+        else {}
+    )
     count_successful_turns = getattr(
         read_services.conversation_repository,
         "count_successful_turns",
@@ -1313,7 +1333,13 @@ def get_conversation(
         )
     return {
         "conversation": _conversation_payload(conversation),
-        "messages": [_message_payload(item) for item in messages],
+        "messages": [
+            {
+                **_message_payload(item),
+                "memory_usage_count": usage_counts.get(item.turn_id, 0),
+            }
+            for item in messages
+        ],
         "last_model_selection": _model_selection_payload(last_model_selection),
         "latest_turn": _turn_payload(latest_turn) if latest_turn is not None else None,
         "turn_limit": {
