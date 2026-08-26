@@ -92,3 +92,14 @@ docker compose --env-file .env.production -f docker-compose.production.yml exec 
 - 首发不启用 GPU Docling；有 NVIDIA GPU 的服务器再使用 `document-processing` profile。
 - 仓库和本地默认配置保持 `video.submit_enabled=false`、`audio.enabled=false`，避免开发调试产生费用。当前生产环境显式设置 `VIDEO_SUBMIT_ENABLED=true`、`AUDIO_ENABLED=true`，运行完整音视频链路；每次调整后必须重建 API 与 Scheduler 并执行上面的容器内检查。
 - 旧公众号 SQLite 工作流、Skill 文件持久化、更细粒度的用户资源授权、Docker secrets 与 CI/CD 是下一阶段演进项，不应在未验证的情况下横向扩容。
+
+## 2026-08-26 全量生产部署记录
+
+- **发布目标**：将求职助手招呼语学历/成果链接强化、多岗位逐岗触发发送、面经归属编辑、输入框 Skill/面经内联高亮、空指标过滤、路由标题盒与面经导入操作盒统一发布到 `xingxingtech.cn`。
+- **发布版本**：业务代码提交 `5618965`，生产仓库从 `0afb857` 快进更新；本地 `data/`、临时 PDF、缓存、本机 `.agents/skills` 和 `src/test.py` 未进入提交或生产镜像。
+- **发布前验证**：Python 全量 `244 passed`，WebUI 全量 `138 passed`，浏览器扩展全量 `21 passed`；Service Worker 语法检查、求职助手部署配置检查、Vite production build 和扩展 `0.2.7` 确定性打包通过。
+- **部署调用链**：生产 `.env.production` 配置展开通过 → `git pull --ff-only origin main` → `docker compose --env-file .env.production -f docker-compose.production.yml up -d --build` → `skill-seed` 与 `career-migrate` 退出码均为 `0` → API、Worker、Scheduler、Web 重建完成。
+- **数据库与运行状态**：Alembic 为 `20260825_21 (head)`；API、Web、PostgreSQL 均为 healthy，Worker、Scheduler、Caddy、Docling、Gotenberg 正常运行；`VIDEO_SUBMIT_ENABLED=true`、`AUDIO_ENABLED=true`、`CAREER_ALLOW_PAID_PROFILES=true` 保持不变。
+- **公网验收**：`/api/health`、首页、职位库和浏览器助手教程均返回 `200`；匿名面经树与招呼语生成接口均返回 `401`。线上主 JS/CSS 已确认包含逐岗触发文案、面经公司/岗位编辑、上传入口和 Skill/面经高亮样式。
+- **扩展验收**：`find-job-boss-helper-v0.2.7.zip` 返回 `200`，线上与本地文件均为 `15249` 字节，SHA-256 均为 `59E3DDE5133F172621EEBB3A3DE811CA63E784F793F5EE4D1CDCD1C6B81C9172`。
+- **外部调用边界**：本次未主动调用付费模型、未触发微信草稿、Seedance 或 TTS 任务，也未使用真人 BOSS 账号发送招呼语。
