@@ -1,5 +1,6 @@
 <script setup>
 import { computed, onMounted, reactive, ref, watch } from 'vue'
+import AdminModelContextPanel from './AdminModelContextPanel.vue'
 
 const props = defineProps({
   currentRoute: {
@@ -25,6 +26,11 @@ const adminSections = [
     path: '/admin/prompts',
     label: '生成策略',
     description: '管理文章、图片和视频任务使用的提示词。'
+  },
+  {
+    path: '/admin/model-context',
+    label: '模型上下文',
+    description: '管理求职模型的上下文容量、输出预留和自动压缩阈值。'
   }
 ]
 
@@ -74,6 +80,7 @@ function loadActiveSection() {
     void loadRouteModules()
     return
   }
+  if (activeSection.value.path === '/admin/model-context') return
   void loadConfig()
   if (activeSection.value.path === '/admin/github') void loadGithubSnapshot()
 }
@@ -293,6 +300,8 @@ async function responseError(response, fallback) {
         </button>
       </footer>
     </section>
+
+    <AdminModelContextPanel v-else-if="activeSection.path === '/admin/model-context'" />
 
     <section v-else-if="loading" class="admin-console-state">正在读取工作流配置…</section>
 

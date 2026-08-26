@@ -456,6 +456,9 @@ def install_career_assistant_api(
     from src.career_assistant.web.turn_router import router as turn_router
 
     app.include_router(turn_router)
+    from src.career_assistant.web.admin_context_router import router as admin_context_router
+
+    app.include_router(admin_context_router)
     from src.career_assistant.live_interview.web import router as live_interview_router
 
     app.include_router(live_interview_router)

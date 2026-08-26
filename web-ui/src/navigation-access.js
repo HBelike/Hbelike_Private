@@ -1,7 +1,7 @@
 export const DEFAULT_APP_ROUTE = '/career'
 
 const AUTH_ROUTES = new Set(['/login', '/register', '/forgot-password'])
-const ADMIN_ROUTES = new Set(['/admin/modules', '/admin/github', '/admin/prompts'])
+const ADMIN_ROUTES = new Set(['/admin/modules', '/admin/github', '/admin/prompts', '/admin/model-context'])
 
 export function normalizeAppRoute(pathname, reviewRoutes = []) {
   if (!pathname || pathname === '/') return DEFAULT_APP_ROUTE
