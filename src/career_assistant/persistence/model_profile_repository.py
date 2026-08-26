@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from uuid import UUID, uuid4
@@ -26,6 +26,31 @@ class ModelCostTier(StrEnum):
     FREE_QUOTA = "free_quota"
     LOCAL = "local"
     PAID = "paid"
+
+
+@dataclass(frozen=True)
+class ModelContextPolicy:
+    """单个模型的保守上下文预算策略。"""
+
+    context_window_tokens: int = 8_192
+    reserved_output_tokens: int = 4_096
+    compression_trigger_percent: int = 80
+    compression_target_percent: int = 60
+    context_window_source: str = "fallback"
+
+    def validate(self) -> None:
+        if not 4_096 <= self.context_window_tokens <= 2_000_000:
+            raise ValueError("上下文容量必须在 4096 到 2000000 Token 之间")
+        if not 0 < self.reserved_output_tokens * 2 <= self.context_window_tokens:
+            raise ValueError("预留输出必须为正数且不超过上下文容量的一半")
+        if not 50 <= self.compression_trigger_percent <= 90:
+            raise ValueError("压缩触发比例必须在 50 到 90 之间")
+        if not 30 <= self.compression_target_percent <= 75:
+            raise ValueError("压缩目标比例必须在 30 到 75 之间")
+        if self.compression_target_percent >= self.compression_trigger_percent:
+            raise ValueError("压缩目标比例必须小于触发比例")
+        if self.context_window_source not in {"fallback", "built_in", "admin"}:
+            raise ValueError("上下文容量来源无效")
 
 
 PAID_ONLY_PROVIDER_KEYS = frozenset({"deepseek"})
@@ -76,6 +101,7 @@ class ModelProfileRecord:
     created_at: datetime
     updated_at: datetime
     provider_website_url: str | None = None
+    context_policy: ModelContextPolicy = field(default_factory=ModelContextPolicy)
 
 
 class CareerModelProfileRepository:
@@ -166,7 +192,10 @@ class CareerModelProfileRepository:
                         updated_at = NOW()
                     RETURNING id, organization_id, profile_key, display_name, provider_key,
                               model_id, api_base_url, provider_website_url, capability_codes,
-                              cost_tier, enabled, priority, created_at, updated_at
+                              cost_tier, enabled, priority, created_at, updated_at,
+                              context_window_tokens, reserved_output_tokens,
+                              compression_trigger_percent, compression_target_percent,
+                              context_window_source
                     """,
                 ),
                 {
@@ -407,7 +436,10 @@ class CareerModelProfileRepository:
                     f"""
                     SELECT id, organization_id, profile_key, display_name, provider_key,
                            model_id, api_base_url, provider_website_url, capability_codes,
-                           cost_tier, enabled, priority, created_at, updated_at
+                           cost_tier, enabled, priority, created_at, updated_at,
+                           context_window_tokens, reserved_output_tokens,
+                           compression_trigger_percent, compression_target_percent,
+                           context_window_source
                     FROM career_assistant.model_profiles
                     WHERE organization_id = :organization_id
                     {enabled_filter}
@@ -432,7 +464,10 @@ class CareerModelProfileRepository:
                     """
                     SELECT id, organization_id, profile_key, display_name, provider_key,
                            model_id, api_base_url, provider_website_url, capability_codes,
-                           cost_tier, enabled, priority, created_at, updated_at
+                           cost_tier, enabled, priority, created_at, updated_at,
+                           context_window_tokens, reserved_output_tokens,
+                           compression_trigger_percent, compression_target_percent,
+                           context_window_source
                     FROM career_assistant.model_profiles
                     WHERE organization_id = :organization_id
                       AND id = :profile_id
@@ -441,6 +476,75 @@ class CareerModelProfileRepository:
                 {"organization_id": organization_id, "profile_id": profile_id},
             ).mappings().one_or_none()
 
+        return self._to_record(row) if row is not None else None
+
+    def get_profile_by_key(
+        self,
+        organization_id: UUID,
+        profile_key: str,
+    ) -> ModelProfileRecord | None:
+        """按组织和稳定键读取模型档案。"""
+
+        normalized_key = profile_key.strip().lower()
+        with self._database.transaction() as connection:
+            row = connection.execute(
+                text(
+                    """
+                    SELECT id, organization_id, profile_key, display_name, provider_key,
+                           model_id, api_base_url, provider_website_url, capability_codes,
+                           cost_tier, enabled, priority, created_at, updated_at,
+                           context_window_tokens, reserved_output_tokens,
+                           compression_trigger_percent, compression_target_percent,
+                           context_window_source
+                    FROM career_assistant.model_profiles
+                    WHERE organization_id = :organization_id
+                      AND profile_key = :profile_key
+                    """,
+                ),
+                {"organization_id": organization_id, "profile_key": normalized_key},
+            ).mappings().one_or_none()
+        return self._to_record(row) if row is not None else None
+
+    def update_context_policy(
+        self,
+        organization_id: UUID,
+        profile_key: str,
+        policy: ModelContextPolicy,
+    ) -> ModelProfileRecord | None:
+        """更新管理员专属上下文策略，不改动普通模型字段。"""
+
+        policy.validate()
+        with self._database.transaction() as connection:
+            row = connection.execute(
+                text(
+                    """
+                    UPDATE career_assistant.model_profiles
+                    SET context_window_tokens = :context_window_tokens,
+                        reserved_output_tokens = :reserved_output_tokens,
+                        compression_trigger_percent = :compression_trigger_percent,
+                        compression_target_percent = :compression_target_percent,
+                        context_window_source = :context_window_source,
+                        updated_at = NOW()
+                    WHERE organization_id = :organization_id
+                      AND profile_key = :profile_key
+                    RETURNING id, organization_id, profile_key, display_name, provider_key,
+                              model_id, api_base_url, provider_website_url, capability_codes,
+                              cost_tier, enabled, priority, created_at, updated_at,
+                              context_window_tokens, reserved_output_tokens,
+                              compression_trigger_percent, compression_target_percent,
+                              context_window_source
+                    """,
+                ),
+                {
+                    "organization_id": organization_id,
+                    "profile_key": profile_key.strip().lower(),
+                    "context_window_tokens": policy.context_window_tokens,
+                    "reserved_output_tokens": policy.reserved_output_tokens,
+                    "compression_trigger_percent": policy.compression_trigger_percent,
+                    "compression_target_percent": policy.compression_target_percent,
+                    "context_window_source": policy.context_window_source,
+                },
+            ).mappings().one_or_none()
         return self._to_record(row) if row is not None else None
 
     def delete_profile_permanently(
@@ -552,4 +656,11 @@ class CareerModelProfileRepository:
             priority=row["priority"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
+            context_policy=ModelContextPolicy(
+                context_window_tokens=row.get("context_window_tokens", 8_192),
+                reserved_output_tokens=row.get("reserved_output_tokens", 4_096),
+                compression_trigger_percent=row.get("compression_trigger_percent", 80),
+                compression_target_percent=row.get("compression_target_percent", 60),
+                context_window_source=row.get("context_window_source", "fallback"),
+            ),
         )

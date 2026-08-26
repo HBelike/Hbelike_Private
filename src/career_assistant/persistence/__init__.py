@@ -10,6 +10,7 @@ from src.career_assistant.persistence.context_repository import CareerContextRep
 from src.career_assistant.persistence.database import CareerDatabase
 from src.career_assistant.persistence.model_profile_repository import (
     CareerModelProfileRepository,
+    ModelContextPolicy,
     ModelCostTier,
     ModelProfileDraft,
     ModelProfileRecord,
@@ -40,6 +41,7 @@ __all__ = [
     "CareerContextRepository",
     "CareerDatabase",
     "CareerModelProfileRepository",
+    "ModelContextPolicy",
     "ModelCostTier",
     "ModelProfileDraft",
     "ModelProfileRecord",
