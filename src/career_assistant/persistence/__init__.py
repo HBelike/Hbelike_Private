@@ -19,6 +19,9 @@ from src.career_assistant.persistence.model_profile_repository import (
     ModelProfileDraft,
     ModelProfileRecord,
 )
+from src.career_assistant.persistence.model_usage_repository import (
+    CareerModelUsageRepository,
+)
 from src.career_assistant.persistence.job_assessment_repository import (
     CareerJobAssessmentRepository,
     JobAssessmentRecord,
@@ -51,6 +54,7 @@ __all__ = [
     "ModelCostTier",
     "ModelProfileDraft",
     "ModelProfileRecord",
+    "CareerModelUsageRepository",
     "AgentTurnRecord",
     "AgentTurnStatus",
     "ConversationRecord",

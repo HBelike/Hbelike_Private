@@ -102,6 +102,49 @@ class CareerCompactionRepository:
             ).mappings().one_or_none()
         return self._to_record(row) if row is not None else None
 
+    def claim_next(
+        self,
+        worker_id: str,
+        *,
+        lease_seconds: int = 120,
+    ) -> CompactionJobRecord | None:
+        """领取队列中最早的可运行任务。"""
+
+        return self.claim(worker_id, lease_seconds=lease_seconds)
+
+    def claim_for_turn(
+        self,
+        trigger_turn_id: UUID,
+        worker_id: str,
+        *,
+        lease_seconds: int = 120,
+    ) -> CompactionJobRecord | None:
+        """同步请求只领取本 Turn 的 queued/过期任务，绝不重复执行 running。"""
+
+        if not worker_id.strip() or lease_seconds < 10:
+            raise ValueError("压缩 Worker 和租约配置无效")
+        with self._database.transaction() as connection:
+            row = connection.execute(
+                text(
+                    """
+                    UPDATE career_assistant.conversation_compaction_jobs
+                    SET status = 'running', lease_owner = :worker_id,
+                        lease_expires_at = NOW() + make_interval(secs => :lease_seconds),
+                        attempt_count = attempt_count + 1, updated_at = NOW()
+                    WHERE trigger_turn_id = :trigger_turn_id
+                      AND (status = 'queued'
+                           OR (status = 'running' AND lease_expires_at < NOW()))
+                    RETURNING *
+                    """,
+                ),
+                {
+                    "trigger_turn_id": trigger_turn_id,
+                    "worker_id": worker_id.strip(),
+                    "lease_seconds": lease_seconds,
+                },
+            ).mappings().one_or_none()
+        return self._to_record(row) if row is not None else None
+
     def finish(
         self,
         job_id: UUID,

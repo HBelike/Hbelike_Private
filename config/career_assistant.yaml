@@ -5,6 +5,11 @@ career_assistant:
     turn_timeout_seconds: 120
     stream_heartbeat_seconds: 10
 
+  career_memory_worker:
+    poll_seconds: 1.0
+    lease_seconds: 120
+    worker_concurrency: 1
+
   # 适用于长篇简历分析、岗位匹配与面试方案；如模型供应商的上限更低时，
   # 仍会以供应商限制为准；修改本文件会由开发态服务自动重载。
   response_generation:

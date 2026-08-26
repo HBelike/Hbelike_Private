@@ -504,8 +504,8 @@ class CareerConversationRepository:
         expected_summary_version: int,
         expected_covered_through_message_id: UUID | None,
         compacted_with_profile_id: UUID,
-        compacted_input_tokens: int,
-        compacted_output_tokens: int,
+        compacted_input_tokens: int | None,
+        compacted_output_tokens: int | None,
     ) -> SessionSummaryRecord | None:
         """校验后以摘要版本和游标执行 CAS，冲突时不覆盖新摘要。"""
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
@@ -53,6 +53,14 @@ class CompletionRequestOptions:
             or self.max_tokens <= 0
         ):
             raise ValueError("单次请求最大输出 Token 数必须大于 0")
+
+
+@dataclass(frozen=True)
+class CompletionUsage:
+    """Provider 返回的真实 Token 用量；缺失时保留 None。"""
+
+    input_tokens: int | None
+    output_tokens: int | None
 
 
 @dataclass(frozen=True)
@@ -151,6 +159,8 @@ class OpenAICompatibleChatClient:
         messages: list[ChatMessage],
         *,
         api_key: str | None = None,
+        options: CompletionRequestOptions | None = None,
+        usage_callback: Callable[[CompletionUsage], None] | None = None,
     ) -> str:
         """执行一次非流式调用；API Key 仅在当前请求内存中短暂存在。"""
 
@@ -172,6 +182,8 @@ class OpenAICompatibleChatClient:
                 credential,
                 messages,
                 max_tokens=self._completion_max_tokens,
+                options=options,
+                usage_callback=usage_callback,
             ),
             summarize=lambda result: {
                 "output_characters": len(result),
@@ -193,6 +205,7 @@ class OpenAICompatibleChatClient:
         api_key: str | None = None,
         options: CompletionRequestOptions | None = None,
         operation: str = "job_assessment",
+        usage_callback: Callable[[CompletionUsage], None] | None = None,
     ) -> str:
         """请求 JSON Object 输出；调用方仍须执行领域 Schema 校验。"""
 
@@ -218,6 +231,7 @@ class OpenAICompatibleChatClient:
                 max_tokens=self._completion_max_tokens,
                 response_format={"type": "json_object"},
                 options=request_options,
+                usage_callback=usage_callback,
             ),
             summarize=lambda result: {
                 "output_characters": len(result),
@@ -240,6 +254,8 @@ class OpenAICompatibleChatClient:
         *,
         tool_choice: str | dict[str, object] = "auto",
         api_key: str | None = None,
+        options: CompletionRequestOptions | None = None,
+        usage_callback: Callable[[CompletionUsage], None] | None = None,
     ) -> ToolModelResponse:
         """按 Chat Completions Tool Calling 协议执行一次模型决策。"""
 
@@ -265,6 +281,8 @@ class OpenAICompatibleChatClient:
                 tools,
                 tool_choice=tool_choice,
                 max_tokens=self._completion_max_tokens,
+                options=options,
+                usage_callback=usage_callback,
             ),
             summarize=lambda result: {
                 "tool_call_count": len(result.tool_calls),
@@ -326,6 +344,8 @@ class OpenAICompatibleChatClient:
         messages: list[ChatMessage],
         *,
         api_key: str | None = None,
+        options: CompletionRequestOptions | None = None,
+        usage_callback: Callable[[CompletionUsage], None] | None = None,
     ) -> Iterator[str]:
         """以 OpenAI-compatible SSE 协议逐段产出正文，不输出 reasoning 内容。"""
 
@@ -347,6 +367,8 @@ class OpenAICompatibleChatClient:
                 credential,
                 messages,
                 max_tokens=self._completion_max_tokens,
+                options=options,
+                usage_callback=usage_callback,
             ),
             summarize_chunk=lambda chunk, index: {
                 "chunk_index": index,
@@ -415,6 +437,7 @@ class OpenAICompatibleChatClient:
         max_tokens: int,
         response_format: dict[str, object] | None = None,
         options: CompletionRequestOptions | None = None,
+        usage_callback: Callable[[CompletionUsage], None] | None = None,
     ) -> str:
         """统一发送 OpenAI-compatible ChatCompletions 请求并清洗异常。"""
 
@@ -451,6 +474,8 @@ class OpenAICompatibleChatClient:
             )
         try:
             payload = response.json()
+            if usage_callback is not None:
+                usage_callback(self._completion_usage(payload.get("usage")))
             choice = payload["choices"][0]
             message = choice["message"]
             content = message["content"]
@@ -484,6 +509,8 @@ class OpenAICompatibleChatClient:
         *,
         tool_choice: str | dict[str, object],
         max_tokens: int,
+        options: CompletionRequestOptions | None = None,
+        usage_callback: Callable[[CompletionUsage], None] | None = None,
     ) -> ToolModelResponse:
         """发送一次带 tools 的请求，并解析 assistant.tool_calls。"""
 
@@ -501,6 +528,7 @@ class OpenAICompatibleChatClient:
                     max_tokens=max_tokens,
                     tools=tools,
                     tool_choice=tool_choice,
+                    options=options,
                 ),
             )
         except httpx.TimeoutException as exc:
@@ -519,7 +547,10 @@ class OpenAICompatibleChatClient:
                 retryable=self._is_retryable_http_status(response.status_code),
             )
         try:
-            message = response.json()["choices"][0]["message"]
+            payload = response.json()
+            if usage_callback is not None:
+                usage_callback(self._completion_usage(payload.get("usage")))
+            message = payload["choices"][0]["message"]
         except (IndexError, KeyError, TypeError, ValueError) as exc:
             raise ModelInvocationError("模型 Tool Calling 返回格式异常") from exc
         if not isinstance(message, dict):
@@ -551,6 +582,8 @@ class OpenAICompatibleChatClient:
         messages: list[ChatMessage],
         *,
         max_tokens: int,
+        options: CompletionRequestOptions | None = None,
+        usage_callback: Callable[[CompletionUsage], None] | None = None,
     ) -> Iterator[str]:
         """解析上游 SSE 数据帧，并只转发可展示的 content 增量。"""
 
@@ -569,6 +602,7 @@ class OpenAICompatibleChatClient:
                     messages,
                     max_tokens=max_tokens,
                     stream=True,
+                    options=options,
                 ),
             ) as response:
                 if response.status_code >= 400:
@@ -584,7 +618,12 @@ class OpenAICompatibleChatClient:
                         break
                     try:
                         payload = json.loads(data)
-                        choice = payload["choices"][0]
+                        if payload.get("usage") is not None and usage_callback is not None:
+                            usage_callback(self._completion_usage(payload.get("usage")))
+                        choices = payload.get("choices") or []
+                        if not choices:
+                            continue
+                        choice = choices[0]
                         delta = choice.get("delta", {})
                         content = delta.get("content")
                     except (IndexError, KeyError, TypeError, ValueError) as exc:
@@ -656,6 +695,7 @@ class OpenAICompatibleChatClient:
         }
         if stream:
             payload["stream"] = True
+            payload["stream_options"] = {"include_usage": True}
         if tools:
             payload["tools"] = [
                 {
@@ -684,6 +724,20 @@ class OpenAICompatibleChatClient:
         ):
             payload["thinking"] = {"type": "disabled"}
         return payload
+
+    @staticmethod
+    def _completion_usage(raw: object) -> CompletionUsage:
+        if not isinstance(raw, dict):
+            return CompletionUsage(None, None)
+
+        def token_value(name: str) -> int | None:
+            value = raw.get(name)
+            return value if isinstance(value, int) and value >= 0 else None
+
+        return CompletionUsage(
+            token_value("prompt_tokens"),
+            token_value("completion_tokens"),
+        )
 
     @staticmethod
     def _message_payload(message: ChatMessage) -> dict[str, object]:

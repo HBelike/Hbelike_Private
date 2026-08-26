@@ -16,8 +16,17 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.career_assistant.persistence import CareerTurnJobRepository
-from src.career_assistant.settings import load_career_turn_worker_settings
+from src.career_assistant.conversation_memory import ConversationMemoryService
+from src.career_assistant.memory_worker import CareerMemoryJobProcessor, CareerMemoryWorker
+from src.career_assistant.persistence import (
+    CareerCompactionRepository,
+    CareerModelUsageRepository,
+    CareerTurnJobRepository,
+)
+from src.career_assistant.settings import (
+    load_career_memory_worker_settings,
+    load_career_turn_worker_settings,
+)
 from src.career_assistant.turn_worker import (
     CareerAgentTurnProcessor,
     CareerTurnWorker,
@@ -35,7 +44,7 @@ async def run_worker() -> None:
     request = Request({"type": "http", "app": app})
     services = get_career_services(request)
     repository = CareerTurnJobRepository(services.database)
-    worker = CareerTurnWorker(
+    turn_worker = CareerTurnWorker(
         repository,
         CareerAgentTurnProcessor(
             services.agent_loop,
@@ -44,9 +53,29 @@ async def run_worker() -> None:
         ),
         load_career_turn_worker_settings(),
     )
+    memory_settings = load_career_memory_worker_settings()
+    compaction_repository = CareerCompactionRepository(services.database)
+    memory_service = ConversationMemoryService(
+        services.conversation_repository,
+        compaction_repository,
+        services.model_connection_client,
+        CareerModelUsageRepository(services.database),
+        worker_id=memory_settings.worker_id,
+        lease_seconds=max(10, int(memory_settings.lease_seconds)),
+    )
+    memory_worker = CareerMemoryWorker(
+        compaction_repository,
+        CareerMemoryJobProcessor(memory_service, services.model_gateway),
+        memory_settings,
+    )
     try:
-        await worker.run_forever()
+        await asyncio.gather(
+            turn_worker.run_forever(),
+            memory_worker.run_forever(),
+        )
     finally:
+        turn_worker.stop()
+        memory_worker.stop()
         services.close()
 
 

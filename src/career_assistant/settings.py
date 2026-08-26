@@ -97,6 +97,40 @@ def load_career_turn_worker_settings() -> CareerTurnWorkerSettings:
     return settings
 
 
+@dataclass(frozen=True)
+class CareerMemoryWorkerSettings:
+    """会话压缩后台任务的独立轮询与租约配置。"""
+
+    worker_id: str
+    poll_seconds: float = 1.0
+    lease_seconds: float = 120.0
+    worker_concurrency: int = 1
+
+    def validate(self) -> None:
+        if not self.worker_id.strip():
+            raise ValueError("记忆 Worker ID 不能为空")
+        if self.poll_seconds <= 0:
+            raise ValueError("记忆 Worker 轮询间隔必须大于零")
+        if self.lease_seconds < 10:
+            raise ValueError("记忆 Worker 租约不能少于 10 秒")
+        if not 1 <= self.worker_concurrency <= 8:
+            raise ValueError("记忆 Worker 并发必须在 1 到 8 之间")
+
+
+def load_career_memory_worker_settings() -> CareerMemoryWorkerSettings:
+    import socket
+
+    settings = CareerMemoryWorkerSettings(
+        worker_id=os.getenv("CAREER_MEMORY_WORKER_ID", "").strip()
+        or f"{socket.gethostname()}-{os.getpid()}-memory",
+        poll_seconds=_read_env_float("CAREER_MEMORY_POLL_SECONDS", 1.0),
+        lease_seconds=_read_env_float("CAREER_MEMORY_LEASE_SECONDS", 120.0),
+        worker_concurrency=_read_env_int("CAREER_MEMORY_WORKER_CONCURRENCY", 1),
+    )
+    settings.validate()
+    return settings
+
+
 def _read_env_int(name: str, default: int) -> int:
     raw = os.getenv(name, "").strip()
     if not raw:
