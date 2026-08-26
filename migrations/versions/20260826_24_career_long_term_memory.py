@@ -36,7 +36,7 @@ def upgrade() -> None:
         """
         INSERT INTO career_assistant.career_spaces
           (id, organization_id, actor_id, name, normalized_name, is_default)
-        SELECT md5(organization_id::text || ':' || id::text || ':career-space')::uuid,
+        SELECT md5(organization_id::text || ':' || id::text || ':' || 'career-space')::uuid,
                organization_id, id, '默认求职方向', '默认求职方向', TRUE
         FROM career_assistant.actors
         """,
