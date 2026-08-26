@@ -1,5 +1,7 @@
 # 求职助手长对话记忆 Implementation Plan
 
+> 历史说明：本计划已被 2026-08-26 的《求职助手长期记忆与动态上下文压缩 V2 Implementation Plan》取代，仅保留为历史记录，不再执行。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 在固定 Token 预算内向求职助手 Prompt 注入结构化滚动摘要和最近完整对话轮次，使单个会话可持续进行数百轮。
