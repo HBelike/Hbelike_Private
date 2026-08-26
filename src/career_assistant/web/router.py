@@ -51,6 +51,7 @@ from src.career_assistant.context_profiles import (
     extract_job_requirements,
 )
 from src.career_assistant.context_budget import ContextBudgetService
+from src.career_assistant.career_memory_extraction import CareerMemoryExtractionService
 from src.career_assistant.conversation_memory import ConversationMemoryService
 from src.career_assistant.document_parsing import DoclingServiceDocumentParser
 from src.career_assistant.cloud_vision import CloudVisionRouter
@@ -127,6 +128,7 @@ from src.career_assistant.persistence import (
     CareerJobAssessmentRepository,
     CareerModelProfileRepository,
     CareerModelUsageRepository,
+    CareerMemoryRepository,
     CareerTurnJobRepository,
     MessageRole,
     ModelCostTier,
@@ -186,6 +188,7 @@ class CareerAssistantReadServices:
     job_assessment_repository: CareerJobAssessmentRepository
     model_profile_repository: CareerModelProfileRepository
     model_gateway: ModelGateway
+    memory_repository: CareerMemoryRepository
 
 
 @dataclass
@@ -212,6 +215,8 @@ class CareerAssistantServices:
     compaction_repository: CareerCompactionRepository
     model_usage_repository: CareerModelUsageRepository
     conversation_memory_service: ConversationMemoryService
+    memory_repository: CareerMemoryRepository
+    memory_extraction_service: CareerMemoryExtractionService
     prompt_context_service: PromptContextService
     temporary_attachment_store: TemporaryAttachmentStore
     attachment_parser: AttachmentParser
@@ -657,6 +662,12 @@ def get_career_services(request: Request) -> CareerAssistantServices:
             memory_worker_settings = load_career_memory_worker_settings()
             compaction_repository = CareerCompactionRepository(database)
             model_usage_repository = CareerModelUsageRepository(database)
+            memory_repository = read_services.memory_repository
+            memory_extraction_service = CareerMemoryExtractionService(
+                memory_repository,
+                model_connection_client,
+                model_usage_repository,
+            )
             conversation_memory_service = ConversationMemoryService(
                 conversation_repository,
                 compaction_repository,
@@ -766,6 +777,7 @@ def get_career_services(request: Request) -> CareerAssistantServices:
                     skill_tool_registry=request.app.state.career_skill_tool_registry,
                     prompt_context=prompt_context_service,
                     model_usage_repository=model_usage_repository,
+                    memory_extraction_service=memory_extraction_service,
                     max_persisted_response_characters=(
                         response_generation_settings.max_persisted_response_characters
                     ),
@@ -775,6 +787,8 @@ def get_career_services(request: Request) -> CareerAssistantServices:
                 compaction_repository=compaction_repository,
                 model_usage_repository=model_usage_repository,
                 conversation_memory_service=conversation_memory_service,
+                memory_repository=memory_repository,
+                memory_extraction_service=memory_extraction_service,
                 prompt_context_service=prompt_context_service,
                 temporary_attachment_store=temporary_attachment_store,
                 attachment_parser=attachment_parser,
@@ -847,6 +861,7 @@ def get_career_read_services(
             context_repository = CareerContextRepository(database)
             job_assessment_repository = CareerJobAssessmentRepository(database)
             model_profile_repository = CareerModelProfileRepository(database)
+            memory_repository = CareerMemoryRepository(database)
             model_gateway = ModelGateway(
                 model_profile_repository,
                 load_model_gateway_settings(
@@ -868,6 +883,7 @@ def get_career_read_services(
             job_assessment_repository=job_assessment_repository,
             model_profile_repository=model_profile_repository,
             model_gateway=model_gateway,
+            memory_repository=memory_repository,
         )
         request.app.state.career_assistant_read_services = read_services
         return read_services
@@ -1075,6 +1091,15 @@ def create_candidate_profile(
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    try:
+        services.memory_extraction_service.enqueue_resume(
+            actor.organization_id,
+            actor.actor_id,
+            profile.id,
+            profile.version,
+        )
+    except Exception:
+        logger.exception("确认简历的长期记忆索引任务入队失败：profile_id=%s", profile.id)
     return _candidate_profile_payload(profile)
 
 

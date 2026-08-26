@@ -22,7 +22,10 @@ from src.career_assistant.persistence.model_profile_repository import (
 from src.career_assistant.persistence.model_usage_repository import (
     CareerModelUsageRepository,
 )
-from src.career_assistant.persistence.memory_repository import CareerMemoryRepository
+from src.career_assistant.persistence.memory_repository import (
+    CareerMemoryJobRecord,
+    CareerMemoryRepository,
+)
 from src.career_assistant.persistence.job_assessment_repository import (
     CareerJobAssessmentRepository,
     JobAssessmentRecord,
@@ -66,6 +69,7 @@ __all__ = [
     "CareerMemoryItemRecord",
     "CareerSpaceRecord",
     "CareerMemoryRepository",
+    "CareerMemoryJobRecord",
     "MessageRecord",
     "MessageRole",
     "SessionSummaryRecord",

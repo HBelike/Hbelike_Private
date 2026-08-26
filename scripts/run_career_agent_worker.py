@@ -66,8 +66,14 @@ async def run_worker() -> None:
     )
     memory_worker = CareerMemoryWorker(
         compaction_repository,
-        CareerMemoryJobProcessor(memory_service, services.model_gateway),
+        CareerMemoryJobProcessor(
+            memory_service,
+            services.model_gateway,
+            services.memory_extraction_service,
+            services.memory_repository,
+        ),
         memory_settings,
+        services.memory_repository,
     )
     try:
         await asyncio.gather(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from dataclasses import dataclass
 
@@ -39,6 +40,10 @@ from src.career_assistant.persistence import (
 from src.career_assistant.prompt_context import PreparedPromptContext, PromptContextService
 from src.career_assistant.privacy import SensitiveDataRedactor
 from src.career_assistant.skill_tools import SkillToolRegistry
+
+
+LOGGER = logging.getLogger(__name__)
+from src.career_assistant.career_memory_extraction import CareerMemoryExtractionService
 
 
 @dataclass(frozen=True)
@@ -102,6 +107,7 @@ class CareerResponseRunner:
         skill_tool_registry: SkillToolRegistry | None = None,
         prompt_context: PromptContextService | None = None,
         model_usage_repository: CareerModelUsageRepository | None = None,
+        memory_extraction_service: CareerMemoryExtractionService | None = None,
         *,
         max_persisted_response_characters: int = 30_000,
         max_attempts: int = 1,
@@ -124,6 +130,7 @@ class CareerResponseRunner:
         self._skill_tool_registry = skill_tool_registry
         self._prompt_context = prompt_context
         self._model_usage_repository = model_usage_repository
+        self._memory_extraction_service = memory_extraction_service
         self._max_persisted_response_characters = max_persisted_response_characters
         self._max_attempts = max_attempts
         self._retry_backoff_seconds = float(retry_backoff_seconds)
@@ -225,6 +232,7 @@ class CareerResponseRunner:
             active_turn.turn.id,
         )
         self._finish_answer_usage(usage_id, "succeeded", usage_accumulator)
+        self._enqueue_memory_extraction(active_turn, resolution)
         if self._prompt_context is not None:
             post_turn = self._prompt_context.enqueue_post_turn_if_required(
                 active_turn,
@@ -383,6 +391,7 @@ class CareerResponseRunner:
             active_turn.turn.id,
         )
         self._finish_answer_usage(usage_id, "succeeded", usage_accumulator)
+        self._enqueue_memory_extraction(active_turn, resolution)
         if self._prompt_context is not None:
             prepared = self._prompt_context.enqueue_post_turn_if_required(
                 active_turn,
@@ -596,6 +605,24 @@ class CareerResponseRunner:
             usage=accumulator.value(),
             error_code=None if status == "succeeded" else "career_response_failed",
         )
+
+    def _enqueue_memory_extraction(
+        self,
+        active_turn: ActiveAgentTurn,
+        resolution: ModelResolution,
+    ) -> None:
+        if self._memory_extraction_service is None:
+            return
+        try:
+            self._memory_extraction_service.enqueue_turn(
+                active_turn.conversation.organization_id,
+                active_turn.conversation.actor_id,
+                active_turn.conversation.id,
+                active_turn.turn.id,
+                resolution.profile.id,
+            )
+        except Exception:
+            LOGGER.exception("长期求职记忆抽取任务入队失败：turn_id=%s", active_turn.turn.id)
 
     def _finish_with_context_limit(
         self,

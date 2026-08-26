@@ -91,3 +91,44 @@ class CareerModelUsageRepository:
                     "error_code": error_code,
                 },
             )
+
+    def start_for_memory_job(
+        self,
+        memory_job_id: UUID,
+        operation_kind: str,
+        requested_profile_id: UUID | None,
+        resolved_profile: ModelProfileRecord,
+    ) -> UUID:
+        if operation_kind != "career_memory_extraction":
+            raise ValueError("长期记忆任务只允许使用抽取操作类型")
+        usage_id = uuid4()
+        with self._database.transaction() as connection:
+            row = connection.execute(
+                text(
+                    """
+                    INSERT INTO career_assistant.model_usage (
+                      id, memory_job_id, operation_kind, requested_profile_id,
+                      resolved_profile_id, resolved_provider_key,
+                      resolved_model_id, status
+                    ) VALUES (
+                      :id, :memory_job_id, :operation_kind, :requested_profile_id,
+                      :resolved_profile_id, :resolved_provider_key,
+                      :resolved_model_id, 'started'
+                    )
+                    ON CONFLICT (memory_job_id, operation_kind)
+                      WHERE memory_job_id IS NOT NULL DO UPDATE
+                    SET memory_job_id = EXCLUDED.memory_job_id
+                    RETURNING id
+                    """,
+                ),
+                {
+                    "id": usage_id,
+                    "memory_job_id": memory_job_id,
+                    "operation_kind": operation_kind,
+                    "requested_profile_id": requested_profile_id,
+                    "resolved_profile_id": resolved_profile.id,
+                    "resolved_provider_key": resolved_profile.provider_key,
+                    "resolved_model_id": resolved_profile.model_id,
+                },
+            ).mappings().one()
+        return row["id"]

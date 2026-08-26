@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
+from dataclasses import dataclass
+from datetime import datetime
 from uuid import UUID, uuid4
 
 from sqlalchemy import RowMapping, text
@@ -15,6 +17,22 @@ from src.career_assistant.career_memory import (
 )
 from src.career_assistant.persistence.database import CareerDatabase
 from src.career_assistant.persistence.records import CareerMemoryItemRecord, CareerSpaceRecord
+
+
+@dataclass(frozen=True)
+class CareerMemoryJobRecord:
+    id: UUID
+    organization_id: UUID
+    actor_id: UUID
+    job_kind: str
+    status: str
+    attempt_count: int
+    created_at: datetime
+    conversation_id: UUID | None = None
+    turn_id: UUID | None = None
+    candidate_profile_id: UUID | None = None
+    candidate_profile_version: int | None = None
+    requested_profile_id: UUID | None = None
 
 
 class CareerMemoryRepository:
@@ -119,6 +137,264 @@ class CareerMemoryRepository:
                 },
             )
         return result.rowcount == 1
+
+    def enqueue_turn_extraction(
+        self,
+        organization_id: UUID,
+        actor_id: UUID,
+        conversation_id: UUID,
+        turn_id: UUID,
+        requested_profile_id: UUID,
+    ) -> UUID:
+        return self._enqueue_job(
+            organization_id,
+            actor_id,
+            "turn_extraction",
+            conversation_id=conversation_id,
+            turn_id=turn_id,
+            requested_profile_id=requested_profile_id,
+        )
+
+    def enqueue_resume_indexing(
+        self,
+        organization_id: UUID,
+        actor_id: UUID,
+        candidate_profile_id: UUID,
+        candidate_profile_version: int,
+    ) -> UUID:
+        if candidate_profile_version < 1:
+            raise ValueError("简历版本必须大于 0")
+        return self._enqueue_job(
+            organization_id,
+            actor_id,
+            "resume_indexing",
+            candidate_profile_id=candidate_profile_id,
+            candidate_profile_version=candidate_profile_version,
+        )
+
+    def claim_next_memory_job(
+        self,
+        worker_id: str,
+        *,
+        lease_seconds: int,
+    ) -> CareerMemoryJobRecord | None:
+        with self._database.transaction() as connection:
+            row = connection.execute(
+                text(
+                    """
+                    WITH candidate AS (
+                      SELECT id FROM career_assistant.career_memory_jobs
+                      WHERE status = 'queued'
+                      ORDER BY created_at, id
+                      FOR UPDATE SKIP LOCKED LIMIT 1
+                    )
+                    UPDATE career_assistant.career_memory_jobs AS job
+                    SET status = 'running', lease_owner = :worker_id,
+                        lease_expires_at = NOW() + (:lease_seconds * INTERVAL '1 second'),
+                        attempt_count = attempt_count + 1, updated_at = NOW()
+                    FROM candidate
+                    WHERE job.id = candidate.id
+                    RETURNING job.*
+                    """,
+                ),
+                {"worker_id": worker_id, "lease_seconds": lease_seconds},
+            ).mappings().one_or_none()
+        return self._job_record(row) if row is not None else None
+
+    def finish_memory_job(
+        self,
+        job_id: UUID,
+        worker_id: str,
+        *,
+        status: str,
+        error_code: str | None = None,
+    ) -> bool:
+        if status not in {"succeeded", "failed", "superseded"}:
+            raise ValueError("长期记忆任务终态无效")
+        with self._database.transaction() as connection:
+            result = connection.execute(
+                text(
+                    """
+                    UPDATE career_assistant.career_memory_jobs
+                    SET status = :status, error_code = :error_code, completed_at = NOW(),
+                        lease_owner = NULL, lease_expires_at = NULL, updated_at = NOW()
+                    WHERE id = :job_id AND status = 'running' AND lease_owner = :worker_id
+                    """,
+                ),
+                {
+                    "job_id": job_id,
+                    "worker_id": worker_id,
+                    "status": status,
+                    "error_code": error_code,
+                },
+            )
+        return result.rowcount == 1
+
+    def load_memory_job_source(
+        self,
+        job: CareerMemoryJobRecord,
+    ) -> tuple[str, UUID | None, UUID | None]:
+        with self._database.transaction() as connection:
+            if job.job_kind == "turn_extraction":
+                row = connection.execute(
+                    text(
+                        """
+                        SELECT message.content_text, message.id AS source_message_id,
+                               conversation.career_space_id
+                        FROM career_assistant.messages AS message
+                        INNER JOIN career_assistant.conversations AS conversation
+                          ON conversation.id = message.conversation_id
+                        INNER JOIN career_assistant.agent_turns AS turn ON turn.id = message.turn_id
+                        WHERE message.turn_id = :turn_id AND message.role = 'user'
+                          AND turn.status = 'succeeded'
+                          AND conversation.organization_id = :organization_id
+                          AND conversation.actor_id = :actor_id
+                        ORDER BY message.created_at LIMIT 1
+                        """,
+                    ),
+                    {
+                        "turn_id": job.turn_id,
+                        "organization_id": job.organization_id,
+                        "actor_id": job.actor_id,
+                    },
+                ).mappings().one_or_none()
+                if row is None:
+                    raise LookupError("成功 Turn 的用户消息不存在")
+                return row["content_text"], row["source_message_id"], row["career_space_id"]
+            row = connection.execute(
+                text(
+                    """
+                    SELECT resume_outline FROM career_assistant.candidate_profiles
+                    WHERE id = :candidate_profile_id AND version = :candidate_profile_version
+                      AND organization_id = :organization_id AND actor_id = :actor_id
+                    """,
+                ),
+                {
+                    "candidate_profile_id": job.candidate_profile_id,
+                    "candidate_profile_version": job.candidate_profile_version,
+                    "organization_id": job.organization_id,
+                    "actor_id": job.actor_id,
+                },
+            ).mappings().one_or_none()
+            if row is None:
+                raise LookupError("已确认简历版本不存在")
+            return row["resume_outline"], None, None
+
+    def apply_extracted_memories(
+        self,
+        job: CareerMemoryJobRecord,
+        drafts: tuple[CareerMemoryDraft, ...],
+    ) -> tuple[UUID, ...]:
+        normalized = tuple(item.validate() for item in drafts)
+        with self._database.transaction() as connection:
+            if job.job_kind == "resume_indexing":
+                connection.execute(
+                    text(
+                        """
+                        UPDATE career_assistant.career_memory_items AS memory
+                        SET status = 'superseded', valid_to = NOW(), updated_at = NOW()
+                        FROM career_assistant.candidate_profiles AS current_profile,
+                             career_assistant.candidate_profiles AS old_profile
+                        WHERE current_profile.id = :candidate_profile_id
+                          AND current_profile.actor_id = :actor_id
+                          AND old_profile.display_name = current_profile.display_name
+                          AND old_profile.actor_id = current_profile.actor_id
+                          AND memory.candidate_profile_id = old_profile.id
+                          AND memory.organization_id = :organization_id
+                          AND memory.actor_id = :actor_id
+                          AND memory.source_kind = 'confirmed_resume'
+                          AND memory.status = 'active'
+                        """,
+                    ),
+                    {
+                        "candidate_profile_id": job.candidate_profile_id,
+                        "organization_id": job.organization_id,
+                        "actor_id": job.actor_id,
+                    },
+                )
+            created_ids: list[UUID] = []
+            for draft in normalized:
+                if (
+                    job.job_kind == "turn_extraction"
+                    and draft.memory_type is CareerMemoryType.JOB_INTENTION
+                    and draft.source_kind == "explicit_user_correction"
+                ):
+                    connection.execute(
+                        text(
+                            """
+                            UPDATE career_assistant.career_memory_items
+                            SET status = 'superseded', valid_to = NOW(), updated_at = NOW()
+                            WHERE organization_id = :organization_id AND actor_id = :actor_id
+                              AND career_space_id = :career_space_id
+                              AND memory_type = 'job_intention' AND status = 'active'
+                            """,
+                        ),
+                        {
+                            "organization_id": job.organization_id,
+                            "actor_id": job.actor_id,
+                            "career_space_id": draft.career_space_id,
+                        },
+                    )
+                status = (
+                    CareerMemoryStatus.ACTIVE
+                    if job.job_kind == "resume_indexing"
+                    or draft.memory_type is CareerMemoryType.JOB_INTENTION
+                    else CareerMemoryStatus.CANDIDATE
+                )
+                row = self._insert_memory(
+                    connection, job.organization_id, job.actor_id, draft, status
+                )
+                created_ids.append(row["id"])
+        return tuple(created_ids)
+
+    def _enqueue_job(
+        self,
+        organization_id: UUID,
+        actor_id: UUID,
+        job_kind: str,
+        *,
+        conversation_id: UUID | None = None,
+        turn_id: UUID | None = None,
+        candidate_profile_id: UUID | None = None,
+        candidate_profile_version: int | None = None,
+        requested_profile_id: UUID | None = None,
+    ) -> UUID:
+        job_id = uuid4()
+        conflict = (
+            "(turn_id) WHERE turn_id IS NOT NULL"
+            if turn_id is not None
+            else "(candidate_profile_id, candidate_profile_version) WHERE candidate_profile_id IS NOT NULL"
+        )
+        with self._database.transaction() as connection:
+            row = connection.execute(
+                text(
+                    f"""
+                    INSERT INTO career_assistant.career_memory_jobs (
+                      id, organization_id, actor_id, conversation_id, turn_id,
+                      candidate_profile_id, candidate_profile_version, job_kind,
+                      requested_profile_id, status
+                    ) VALUES (
+                      :id, :organization_id, :actor_id, :conversation_id, :turn_id,
+                      :candidate_profile_id, :candidate_profile_version, :job_kind,
+                      :requested_profile_id, 'queued'
+                    ) ON CONFLICT {conflict} DO UPDATE
+                    SET updated_at = career_assistant.career_memory_jobs.updated_at
+                    RETURNING id
+                    """,
+                ),
+                {
+                    "id": job_id,
+                    "organization_id": organization_id,
+                    "actor_id": actor_id,
+                    "conversation_id": conversation_id,
+                    "turn_id": turn_id,
+                    "candidate_profile_id": candidate_profile_id,
+                    "candidate_profile_version": candidate_profile_version,
+                    "job_kind": job_kind,
+                    "requested_profile_id": requested_profile_id,
+                },
+            ).mappings().one()
+        return row["id"]
 
     def create_memory(
         self,
@@ -281,4 +557,15 @@ class CareerMemoryRepository:
             candidate_profile_version=row["candidate_profile_version"], status=row["status"],
             supersedes_memory_id=row["supersedes_memory_id"], valid_from=row["valid_from"],
             valid_to=row["valid_to"], created_at=row["created_at"], updated_at=row["updated_at"],
+        )
+
+    @staticmethod
+    def _job_record(row: RowMapping) -> CareerMemoryJobRecord:
+        return CareerMemoryJobRecord(
+            id=row["id"], organization_id=row["organization_id"], actor_id=row["actor_id"],
+            conversation_id=row["conversation_id"], turn_id=row["turn_id"],
+            candidate_profile_id=row["candidate_profile_id"],
+            candidate_profile_version=row["candidate_profile_version"],
+            job_kind=row["job_kind"], requested_profile_id=row["requested_profile_id"],
+            status=row["status"], attempt_count=row["attempt_count"], created_at=row["created_at"],
         )

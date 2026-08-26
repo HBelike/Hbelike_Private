@@ -20,6 +20,7 @@ class ResumeSection(StrEnum):
     PROJECTS = "projects"
     SKILLS = "skills"
     CERTIFICATIONS = "certifications"
+    PUBLICATIONS = "publications"
     LANGUAGES = "languages"
     OTHER = "other"
 
@@ -75,6 +76,7 @@ _SECTION_LABELS: dict[ResumeSection, str] = {
     ResumeSection.PROJECTS: "项目经历",
     ResumeSection.SKILLS: "技能与工具",
     ResumeSection.CERTIFICATIONS: "证书与奖项",
+    ResumeSection.PUBLICATIONS: "论文成果",
     ResumeSection.LANGUAGES: "语言能力",
     ResumeSection.OTHER: "其他信息",
 }
@@ -154,6 +156,15 @@ _SECTION_ALIASES: dict[ResumeSection, frozenset[str]] = {
             "certificates",
             "awards",
             "honors",
+        },
+    ),
+    ResumeSection.PUBLICATIONS: frozenset(
+        {
+            "论文",
+            "论文成果",
+            "发表论文",
+            "publications",
+            "papers",
         },
     ),
     ResumeSection.LANGUAGES: frozenset(
