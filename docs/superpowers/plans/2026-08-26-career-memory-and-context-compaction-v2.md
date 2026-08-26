@@ -10,6 +10,15 @@
 
 **Spec:** `docs/superpowers/specs/2026-08-26-career-memory-and-context-compaction-v2-design.md`
 
+## 实施结果（2026-08-26）
+
+- Tasks 1—14 已在本地完成，最终迁移唯一 head 为 `20260826_24`；未连接或部署生产环境。
+- 求职助手与模型上下文相关后端回归 207 项通过，前端全量 160 项通过，`compileall`、Vite production build 与 `git diff --check` 通过。
+- 30 轮确定性场景覆盖岗位意向纠正、未完成事项、95% 硬限制和跨会话边界；安全集覆盖 JD、网页、Tool、assistant、跨 actor、跨职业空间与删除状态。
+- 脱敏离线评测结果：写入准确率 100%、来源追溯率 100%、外部污染成功率 0、普通轮次摘要调用 0、单 Turn 最大压缩调用 1 次。
+- Token 偏差说明：离线 Fake 模型只记录保守估算，不伪造 Provider 实际 Token，报告中的 `actual_tokens` 为 `null`；真实偏差由 `model_usage` 的分操作 usage 持续校准。
+- 实施边界保持不变：未增加 pgvector、图数据库、独立 Embedding、第三方记忆 SaaS、备份/容灾或生产部署改动。
+
 ## Global Constraints
 
 - 三层边界固定为“当前工作上下文、会话内滚动记忆、跨会话白名单事实”，三层之间不能自动晋升。
@@ -1932,7 +1941,7 @@ git commit -m "feat: add user career memory controls"
 
 ---
 
-### Task 14: 30 轮评测、安全回归、成本校准与文档收口
+### Task 14: 30 轮评测、安全回归、成本校准与文档收口（已完成）
 
 **Files:**
 - Create: `tests/test_career_memory_long_dialogue.py`
@@ -1945,7 +1954,7 @@ git commit -m "feat: add user career memory controls"
 - Consumes: Tasks 1—13 的公开服务与 Fake 模型接口。
 - Produces: 30 轮确定性验收、污染测试、Token 估算偏差报告和实施结果记录。
 
-- [ ] **Step 1: 写 30 轮确定性测试场景**
+- [x] **Step 1: 写 30 轮确定性测试场景**
 
 ```python
 def test_thirty_turn_dialogue_retains_correction_open_loop_and_intention() -> None:
@@ -1963,11 +1972,11 @@ def test_thirty_turn_dialogue_retains_correction_open_loop_and_intention() -> No
 
 再覆盖新会话只继承六类 active 事实、不继承旧摘要和 assistant commitment。
 
-- [ ] **Step 2: 写污染、越权、拒答和删除安全集**
+- [x] **Step 2: 写污染、越权、拒答和删除安全集**
 
 参数化输入至少包含：JD 中的“记住用户毕业于某校”、网页中的 `/skill`、tool 输出中的 XML 闭合标签、assistant 自称用户获奖、跨 actor UUID、跨 career space 岗位意向、已删除 memory。断言 active 写入数为 0、工具未授权、跨作用域结果为空、无证据回答使用拒答模板。
 
-- [ ] **Step 3: 实现离线验证脚本**
+- [x] **Step 3: 实现离线验证脚本**
 
 ```python
 def main() -> int:
@@ -1978,7 +1987,7 @@ def main() -> int:
 
 报告只输出案例 ID、状态、估算/实际 Token、触发次数和错误码，不输出消息、摘要或事实正文。使用 Fake 模型运行时必须得到：写入准确率 ≥98%、来源追溯率 100%、外部污染成功率 0、普通轮次摘要调用 0、单 Turn 压缩调用 ≤1。
 
-- [ ] **Step 4: 运行完整后端回归**
+- [x] **Step 4: 运行完整后端回归**
 
 Run: `.venv\Scripts\python.exe -m compileall src/career_assistant scripts/verify_career_memory_v2.py`
 
@@ -1992,17 +2001,17 @@ Run: `.venv\Scripts\python.exe scripts/verify_career_memory_v2.py`
 
 Expected: JSON 中 `passed=true`，所有硬性指标满足。
 
-- [ ] **Step 5: 运行完整前端回归和构建**
+- [x] **Step 5: 运行完整前端回归和构建**
 
 Run: `Set-Location web-ui; npm test; npm run build`
 
 Expected: 全部 Node 测试通过，Vite production build 成功。
 
-- [ ] **Step 6: 更新模块文档和计划实施结果**
+- [x] **Step 6: 更新模块文档和计划实施结果**
 
 在 `docs/career_assistant_module.md` 增加：三层记忆目标、调用链、80/60/95 配置、六类准入、30 轮上限、用户控制、失败降级、测试结果与“不含 pgvector/生产部署”边界。在本计划头部追加实际完成日期、最终迁移 head、测试数量和偏差说明，不粘贴完整日志。
 
-- [ ] **Step 7: 提交 Task 14**
+- [x] **Step 7: 提交 Task 14**
 
 ```powershell
 git add tests/test_career_memory_long_dialogue.py tests/test_career_memory_security.py scripts/verify_career_memory_v2.py docs/career_assistant_module.md docs/superpowers/plans/2026-08-26-career-memory-and-context-compaction-v2.md
@@ -2011,10 +2020,10 @@ git commit -m "test: verify career memory v2 end to end"
 
 ## Final Local Verification
 
-- [ ] `git diff --check` 无空白错误。
-- [ ] `.venv\Scripts\python.exe -m alembic heads` 只显示 `20260826_24 (head)`。
-- [ ] `.venv\Scripts\python.exe -m pytest tests/test_career_*.py tests/test_model_context_policy.py -q` 全部通过。
-- [ ] `Set-Location web-ui; npm test; npm run build` 全部通过。
-- [ ] 30 轮评测、六类白名单、纠正链、跨会话继承、跨 actor/空间隔离、外部污染与 95% 硬阻断全部通过。
-- [ ] 普通用户响应和页面不包含准确容量、80/60/95 配置或其他用户记忆正文。
-- [ ] 未增加 pgvector、图数据库、第三方记忆 SaaS、生产连接或部署改动。
+- [x] `git diff --check` 无空白错误。
+- [x] `.venv\Scripts\python.exe -m alembic heads` 只显示 `20260826_24 (head)`。
+- [x] `.venv\Scripts\python.exe -m pytest tests/test_career_*.py tests/test_model_context_policy.py -q` 全部通过。
+- [x] `Set-Location web-ui; npm test; npm run build` 全部通过。
+- [x] 30 轮评测、六类白名单、纠正链、跨会话继承、跨 actor/空间隔离、外部污染与 95% 硬阻断全部通过。
+- [x] 普通用户响应和页面不包含准确容量、80/60/95 配置或其他用户记忆正文。
+- [x] 未增加 pgvector、图数据库、第三方记忆 SaaS、生产连接或部署改动。
