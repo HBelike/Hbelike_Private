@@ -36,6 +36,10 @@ import {
   turnStatusText
 } from '../career-turn-presentation.js'
 import {
+  normalizeTurnLimit,
+  turnLimitPresentation
+} from '../career-turn-limit.js'
+import {
   DEFAULT_HISTORY_PAGE_SIZE,
   HISTORY_PAGE_SIZE_OPTIONS,
   normalizeHistoryPage,
@@ -116,6 +120,7 @@ const resizingContextRail = ref(false)
 const viewportWidth = ref(typeof window === 'undefined' ? 1600 : window.innerWidth)
 const contextUsage = ref(null)
 const contextUsageLoading = ref(false)
+const turnLimit = ref(normalizeTurnLimit())
 
 const HISTORY_COLLAPSED_STORAGE_KEY = 'career-assistant-history-collapsed'
 const HISTORY_PAGE_SIZE_STORAGE_KEY = 'career-assistant-history-page-size'
@@ -144,8 +149,12 @@ const contextButtonLabel = computed(() => {
   const completed = Number(hasCandidateContext.value) + Number(hasTargetContext.value)
   return completed ? `简历上传 ${completed}/2` : '简历上传'
 })
+const turnLimitView = computed(() => turnLimitPresentation(turnLimit.value))
+const turnInputBlocked = computed(() => sending.value || turnLimitView.value.blocked)
 const composerPlaceholder = computed(() => (
-  selectedConversation.value ? '输入你想咨询的问题…' : '请先开启一个对话'
+  turnLimitView.value.blocked
+    ? '本对话已达到 30 轮，请开启新对话'
+    : (selectedConversation.value ? '输入你想咨询的问题…' : '请先开启一个对话')
 ))
 const welcomeMessage = computed(() => {
   if (hasCandidateContext.value && hasTargetContext.value) {
@@ -822,6 +831,7 @@ async function refreshActiveConversationTurn() {
     const payload = await requestJson(`/api/career/conversations/${conversationId}`)
     if (selectedConversation.value?.id !== conversationId) return
     messages.value = payload.messages ?? []
+    turnLimit.value = normalizeTurnLimit(payload.turn_limit)
     conversationContext.value = payload.context ?? null
     restoreConversationModelSelection(payload.last_model_selection)
     lastTurn.value = payload.latest_turn ?? null
@@ -886,7 +896,10 @@ async function loadContextUsage() {
     const payload = await requestJson(
       `/api/career/conversations/${conversationId}/context-usage?model_profile_id=${encodeURIComponent(profileId)}`
     )
-    if (requestId === contextUsageRequestId) contextUsage.value = payload.context_usage ?? null
+    if (requestId === contextUsageRequestId) {
+      contextUsage.value = payload.context_usage ?? null
+      turnLimit.value = normalizeTurnLimit(payload.turn_limit)
+    }
   } catch {
     if (requestId === contextUsageRequestId) contextUsage.value = null
   } finally {
@@ -953,7 +966,16 @@ function costTierText(value) {
 async function requestJson(url, options = {}) {
   const response = await fetch(url, options)
   const payload = await response.json().catch(() => ({}))
-  if (!response.ok) throw new Error(payload.detail ?? `请求失败：${response.status}`)
+  if (!response.ok) {
+    const detail = payload.detail
+    const error = new Error(
+      detail && typeof detail === 'object'
+        ? (detail.message ?? `请求失败：${response.status}`)
+        : (detail ?? `请求失败：${response.status}`)
+    )
+    if (detail && typeof detail === 'object' && detail.code) error.code = detail.code
+    throw error
+  }
   return payload
 }
 
@@ -1061,6 +1083,7 @@ async function selectConversation(conversationId, clearFeedback = true) {
     const payload = await requestJson(`/api/career/conversations/${conversationId}`)
     if (requestId !== conversationSelectionRequestId) return
     selectedConversation.value = payload.conversation
+    turnLimit.value = normalizeTurnLimit(payload.turn_limit)
     conversationContext.value = payload.context ?? null
     messages.value = payload.messages ?? []
     restoreConversationModelSelection(payload.last_model_selection)
@@ -1108,6 +1131,7 @@ async function createConversation({
       .slice(0, historyPageSize.value)
     void loadConversationPage(1)
     selectedConversation.value = conversation
+    turnLimit.value = normalizeTurnLimit()
     conversationContext.value = conversation.context ?? null
     messages.value = []
     lastTurn.value = null
@@ -1394,6 +1418,14 @@ async function sendMessage() {
     errorMessage.value = '请先开启一个对话。'
     return
   }
+  if (turnLimitView.value.blocked) {
+    errorMessage.value = turnLimitView.value.message
+    return
+  }
+  if (sending.value) {
+    errorMessage.value = '当前回复完成后可继续发送'
+    return
+  }
   if (!hasReadyModel.value) {
     errorMessage.value = '尚未配置可调用模型，请先申请免费模型或添加模型连接。'
     openFreeModelDirectory()
@@ -1471,6 +1503,7 @@ async function submitPreparedTurn(preparedTurn) {
           })
         }
     const payload = await requestJson(endpoint, requestOptions)
+    turnLimit.value = normalizeTurnLimit(payload.turn_limit)
     const serverTurn = payload.turn
     const temporaryIndex = messages.value.findIndex((message) => message.id === temporaryMessage.id)
     if (temporaryIndex >= 0) {
@@ -1493,6 +1526,9 @@ async function submitPreparedTurn(preparedTurn) {
       markTemporaryMessageFailed(temporaryMessage.id)
     } else {
       restoreComposerAfterPreflightFailure(input)
+    }
+    if (error?.code === 'conversation_turn_limit_reached') {
+      turnLimit.value = normalizeTurnLimit({ ...turnLimit.value, remaining_turns: 0, reached: true })
     }
     errorMessage.value = error instanceof Error ? error.message : '消息提交失败'
   } finally {
@@ -1579,6 +1615,7 @@ async function observeNextServerTurn() {
         if (observationIsCurrent()) {
           payload = event
           if (event.context_usage) contextUsage.value = event.context_usage
+          if (event.turn_limit) turnLimit.value = normalizeTurnLimit(event.turn_limit)
         }
       },
       error: (event) => {
@@ -1624,6 +1661,7 @@ async function observeNextServerTurn() {
         const conversationPayload = await requestJson(`/api/career/conversations/${conversationId}`)
         if (!observationIsCurrent()) return
         messages.value = conversationPayload.messages ?? []
+        turnLimit.value = normalizeTurnLimit(conversationPayload.turn_limit)
         conversationContext.value = conversationPayload.context ?? null
         restoreConversationModelSelection(conversationPayload.last_model_selection)
         lastTurn.value = conversationPayload.latest_turn ?? latestTurn
@@ -2207,7 +2245,7 @@ onMounted(() => {
             </template>
             <br v-if="composerDisplayText.endsWith('\n')" />
           </div>
-          <textarea v-model="messageText" aria-label="求职咨询内容" :disabled="!selectedConversation" :placeholder="composerPlaceholder" rows="3" @input="syncComposerHighlightInput" @scroll="syncComposerHighlightScroll" @keydown.enter.exact.prevent="sendMessage" />
+          <textarea v-model="messageText" aria-label="求职咨询内容" :disabled="!selectedConversation || turnInputBlocked" :placeholder="composerPlaceholder" rows="3" @input="syncComposerHighlightInput" @scroll="syncComposerHighlightScroll" @keydown.enter.exact.prevent="sendMessage" />
         </div>
         <div v-if="skillMentionResults.length" class="interview-mention-menu skill-invocation-menu" role="listbox" aria-label="Skill 候选">
           <p class="suggestion-menu-label">技能库 · 选择后将 SKILL.md 挂载到本轮模型上下文</p>
@@ -2222,7 +2260,11 @@ onMounted(() => {
             <small>{{ experience.job_name }}<template v-if="experience.interview_date"> · {{ experience.interview_date }}</template></small>
           </button>
         </div>
-        <div class="composer-footer"><small>当前模型：{{ modelLabel }}。输入 @ 可引用面经，输入 / 可调用 Skill；每条消息都会保存，并按发送顺序回复。</small><button class="send-button" type="button" :disabled="!selectedConversation" @click="sendMessage">{{ sending ? '继续发送' : '发送' }}</button></div>
+        <div v-if="selectedConversation && (turnLimitView.message || sending)" class="turn-limit-notice" :class="{ blocked: turnLimitView.blocked }" role="status">
+          <span>{{ sending ? '当前回复完成后可继续发送' : turnLimitView.message }}</span>
+          <button v-if="turnLimitView.blocked" class="quiet-button" type="button" @click="startNewConversation">开启新对话</button>
+        </div>
+        <div class="composer-footer"><small>当前模型：{{ modelLabel }}。输入 @ 可引用面经，输入 / 可调用 Skill；每条消息都会保存，并按发送顺序回复。</small><button class="send-button" type="button" :disabled="!selectedConversation || turnInputBlocked" @click="sendMessage">{{ sending ? '回复中' : '发送' }}</button></div>
       </footer>
     </section>
 
@@ -2445,6 +2487,7 @@ onMounted(() => {
 .turn-queue-preview{display:grid;width:min(560px,86%);gap:7px;border:1px dashed var(--ui-line-strong);border-radius:12px;background:var(--ui-surface-soft);padding:10px 12px;color:var(--ui-text-secondary)}.turn-queue-preview>strong{font-size:11px}.turn-queue-preview article{display:grid;grid-template-columns:20px minmax(0,1fr) auto;align-items:start;gap:7px}.turn-queue-preview article span{display:grid;width:18px;height:18px;place-items:center;border-radius:50%;background:var(--ui-surface-active);color:var(--ui-accent-ink);font-size:10px;font-weight:850}.turn-queue-preview article p{overflow:hidden;margin:0;font-size:12px;line-height:1.45;text-overflow:ellipsis;white-space:nowrap}.turn-queue-preview article small{border-radius:999px;background:#fff;padding:2px 6px;color:var(--ui-text-muted);font-size:10px;font-weight:800}
 @keyframes career-thinking-spin { to { transform:rotate(360deg); } }
 .composer { border-top:1px solid #edf0e7; background:#fff; padding:12px 16px 14px; }.composer-toolbar { min-height:36px; flex-wrap:wrap; border-bottom:1px solid #edf0e7; padding-bottom:9px; }.input-tools,.session-tools { display:flex; min-width:0; flex-wrap:wrap; align-items:center; gap:7px; }.session-tools { margin-left:auto; justify-content:flex-end; }.job-url-row { display:grid; grid-template-columns:auto 1fr; align-items:center; gap:8px; margin:10px 0 9px; color:#738068; font-size:12px; font-weight:800; }.job-url-row input,.composer textarea { padding:10px 11px; }.composer textarea { display:block; min-height:68px; resize:vertical; }.composer-footer { margin-top:9px; }.input-tools { justify-content:flex-start; }.resume-input { display:none; }.chip-button.active { max-width:240px; overflow:hidden; background:#eaf4d4; color:#5a7d21; text-overflow:ellipsis; white-space:nowrap; }.file-clear-button { border-color:#f0d5d5; background:#fff8f8; color:#a65a5a; }.free-model-entry-button { border-style:dashed; background:#fff; color:#62812d; }.free-model-entry-button:hover { border-color:#9fbd67; background:#f5f9ed; }.model-select { width:auto; max-width:300px; padding:7px 9px; color:#65775a; font-size:12px; font-weight:700; }.send-button { min-width:88px; padding:9px 13px; }.composer-footer > small { color:#98a18e; font-size:11px; }
+.turn-limit-notice { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-top:9px; border-radius:10px; background:#f7f4e6; padding:8px 10px; color:#75672d; font-size:12px; }.turn-limit-notice.blocked { background:#fff0ee; color:#9a4b40; }
 .composer-toolbar{min-height:32px;flex-wrap:nowrap;gap:6px;border:1px solid var(--ui-line);border-radius:10px;background:var(--ui-surface-soft);padding:5px 6px}.composer-toolbar .input-tools,.composer-toolbar .session-tools{flex-wrap:nowrap;gap:5px}.composer-toolbar .input-tools{flex:1}.composer-toolbar :is(.chip-button,.quiet-button,.model-select){height:30px;border-color:var(--ui-line);border-radius:8px;background:var(--ui-surface);padding:5px 9px;color:var(--ui-text-secondary);font-size:11px}.composer-toolbar .active-context-chip{max-width:132px!important;flex:none;border-color:var(--ui-line-strong)!important;background:var(--ui-surface-active)!important;color:var(--ui-accent-ink)!important}.composer-toolbar .model-select{min-width:132px;max-width:230px;flex:1 1 164px}.composer-toolbar .free-model-entry-button{flex:none;border-style:solid;background:var(--ui-surface);color:var(--ui-accent-ink)}.composer-toolbar .model-manager-button{flex:none}.conversation-action-options button{min-width:0;padding-right:6px;padding-left:6px}
 .composer-context-meter{flex:none}
 @media(max-width:640px){.composer-toolbar{flex-wrap:wrap}.composer-toolbar .input-tools,.composer-toolbar .session-tools{width:100%;flex-wrap:wrap}.composer-toolbar .model-select{max-width:100%;flex:1 1 150px}}

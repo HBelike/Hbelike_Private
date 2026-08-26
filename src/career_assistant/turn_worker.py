@@ -51,10 +51,12 @@ class CareerAgentTurnProcessor:
         agent_loop: CareerAgentLoop,
         intake_graph: CareerIntakeGraph,
         response_runner: CareerResponseRunner,
+        turn_job_repository: CareerTurnJobRepository,
     ) -> None:
         self._agent_loop = agent_loop
         self._intake_graph = intake_graph
         self._response_runner = response_runner
+        self._turn_job_repository = turn_job_repository
 
     def process(
         self,
@@ -104,6 +106,11 @@ class CareerAgentTurnProcessor:
             emit("delta", {"content": "".join(buffered_delta)})
         if final_result is None:
             raise RuntimeError("Worker 模型回复未返回最终结果")
+
+        turn_limit = self._turn_job_repository.get_turn_limit(
+            claim.turn.actor_id,
+            claim.turn.conversation_id,
+        )
 
         return TurnExecutionOutcome(
             status=final_result.turn.status,
@@ -185,6 +192,12 @@ class CareerAgentTurnProcessor:
                     if final_result.context_usage is not None
                     else None
                 ),
+                "turn_limit": {
+                    "successful_turns": turn_limit.successful_turns,
+                    "remaining_turns": turn_limit.remaining_turns,
+                    "max_turns": turn_limit.max_turns,
+                    "reached": turn_limit.reached,
+                },
             },
         )
 

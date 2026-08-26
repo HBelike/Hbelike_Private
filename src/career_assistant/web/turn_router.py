@@ -20,6 +20,7 @@ from src.career_assistant.contracts import (
 )
 from src.career_assistant.agent_loop import ActiveAgentTurn
 from src.career_assistant.persistence.records import AgentTurnStatus
+from src.career_assistant.persistence import ConversationTurnAdmissionError
 from src.career_assistant.turn_payloads import (
     collect_input_kind_codes,
     prepare_turn_payload,
@@ -85,9 +86,21 @@ async def enqueue_turn(
             inbound_message,
             parsed_attachments=(),
         )
+    except ConversationTurnAdmissionError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
     except (LookupError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return {"turn": _queue_status_payload(queue_status)}
+    turn_limit = services.turn_job_repository.get_turn_limit(
+        actor.actor_id,
+        conversation_id,
+    )
+    return {
+        "turn": _queue_status_payload(queue_status),
+        "turn_limit": _turn_limit_payload(turn_limit),
+    }
 
 
 @router.post(
@@ -159,13 +172,23 @@ async def enqueue_turn_with_materials(
         )
     except OSError as exc:
         raise HTTPException(status_code=503, detail="附件临时存储或解析服务不可用") from exc
+    except ConversationTurnAdmissionError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
     except (LookupError, ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     finally:
         services.temporary_attachment_store.cleanup(tuple(attachments))
 
+    turn_limit = services.turn_job_repository.get_turn_limit(
+        actor.actor_id,
+        conversation_id,
+    )
     return {
         "turn": _queue_status_payload(queue_status),
+        "turn_limit": _turn_limit_payload(turn_limit),
         "attachment_processing": {
             "count": len(parsed_attachments),
             "text_characters": sum(
@@ -273,6 +296,12 @@ async def get_context_usage(
         },
         "successful_turns": successful_turns,
         "remaining_turns": max(0, 30 - successful_turns),
+        "turn_limit": {
+            "successful_turns": successful_turns,
+            "remaining_turns": max(0, 30 - successful_turns),
+            "max_turns": 30,
+            "reached": successful_turns >= 30,
+        },
     }
 
 
@@ -472,6 +501,15 @@ def _queue_status_payload(queue_status) -> dict[str, object]:
         "created_at": turn.created_at.isoformat(),
         "started_at": turn.started_at.isoformat() if turn.started_at else None,
         "completed_at": turn.completed_at.isoformat() if turn.completed_at else None,
+    }
+
+
+def _turn_limit_payload(limit) -> dict[str, object]:
+    return {
+        "successful_turns": limit.successful_turns,
+        "remaining_turns": limit.remaining_turns,
+        "max_turns": limit.max_turns,
+        "reached": limit.reached,
     }
 
 

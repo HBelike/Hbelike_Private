@@ -62,6 +62,23 @@ class TurnQueueStatusRecord:
     conversation_position: int
 
 
+MAX_SUCCESSFUL_TURNS = 30
+
+
+@dataclass(frozen=True)
+class ConversationTurnLimit:
+    successful_turns: int
+    remaining_turns: int
+    max_turns: int = MAX_SUCCESSFUL_TURNS
+    reached: bool = False
+
+
+class ConversationTurnAdmissionError(ValueError):
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
 class CareerTurnJobRepository:
     """原子管理 Turn 入队、领取、租约、事件和取消请求。"""
 
@@ -88,6 +105,44 @@ class CareerTurnJobRepository:
             raise ValueError("Agent Turn 至少需要一种输入类型")
 
         with self._database.transaction() as connection:
+            conversation = connection.execute(
+                text(
+                    """
+                    SELECT conversation.id
+                    FROM career_assistant.conversations AS conversation
+                    WHERE conversation.id = :conversation_id
+                      AND conversation.actor_id = :actor_id
+                      AND conversation.status = 'active'
+                    FOR UPDATE
+                    """,
+                ),
+                {"conversation_id": conversation_id, "actor_id": actor_id},
+            ).mappings().one_or_none()
+            if conversation is None:
+                raise LookupError("会话不存在、无访问权限、已归档或已删除")
+            counts = connection.execute(
+                text(
+                    """
+                    SELECT
+                      COUNT(*) FILTER (WHERE status = 'succeeded') AS successful_turns,
+                      COUNT(*) FILTER (WHERE status IN ('queued', 'running')) AS active_turns
+                    FROM career_assistant.agent_turns
+                    WHERE conversation_id = :conversation_id
+                      AND actor_id = :actor_id
+                    """,
+                ),
+                {"conversation_id": conversation_id, "actor_id": actor_id},
+            ).mappings().one()
+            if int(counts["active_turns"]) > 0:
+                raise ConversationTurnAdmissionError(
+                    "conversation_turn_in_progress",
+                    "当前回复完成后可继续发送",
+                )
+            if int(counts["successful_turns"]) >= MAX_SUCCESSFUL_TURNS:
+                raise ConversationTurnAdmissionError(
+                    "conversation_turn_limit_reached",
+                    "本对话已完成 30 轮，请开启新对话继续。",
+                )
             row = connection.execute(
                 text(
                     """
@@ -159,6 +214,35 @@ class CareerTurnJobRepository:
             )
 
         return self._to_turn_record(row)
+
+    def get_turn_limit(
+        self,
+        actor_id: UUID,
+        conversation_id: UUID,
+    ) -> ConversationTurnLimit:
+        with self._database.transaction() as connection:
+            successful = connection.execute(
+                text(
+                    """
+                    SELECT COUNT(*)
+                    FROM career_assistant.agent_turns AS turn
+                    INNER JOIN career_assistant.conversations AS conversation
+                      ON conversation.id = turn.conversation_id
+                    WHERE turn.conversation_id = :conversation_id
+                      AND turn.actor_id = :actor_id
+                      AND conversation.actor_id = :actor_id
+                      AND conversation.status <> 'deleted'
+                      AND turn.status = 'succeeded'
+                    """,
+                ),
+                {"conversation_id": conversation_id, "actor_id": actor_id},
+            ).scalar_one()
+        successful_turns = int(successful)
+        return ConversationTurnLimit(
+            successful_turns=successful_turns,
+            remaining_turns=max(0, MAX_SUCCESSFUL_TURNS - successful_turns),
+            reached=successful_turns >= MAX_SUCCESSFUL_TURNS,
+        )
 
     def claim_next(
         self,

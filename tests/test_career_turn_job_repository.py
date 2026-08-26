@@ -78,6 +78,9 @@ class FakeResult:
     def all(self):
         return self.rows
 
+    def scalar_one(self):
+        return self.row
+
 
 class FakeConnection:
     def __init__(self, results: list[FakeResult]) -> None:
@@ -135,7 +138,13 @@ class CareerTurnJobRepositoryTests(unittest.TestCase):
 
         row = _turn_row()
         database = FakeDatabase(
-            [FakeResult(row=row), FakeResult(), FakeResult()],
+            [
+                FakeResult(row={"id": row["conversation_id"]}),
+                FakeResult(row={"successful_turns": 0, "active_turns": 0}),
+                FakeResult(row=row),
+                FakeResult(),
+                FakeResult(),
+            ],
         )
         repository = CareerTurnJobRepository(database)
         payload = TurnPayloadRecord(
@@ -164,7 +173,7 @@ class CareerTurnJobRepositoryTests(unittest.TestCase):
         self.assertIn("INSERT INTO career_assistant.agent_turns", executed_sql)
         self.assertIn("INSERT INTO career_assistant.agent_turn_payloads", executed_sql)
         self.assertIn("INSERT INTO career_assistant.agent_turn_events", executed_sql)
-        payload_parameters = database.connection.calls[1][1]
+        payload_parameters = database.connection.calls[3][1]
         self.assertIn("张三的完整经历", str(payload_parameters["input_text"]))
 
     def test_claim_next_uses_skip_locked_fifo_and_global_slot(self) -> None:

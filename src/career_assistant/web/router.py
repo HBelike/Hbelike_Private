@@ -1243,6 +1243,10 @@ def get_conversation(
         actor.actor_id,
         conversation_id,
     )
+    turn_limit = CareerTurnJobRepository(read_services.database).get_turn_limit(
+        actor.actor_id,
+        conversation_id,
+    )
     context = read_services.context_repository.get_conversation_context(
         actor.actor_id,
         conversation_id,
@@ -1272,6 +1276,12 @@ def get_conversation(
         "messages": [_message_payload(item) for item in messages],
         "last_model_selection": _model_selection_payload(last_model_selection),
         "latest_turn": _turn_payload(latest_turn) if latest_turn is not None else None,
+        "turn_limit": {
+            "successful_turns": turn_limit.successful_turns,
+            "remaining_turns": turn_limit.remaining_turns,
+            "max_turns": turn_limit.max_turns,
+            "reached": turn_limit.reached,
+        },
         "context": (
             _conversation_context_payload(
                 context,

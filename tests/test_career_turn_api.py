@@ -19,6 +19,7 @@ from src.career_assistant.contracts import (
 )
 from src.career_assistant.persistence.records import AgentTurnRecord, AgentTurnStatus
 from src.career_assistant.persistence.turn_job_repository import (
+    ConversationTurnLimit,
     TurnEventRecord,
     TurnQueueStatusRecord,
 )
@@ -64,6 +65,10 @@ class FakeTurnJobRepository:
         if actor_id == self.queue_status.turn.actor_id and turn_id == self.queue_status.turn.id:
             return self.queue_status
         return None
+
+    def get_turn_limit(self, actor_id, conversation_id):
+        del actor_id, conversation_id
+        return ConversationTurnLimit(successful_turns=0, remaining_turns=30)
 
     def list_events(self, actor_id, turn_id, *, after_id=0, limit=200):
         return tuple(event for event in self.events if event.id > after_id)
@@ -197,6 +202,7 @@ class CareerTurnApiRouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 202)
         self.assertEqual(response.json()["turn"]["status"], "queued")
         self.assertEqual(response.json()["turn"]["conversation_position"], 1)
+        self.assertEqual(response.json()["turn_limit"]["remaining_turns"], 30)
 
     def test_legacy_intake_routes_redirect_to_durable_turn_queue(self) -> None:
         from src.career_assistant.web import router as career_router

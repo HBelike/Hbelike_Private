@@ -50,6 +50,7 @@ async def run_worker() -> None:
             services.agent_loop,
             services.intake_graph,
             services.response_runner,
+            repository,
         ),
         load_career_turn_worker_settings(),
     )

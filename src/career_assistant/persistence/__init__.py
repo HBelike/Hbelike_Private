@@ -38,6 +38,8 @@ from src.career_assistant.persistence.records import (
 from src.career_assistant.persistence.turn_job_repository import (
     CareerTurnJobRepository,
     ClaimedTurnRecord,
+    ConversationTurnAdmissionError,
+    ConversationTurnLimit,
     TurnEventRecord,
     TurnPayloadRecord,
     TurnQueueStatusRecord,
@@ -63,6 +65,8 @@ __all__ = [
     "SessionSummaryRecord",
     "CareerTurnJobRepository",
     "ClaimedTurnRecord",
+    "ConversationTurnAdmissionError",
+    "ConversationTurnLimit",
     "TurnEventRecord",
     "TurnPayloadRecord",
     "TurnQueueStatusRecord",
