@@ -28,9 +28,12 @@ from src.career_assistant.interview_library.models import (
     InterviewChunkCandidate,
     InterviewCompanyRecord,
     InterviewExperienceRecord,
+    InterviewExperienceSourceRecord,
     InterviewExperienceStatus,
     InterviewIngestionJobRecord,
     InterviewSourceType,
+    InterviewWebDocumentRecord,
+    InterviewWebDocumentStatus,
 )
 from src.career_assistant.persistence.database import CareerDatabase
 
@@ -1224,6 +1227,579 @@ class InterviewLibraryRepository:
             )
         return list(companies.values())
 
+    def register_web_document(
+        self,
+        organization_id: UUID,
+        *,
+        canonical_url: str,
+        source_url: str,
+        source_platform: str,
+        title: str | None,
+        search_snippet: str | None,
+        keyword: str,
+        search_rank: int,
+        metadata_json: Mapping[str, object] | None = None,
+    ) -> InterviewWebDocumentRecord:
+        """登记或刷新一个规范 URL，既有终态绝不退回待抓取。"""
+
+        normalized_canonical = self._normalize_optional_url(canonical_url)
+        normalized_source = self._normalize_optional_url(source_url)
+        if normalized_canonical is None or normalized_source is None:
+            raise ValueError("公开网页来源地址不能为空")
+        normalized_platform = self._normalize_text(source_platform, "来源平台", 80)
+        normalized_title = self._normalize_optional_text(title, "网页标题", 500)
+        normalized_snippet = self._normalize_optional_text(search_snippet, "搜索摘要", 2_000)
+        normalized_keyword = self._normalize_text(keyword, "搜索关键词", 120)
+        if not 1 <= search_rank <= 100:
+            raise ValueError("搜索排名必须在 1 到 100 之间")
+        extra_metadata = self._normalize_metadata_json(metadata_json, "公开网页元数据") or {}
+        document_metadata = {
+            **extra_metadata,
+            "latest_keyword": normalized_keyword,
+            "search_rank": search_rank,
+            "discovery_keywords": [normalized_keyword],
+        }
+        with self._database.transaction() as connection:
+            row = connection.execute(
+                text(
+                    """
+                    INSERT INTO career_assistant.interview_web_documents (
+                        id, organization_id, canonical_url, source_url, source_platform,
+                        title, search_snippet, metadata_json
+                    ) VALUES (
+                        :id, :organization_id, :canonical_url, :source_url, :source_platform,
+                        :title, :search_snippet, CAST(:metadata_json AS jsonb)
+                    )
+                    ON CONFLICT (organization_id, canonical_url) DO UPDATE
+                    SET title = COALESCE(EXCLUDED.title, interview_web_documents.title),
+                        search_snippet = COALESCE(
+                            EXCLUDED.search_snippet,
+                            interview_web_documents.search_snippet
+                        ),
+                        status = interview_web_documents.status,
+                        last_seen_at = NOW(),
+                        metadata_json = interview_web_documents.metadata_json
+                            || EXCLUDED.metadata_json
+                            || jsonb_build_object(
+                                'discovery_keywords',
+                                (
+                                    SELECT COALESCE(jsonb_agg(keyword ORDER BY keyword), '[]'::jsonb)
+                                    FROM (
+                                        SELECT DISTINCT keyword
+                                        FROM jsonb_array_elements_text(
+                                            COALESCE(
+                                                interview_web_documents.metadata_json
+                                                    -> 'discovery_keywords',
+                                                '[]'::jsonb
+                                            ) || COALESCE(
+                                                EXCLUDED.metadata_json -> 'discovery_keywords',
+                                                '[]'::jsonb
+                                            )
+                                        ) AS keyword
+                                    ) AS unique_keywords
+                                )
+                            ),
+                        updated_at = NOW()
+                    RETURNING id, organization_id, canonical_url, source_url,
+                              source_platform, title, search_snippet, status,
+                              normalized_markdown, content_hash, imported_experience_id,
+                              attempt_count, error_code, error_message, first_seen_at,
+                              last_seen_at, last_fetched_at, next_retry_at, metadata_json,
+                              created_at, updated_at
+                    """,
+                ),
+                {
+                    "id": uuid4(),
+                    "organization_id": organization_id,
+                    "canonical_url": normalized_canonical,
+                    "source_url": normalized_source,
+                    "source_platform": normalized_platform,
+                    "title": normalized_title,
+                    "search_snippet": normalized_snippet,
+                    "metadata_json": self._serialize_metadata_json(document_metadata),
+                },
+            ).mappings().one()
+        return self._to_web_document(row)
+
+    def get_web_document(
+        self,
+        organization_id: UUID,
+        document_id: UUID,
+    ) -> InterviewWebDocumentRecord | None:
+        """按组织读取一条永久抓取账本。"""
+
+        with self._database.transaction() as connection:
+            row = connection.execute(
+                text(
+                    """
+                    SELECT id, organization_id, canonical_url, source_url,
+                           source_platform, title, search_snippet, status,
+                           normalized_markdown, content_hash, imported_experience_id,
+                           attempt_count, error_code, error_message, first_seen_at,
+                           last_seen_at, last_fetched_at, next_retry_at, metadata_json,
+                           created_at, updated_at
+                    FROM career_assistant.interview_web_documents
+                    WHERE id = :document_id AND organization_id = :organization_id
+                    """,
+                ),
+                {"document_id": document_id, "organization_id": organization_id},
+            ).mappings().one_or_none()
+        return self._to_web_document(row) if row is not None else None
+
+    def claim_web_document(
+        self,
+        organization_id: UUID,
+        document_id: UUID,
+        *,
+        now: datetime,
+    ) -> InterviewWebDocumentRecord | None:
+        """原子认领一个新地址或到期的临时失败地址。"""
+
+        with self._database.transaction() as connection:
+            row = connection.execute(
+                text(
+                    """
+                    UPDATE career_assistant.interview_web_documents
+                    SET status = 'fetching',
+                        attempt_count = attempt_count + 1,
+                        error_code = NULL,
+                        error_message = NULL,
+                        next_retry_at = NULL,
+                        updated_at = NOW()
+                    WHERE id = :document_id
+                      AND organization_id = :organization_id
+                      AND status IN ('discovered', 'retryable_failed')
+                      AND (next_retry_at IS NULL OR next_retry_at <= :now)
+                    RETURNING id, organization_id, canonical_url, source_url,
+                              source_platform, title, search_snippet, status,
+                              normalized_markdown, content_hash, imported_experience_id,
+                              attempt_count, error_code, error_message, first_seen_at,
+                              last_seen_at, last_fetched_at, next_retry_at, metadata_json,
+                              created_at, updated_at
+                    """,
+                ),
+                {"document_id": document_id, "organization_id": organization_id, "now": now},
+            ).mappings().one_or_none()
+        return self._to_web_document(row) if row is not None else None
+
+    def mark_web_document_fetched(
+        self,
+        organization_id: UUID,
+        document_id: UUID,
+        *,
+        normalized_markdown: str,
+        content_hash: str,
+        metadata_json: Mapping[str, object] | None = None,
+    ) -> InterviewWebDocumentRecord:
+        """保存唯一一份清洗正文，后续 Agent/OCR 重试不再抓取网页。"""
+
+        normalized_content = self._normalize_markdown(
+            normalized_markdown,
+            "公开网页规范正文",
+            300_000,
+        )
+        normalized_hash = self._normalize_hash(content_hash)
+        metadata = self._normalize_metadata_json(metadata_json, "公开网页元数据") or {}
+        with self._database.transaction() as connection:
+            row = connection.execute(
+                text(
+                    """
+                    UPDATE career_assistant.interview_web_documents
+                    SET status = 'fetched',
+                        normalized_markdown = :normalized_markdown,
+                        content_hash = :content_hash,
+                        last_fetched_at = NOW(),
+                        next_retry_at = NULL,
+                        error_code = NULL,
+                        error_message = NULL,
+                        metadata_json = metadata_json || CAST(:metadata_json AS jsonb),
+                        updated_at = NOW()
+                    WHERE id = :document_id AND organization_id = :organization_id
+                    RETURNING id, organization_id, canonical_url, source_url,
+                              source_platform, title, search_snippet, status,
+                              normalized_markdown, content_hash, imported_experience_id,
+                              attempt_count, error_code, error_message, first_seen_at,
+                              last_seen_at, last_fetched_at, next_retry_at, metadata_json,
+                              created_at, updated_at
+                    """,
+                ),
+                {
+                    "document_id": document_id,
+                    "organization_id": organization_id,
+                    "normalized_markdown": normalized_content,
+                    "content_hash": normalized_hash,
+                    "metadata_json": self._serialize_metadata_json(metadata),
+                },
+            ).mappings().one_or_none()
+        if row is None:
+            raise LookupError("公开网页账本不存在或无访问权限")
+        return self._to_web_document(row)
+
+    def link_web_document_experience(
+        self,
+        organization_id: UUID,
+        document_id: UUID,
+        experience_id: UUID,
+        *,
+        status: InterviewWebDocumentStatus,
+    ) -> InterviewWebDocumentRecord:
+        """把同正文账本统一关联到一份面经。"""
+
+        if status not in {
+            InterviewWebDocumentStatus.IMPORTED,
+            InterviewWebDocumentStatus.DUPLICATE,
+        }:
+            raise ValueError("关联面经时账本状态只能是 imported 或 duplicate")
+        with self._database.transaction() as connection:
+            row = connection.execute(
+                text(
+                    """
+                    UPDATE career_assistant.interview_web_documents AS document
+                    SET status = :status,
+                        imported_experience_id = experience.id,
+                        next_retry_at = NULL,
+                        error_code = NULL,
+                        error_message = NULL,
+                        updated_at = NOW()
+                    FROM career_assistant.interview_experiences AS experience
+                    WHERE document.id = :document_id
+                      AND document.organization_id = :organization_id
+                      AND experience.id = :experience_id
+                      AND experience.organization_id = :organization_id
+                    RETURNING document.id, document.organization_id,
+                              document.canonical_url, document.source_url,
+                              document.source_platform, document.title,
+                              document.search_snippet, document.status,
+                              document.normalized_markdown, document.content_hash,
+                              document.imported_experience_id, document.attempt_count,
+                              document.error_code, document.error_message,
+                              document.first_seen_at, document.last_seen_at,
+                              document.last_fetched_at, document.next_retry_at,
+                              document.metadata_json, document.created_at,
+                              document.updated_at
+                    """,
+                ),
+                {
+                    "document_id": document_id,
+                    "organization_id": organization_id,
+                    "experience_id": experience_id,
+                    "status": status.value,
+                },
+            ).mappings().one_or_none()
+        if row is None:
+            raise LookupError("公开网页账本或面经不存在或无访问权限")
+        return self._to_web_document(row)
+
+    def mark_web_document_imported(
+        self,
+        organization_id: UUID,
+        document_id: UUID,
+        *,
+        imported_experience_id: UUID,
+    ) -> InterviewWebDocumentRecord:
+        return self.link_web_document_experience(
+            organization_id,
+            document_id,
+            imported_experience_id,
+            status=InterviewWebDocumentStatus.IMPORTED,
+        )
+
+    def mark_web_document_duplicate(
+        self,
+        organization_id: UUID,
+        document_id: UUID,
+        *,
+        imported_experience_id: UUID,
+    ) -> InterviewWebDocumentRecord:
+        return self.link_web_document_experience(
+            organization_id,
+            document_id,
+            imported_experience_id,
+            status=InterviewWebDocumentStatus.DUPLICATE,
+        )
+
+    def mark_web_document_filtered(
+        self,
+        organization_id: UUID,
+        document_id: UUID,
+        *,
+        metadata_json: Mapping[str, object] | None = None,
+    ) -> InterviewWebDocumentRecord:
+        """标记非面经或字段不足页面，同时保留已解析正文供人工核对。"""
+
+        metadata = self._normalize_metadata_json(metadata_json, "过滤元数据") or {}
+        with self._database.transaction() as connection:
+            row = connection.execute(
+                text(
+                    """
+                    UPDATE career_assistant.interview_web_documents
+                    SET status = 'filtered',
+                        next_retry_at = NULL,
+                        error_code = NULL,
+                        error_message = NULL,
+                        metadata_json = metadata_json || CAST(:metadata_json AS jsonb),
+                        updated_at = NOW()
+                    WHERE id = :document_id AND organization_id = :organization_id
+                    RETURNING id, organization_id, canonical_url, source_url,
+                              source_platform, title, search_snippet, status,
+                              normalized_markdown, content_hash, imported_experience_id,
+                              attempt_count, error_code, error_message, first_seen_at,
+                              last_seen_at, last_fetched_at, next_retry_at, metadata_json,
+                              created_at, updated_at
+                    """,
+                ),
+                {
+                    "document_id": document_id,
+                    "organization_id": organization_id,
+                    "metadata_json": self._serialize_metadata_json(metadata),
+                },
+            ).mappings().one_or_none()
+        if row is None:
+            raise LookupError("公开网页账本不存在或无访问权限")
+        return self._to_web_document(row)
+
+    def mark_web_document_failed(
+        self,
+        organization_id: UUID,
+        document_id: UUID,
+        *,
+        error_code: str,
+        error_message: str,
+        retryable: bool,
+        now: datetime,
+    ) -> InterviewWebDocumentRecord:
+        """按 1 小时、6 小时、24 小时安排最多三次重试。"""
+
+        normalized_code = self._normalize_text(error_code, "错误代码", 80)
+        normalized_message = self._normalize_text(error_message, "错误说明", 1_000)
+        with self._database.transaction() as connection:
+            row = connection.execute(
+                text(
+                    """
+                    UPDATE career_assistant.interview_web_documents
+                    SET status = CASE
+                            WHEN :retryable AND attempt_count <= 3
+                                THEN 'retryable_failed'
+                            ELSE 'permanent_failed'
+                        END,
+                        attempt_count = attempt_count,
+                        error_code = :error_code,
+                        error_message = :error_message,
+                        next_retry_at = CASE
+                            WHEN NOT :retryable OR attempt_count > 3 THEN NULL
+                            WHEN attempt_count = 1 THEN :now + INTERVAL '1 hour'
+                            WHEN attempt_count = 2 THEN :now + INTERVAL '6 hours'
+                            ELSE :now + INTERVAL '24 hours'
+                        END,
+                        updated_at = NOW()
+                    WHERE id = :document_id AND organization_id = :organization_id
+                    RETURNING id, organization_id, canonical_url, source_url,
+                              source_platform, title, search_snippet, status,
+                              normalized_markdown, content_hash, imported_experience_id,
+                              attempt_count, error_code, error_message, first_seen_at,
+                              last_seen_at, last_fetched_at, next_retry_at, metadata_json,
+                              created_at, updated_at
+                    """,
+                ),
+                {
+                    "document_id": document_id,
+                    "organization_id": organization_id,
+                    "error_code": normalized_code,
+                    "error_message": normalized_message,
+                    "retryable": bool(retryable),
+                    "now": now,
+                },
+            ).mappings().one_or_none()
+        if row is None:
+            raise LookupError("公开网页账本不存在或无访问权限")
+        return self._to_web_document(row)
+
+    def find_imported_document_by_content_hash(
+        self,
+        organization_id: UUID,
+        content_hash: str,
+    ) -> InterviewWebDocumentRecord | None:
+        """按正文哈希查找已经归属面经的最早账本。"""
+
+        normalized_hash = self._normalize_hash(content_hash)
+        with self._database.transaction() as connection:
+            row = connection.execute(
+                text(
+                    """
+                    SELECT id, organization_id, canonical_url, source_url,
+                           source_platform, title, search_snippet, status,
+                           normalized_markdown, content_hash, imported_experience_id,
+                           attempt_count, error_code, error_message, first_seen_at,
+                           last_seen_at, last_fetched_at, next_retry_at, metadata_json,
+                           created_at, updated_at
+                    FROM career_assistant.interview_web_documents
+                    WHERE organization_id = :organization_id
+                      AND content_hash = :content_hash
+                      AND imported_experience_id IS NOT NULL
+                      AND status IN ('imported', 'duplicate')
+                    ORDER BY first_seen_at ASC
+                    LIMIT 1
+                    """,
+                ),
+                {"organization_id": organization_id, "content_hash": normalized_hash},
+            ).mappings().one_or_none()
+        return self._to_web_document(row) if row is not None else None
+
+    def list_web_documents_by_content_hash(
+        self,
+        organization_id: UUID,
+        content_hash: str,
+    ) -> list[InterviewWebDocumentRecord]:
+        """读取同正文全部来源，供一次性建立主来源和别名。"""
+
+        normalized_hash = self._normalize_hash(content_hash)
+        with self._database.transaction() as connection:
+            rows = connection.execute(
+                text(
+                    """
+                    SELECT id, organization_id, canonical_url, source_url,
+                           source_platform, title, search_snippet, status,
+                           normalized_markdown, content_hash, imported_experience_id,
+                           attempt_count, error_code, error_message, first_seen_at,
+                           last_seen_at, last_fetched_at, next_retry_at, metadata_json,
+                           created_at, updated_at
+                    FROM career_assistant.interview_web_documents
+                    WHERE organization_id = :organization_id
+                      AND content_hash = :content_hash
+                    ORDER BY first_seen_at ASC, created_at ASC
+                    """,
+                ),
+                {"organization_id": organization_id, "content_hash": normalized_hash},
+            ).mappings().all()
+        return [self._to_web_document(row) for row in rows]
+
+    def get_experience_by_source_content_hash(
+        self,
+        organization_id: UUID,
+        content_hash: str,
+    ) -> InterviewExperienceRecord | None:
+        """按历史来源哈希只读查重，不触发 upsert 或覆盖人工编辑。"""
+
+        normalized_hash = self._normalize_hash(content_hash)
+        with self._database.transaction() as connection:
+            row = connection.execute(
+                text(
+                    """
+                    SELECT experience.id, experience.organization_id, experience.company_id,
+                           company.display_name AS company_name, experience.job_name,
+                           experience.role_name, experience.normalized_role_name,
+                           experience.interview_date, experience.source_type,
+                           experience.source_platform, experience.source_url,
+                           experience.source_content_hash, experience.markdown_content,
+                           experience.normalized_markdown, experience.summary_text,
+                           experience.tags, experience.status, experience.chunking_version,
+                           experience.indexed_at, experience.created_at, experience.updated_at
+                    FROM career_assistant.interview_experiences AS experience
+                    INNER JOIN career_assistant.interview_companies AS company
+                        ON company.id = experience.company_id
+                    WHERE experience.organization_id = :organization_id
+                      AND experience.source_content_hash = :content_hash
+                    ORDER BY experience.created_at ASC
+                    LIMIT 1
+                    """,
+                ),
+                {"organization_id": organization_id, "content_hash": normalized_hash},
+            ).mappings().one_or_none()
+        return self._to_experience(row) if row is not None else None
+
+    def add_experience_source(
+        self,
+        organization_id: UUID,
+        experience_id: UUID,
+        *,
+        canonical_url: str,
+        source_url: str,
+        source_platform: str,
+        keyword: str,
+        is_primary: bool,
+    ) -> InterviewExperienceSourceRecord:
+        """新增来源或合并发现关键词，冲突时不改变既有主来源归属。"""
+
+        normalized_canonical = self._normalize_optional_url(canonical_url)
+        normalized_source = self._normalize_optional_url(source_url)
+        if normalized_canonical is None or normalized_source is None:
+            raise ValueError("面经来源地址不能为空")
+        normalized_platform = self._normalize_text(source_platform, "来源平台", 80)
+        normalized_keyword = self._normalize_text(keyword, "发现关键词", 120)
+        with self._database.transaction() as connection:
+            row = connection.execute(
+                text(
+                    """
+                    INSERT INTO career_assistant.interview_experience_sources (
+                        id, organization_id, experience_id, canonical_url, source_url,
+                        source_platform, is_primary, discovery_keywords_json
+                    )
+                    SELECT :id, :organization_id, experience.id, :canonical_url,
+                           :source_url, :source_platform, :is_primary,
+                           jsonb_build_array(:keyword)
+                    FROM career_assistant.interview_experiences AS experience
+                    WHERE experience.id = :experience_id
+                      AND experience.organization_id = :organization_id
+                    ON CONFLICT (organization_id, canonical_url) DO UPDATE
+                    SET last_seen_at = NOW(),
+                        updated_at = NOW(),
+                        discovery_keywords_json = (
+                            SELECT COALESCE(jsonb_agg(keyword ORDER BY keyword), '[]'::jsonb)
+                            FROM (
+                                SELECT DISTINCT keyword
+                                FROM jsonb_array_elements_text(
+                                    interview_experience_sources.discovery_keywords_json
+                                    || jsonb_build_array(:keyword)
+                                ) AS keyword
+                            ) AS unique_keywords
+                        ),
+                        is_primary = interview_experience_sources.is_primary
+                    RETURNING id, organization_id, experience_id, canonical_url,
+                              source_url, source_platform, is_primary,
+                              discovery_keywords_json, first_seen_at, last_seen_at,
+                              created_at, updated_at
+                    """,
+                ),
+                {
+                    "id": uuid4(),
+                    "organization_id": organization_id,
+                    "experience_id": experience_id,
+                    "canonical_url": normalized_canonical,
+                    "source_url": normalized_source,
+                    "source_platform": normalized_platform,
+                    "keyword": normalized_keyword,
+                    "is_primary": bool(is_primary),
+                },
+            ).mappings().one_or_none()
+        if row is None:
+            raise LookupError("面经不存在或无访问权限")
+        return self._to_experience_source(row)
+
+    def list_experience_sources(
+        self,
+        organization_id: UUID,
+        experience_id: UUID,
+    ) -> list[InterviewExperienceSourceRecord]:
+        """读取一份面经的主来源和全部同正文来源别名。"""
+
+        with self._database.transaction() as connection:
+            rows = connection.execute(
+                text(
+                    """
+                    SELECT id, organization_id, experience_id, canonical_url,
+                           source_url, source_platform, is_primary,
+                           discovery_keywords_json, first_seen_at, last_seen_at,
+                           created_at, updated_at
+                    FROM career_assistant.interview_experience_sources
+                    WHERE organization_id = :organization_id
+                      AND experience_id = :experience_id
+                    ORDER BY is_primary DESC, first_seen_at ASC
+                    """,
+                ),
+                {"organization_id": organization_id, "experience_id": experience_id},
+            ).mappings().all()
+        return [self._to_experience_source(row) for row in rows]
+
     def get_experience(
         self,
         organization_id: UUID,
@@ -1602,4 +2178,64 @@ class InterviewLibraryRepository:
             metadata_json=InterviewLibraryRepository._read_metadata_json(
                 row.get("metadata_json"),
             ),
+        )
+
+    @staticmethod
+    def _to_web_document(row: RowMapping) -> InterviewWebDocumentRecord:
+        """把永久抓取账本行转换为稳定领域记录。"""
+
+        return InterviewWebDocumentRecord(
+            id=row["id"],
+            organization_id=row["organization_id"],
+            canonical_url=row["canonical_url"],
+            source_url=row["source_url"],
+            source_platform=row["source_platform"],
+            title=row["title"],
+            search_snippet=row["search_snippet"],
+            status=InterviewWebDocumentStatus(row["status"]),
+            normalized_markdown=row["normalized_markdown"],
+            content_hash=row["content_hash"],
+            imported_experience_id=row["imported_experience_id"],
+            attempt_count=row["attempt_count"],
+            error_code=row["error_code"],
+            error_message=row["error_message"],
+            first_seen_at=row["first_seen_at"],
+            last_seen_at=row["last_seen_at"],
+            last_fetched_at=row["last_fetched_at"],
+            next_retry_at=row["next_retry_at"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            metadata_json=InterviewLibraryRepository._read_metadata_json(
+                row.get("metadata_json"),
+            ),
+        )
+
+    @staticmethod
+    def _to_experience_source(row: RowMapping) -> InterviewExperienceSourceRecord:
+        """把主来源或来源别名行转换为稳定领域记录。"""
+
+        keywords_value = row.get("discovery_keywords_json")
+        if isinstance(keywords_value, str):
+            try:
+                keywords_value = json.loads(keywords_value)
+            except json.JSONDecodeError:
+                keywords_value = []
+        keywords = tuple(
+            str(item)
+            for item in (keywords_value or [])
+            if isinstance(item, str) and item.strip()
+        )
+        return InterviewExperienceSourceRecord(
+            id=row["id"],
+            organization_id=row["organization_id"],
+            experience_id=row["experience_id"],
+            canonical_url=row["canonical_url"],
+            source_url=row["source_url"],
+            source_platform=row["source_platform"],
+            is_primary=bool(row["is_primary"]),
+            discovery_keywords=keywords,
+            first_seen_at=row["first_seen_at"],
+            last_seen_at=row["last_seen_at"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
         )

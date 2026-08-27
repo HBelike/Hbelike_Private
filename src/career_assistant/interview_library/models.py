@@ -88,6 +88,19 @@ class CollectionCandidateStatus(StrEnum):
     FAILED = "failed"
 
 
+class InterviewWebDocumentStatus(StrEnum):
+    """公开网页从发现到去重、入库或失败的永久状态。"""
+
+    DISCOVERED = "discovered"
+    FETCHING = "fetching"
+    FETCHED = "fetched"
+    DUPLICATE = "duplicate"
+    IMPORTED = "imported"
+    FILTERED = "filtered"
+    RETRYABLE_FAILED = "retryable_failed"
+    PERMANENT_FAILED = "permanent_failed"
+
+
 @dataclass(frozen=True)
 class InterviewCompanyRecord:
     """面经树的公司根节点。"""
@@ -233,3 +246,48 @@ class InterviewCollectionCandidateRecord:
     # 单条候选资料的派生信息，例如图文页数量、OCR 结果摘要和提取置信度。
     # 原始图片文件由临时存储负责清理，不能写入此字段。
     metadata_json: Mapping[str, object] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class InterviewWebDocumentRecord:
+    """跨批次复用的公开网页正文和抓取状态，不包含原始 HTML 或图片。"""
+
+    id: UUID
+    organization_id: UUID
+    canonical_url: str
+    source_url: str
+    source_platform: str
+    title: str | None
+    search_snippet: str | None
+    status: InterviewWebDocumentStatus
+    normalized_markdown: str | None
+    content_hash: str | None
+    imported_experience_id: UUID | None
+    attempt_count: int
+    error_code: str | None
+    error_message: str | None
+    first_seen_at: datetime
+    last_seen_at: datetime
+    last_fetched_at: datetime | None
+    next_retry_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+    metadata_json: Mapping[str, object] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class InterviewExperienceSourceRecord:
+    """一份面经的主来源或同正文来源别名。"""
+
+    id: UUID
+    organization_id: UUID
+    experience_id: UUID
+    canonical_url: str
+    source_url: str
+    source_platform: str
+    is_primary: bool
+    discovery_keywords: tuple[str, ...]
+    first_seen_at: datetime
+    last_seen_at: datetime
+    created_at: datetime
+    updated_at: datetime
