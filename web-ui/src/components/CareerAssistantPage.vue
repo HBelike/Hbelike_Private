@@ -71,6 +71,7 @@ const testingConnection = ref(false)
 const loadingFreeModelCatalog = ref(false)
 const showJobUrl = ref(false)
 const showModelDialog = ref(false)
+const showModelApiKey = ref(false)
 const modelDialogMode = ref('list')
 const modelSetupReturnMode = ref('list')
 const testedConnectionFingerprint = ref('')
@@ -133,6 +134,7 @@ const layoutMode = ref(getCareerLayoutMode(workspaceWidth.value))
 const compactPanel = ref('')
 const contextUsage = ref(null)
 const contextUsageLoading = ref(false)
+const contextUsageRevision = ref(0)
 const turnLimit = ref(normalizeTurnLimit())
 
 const HISTORY_COLLAPSED_STORAGE_KEY = 'career-assistant-history-collapsed'
@@ -544,11 +546,12 @@ function syncComposerHighlightScroll(event) {
 const providerOptions = [
   { key: 'deepseek', label: 'DeepSeek', short: 'DS', detail: '中文技术与推理模型', websiteUrl: 'https://platform.deepseek.com', apiBaseUrl: 'https://api.deepseek.com', defaultModelId: 'deepseek-v4-pro', modelHint: '例如：deepseek-v4-pro', vision: false },
   { key: 'groq', label: 'Groq', short: 'G', detail: '低延迟开源模型推理服务', websiteUrl: 'https://console.groq.com', apiBaseUrl: 'https://api.groq.com/openai/v1', defaultModelId: 'openai/gpt-oss-20b', modelHint: '例如：openai/gpt-oss-20b', vision: false },
+  { key: 'mistral', label: 'Mistral AI', short: 'MI', detail: '提供有限月度用量的 Free mode', websiteUrl: 'https://console.mistral.ai', apiBaseUrl: 'https://api.mistral.ai/v1', defaultModelId: 'mistral-small-latest', modelHint: '例如：mistral-small-latest', vision: false },
   { key: 'openrouter', label: 'OpenRouter', short: 'OR', detail: '可路由到当前免费模型', websiteUrl: 'https://openrouter.ai', apiBaseUrl: 'https://openrouter.ai/api/v1', defaultModelId: 'openrouter/free', modelHint: '例如：openrouter/free', vision: false },
-  { key: 'gemini', label: 'Google Gemini', short: 'GM', detail: '免费层支持文字与图片理解', websiteUrl: 'https://aistudio.google.com', apiBaseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai', defaultModelId: 'gemini-3.5-flash-lite', modelHint: '例如：gemini-3.5-flash-lite', vision: true },
-  { key: 'qwen', label: '阿里云百炼 Qwen', short: 'QW', detail: 'DashScope OpenAI-compatible 接口', websiteUrl: 'https://bailian.console.aliyun.com', apiBaseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', modelHint: '例如：qwen-plus', vision: true },
-  { key: 'siliconflow', label: 'SiliconFlow', short: 'SF', detail: '开源模型聚合服务（部分模型免费）', websiteUrl: 'https://cloud.siliconflow.cn', apiBaseUrl: 'https://api.siliconflow.cn/v1', defaultModelId: 'Qwen/Qwen2.5-7B-Instruct', modelHint: '例如：Qwen/Qwen2.5-7B-Instruct', vision: true },
-  { key: 'modelscope', label: 'ModelScope', short: 'MS', detail: '魔搭社区模型服务', websiteUrl: 'https://www.modelscope.cn', apiBaseUrl: 'https://api-inference.modelscope.cn/v1', modelHint: '例如：Qwen/Qwen2.5-7B-Instruct', vision: true },
+  { key: 'gemini', label: 'Google Gemini', short: 'GM', detail: '免费层支持文字与图片理解', websiteUrl: 'https://aistudio.google.com', apiBaseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai', defaultModelId: 'gemini-3.7-flash', modelHint: '例如：gemini-3.7-flash', vision: true },
+  { key: 'qwen', label: '阿里云百炼 Qwen', short: 'QW', detail: 'DashScope 新用户限时免费额度', websiteUrl: 'https://bailian.console.aliyun.com', apiBaseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', defaultModelId: 'qwen3.6-flash', modelHint: '例如：qwen3.6-flash', vision: true },
+  { key: 'siliconflow', label: 'SiliconFlow', short: 'SF', detail: '价格页明确标记的当前免费模型', websiteUrl: 'https://cloud.siliconflow.cn', apiBaseUrl: 'https://api.siliconflow.cn/v1', defaultModelId: 'THUDM/GLM-Z1-9B-0414', modelHint: '例如：THUDM/GLM-Z1-9B-0414', vision: false },
+  { key: 'modelscope', label: 'ModelScope', short: 'MS', detail: '使用魔力值兑换 API-Inference 体验', websiteUrl: 'https://www.modelscope.cn', apiBaseUrl: 'https://api-inference.modelscope.cn/v1', defaultModelId: 'deepseek-ai/DeepSeek-V4-Pro', modelHint: '例如：deepseek-ai/DeepSeek-V4-Pro', vision: false },
   { key: 'nvidia', label: 'NVIDIA NIM', short: 'NV', detail: 'NVIDIA 推理服务', websiteUrl: 'https://build.nvidia.com', apiBaseUrl: 'https://integrate.api.nvidia.com/v1', modelHint: '例如：meta/llama-3.3-70b-instruct', vision: true },
   { key: 'tokenhub', label: '腾讯云 TokenHub', short: 'TH', detail: '多模型统一网关', websiteUrl: 'https://console.cloud.tencent.com/tokenhub/', apiBaseUrl: 'https://tokenhub.tencentmaas.com/v1', defaultModelId: 'deepseek-v4-flash', modelHint: '例如：deepseek-v4-flash', vision: true },
   { key: 'baidu-qianfan', label: '百度千帆', short: 'BQ', detail: 'ERNIE 与开源模型 OpenAI-compatible 接口', websiteUrl: 'https://console.bce.baidu.com/qianfan', apiBaseUrl: 'https://qianfan.baidubce.com/v2', defaultModelId: 'ernie-3.5-8k', modelHint: '例如：ernie-3.5-8k', vision: true },
@@ -621,7 +624,12 @@ function openFreeModelDirectory() {
   showModelDialog.value = true
 }
 
+function hideModelApiKey() {
+  showModelApiKey.value = false
+}
+
 function closeModelDialog() {
+  hideModelApiKey()
   showModelDialog.value = false
   connectionTestMessage.value = ''
   connectionTestError.value = ''
@@ -630,6 +638,7 @@ function closeModelDialog() {
 }
 
 function createModelConnection() {
+  hideModelApiKey()
   modelForm.value = emptyModelForm()
   connectionTestMessage.value = ''
   connectionTestError.value = ''
@@ -640,6 +649,7 @@ function createModelConnection() {
 }
 
 function chooseProvider(provider) {
+  hideModelApiKey()
   modelForm.value = {
     ...emptyModelForm(),
     providerKey: provider.key,
@@ -757,6 +767,7 @@ async function loadFreeModelCatalog() {
 }
 
 function editModelConnection(item, returnMode = 'list') {
+  hideModelApiKey()
   const profile = item.profile
   modelForm.value = {
     profileKey: profile.profile_key,
@@ -927,8 +938,15 @@ watch(
 )
 
 watch(
-  () => [selectedConversation.value?.id, resolvedSelectedProfileId.value],
-  () => void loadContextUsage(),
+  () => [
+    selectedConversation.value?.id,
+    resolvedSelectedProfileId.value,
+    contextUsageRevision.value,
+  ],
+  () => {
+    contextUsage.value = null
+    void loadContextUsage()
+  },
 )
 
 async function loadContextUsage() {
@@ -1910,6 +1928,7 @@ async function saveModelProfile() {
     } else {
       useFreeQuotaFirstSelection()
     }
+    contextUsageRevision.value += 1
     modelForm.value = emptyModelForm()
     modelDialogMode.value = 'list'
     connectionTestMessage.value = ''
@@ -2531,7 +2550,7 @@ onMounted(() => {
               <label>模型名称（Model ID）<span>从服务商控制台复制模型或接入点标识</span><input v-model="modelForm.modelId" :placeholder="activeProviderOption.modelHint" @input="invalidateConnectionTest" /></label>
               <label v-if="!usesPresetEndpoint">官网地址<span>用于打开服务商控制台，不参与模型调用</span><input v-model="modelForm.websiteUrl" placeholder="https://platform.example.com" @input="invalidateConnectionTest" /></label>
               <label v-if="!usesPresetEndpoint">免费模型候选顺序<span>数值越小，自动选择时越靠前</span><input v-model.number="modelForm.priority" min="0" max="10000" type="number" @input="invalidateConnectionTest" /></label>
-              <label class="full-width">API Key<span>显式填写；测试和保存后均不会回显。生产环境请通过 HTTPS 访问本平台。</span><input v-model="modelForm.apiKey" type="password" autocomplete="new-password" spellcheck="false" placeholder="粘贴该服务商的 API Key" @input="invalidateConnectionTest" /></label>
+              <div class="full-width api-key-field"><label for="career-model-api-key">API Key<span>显式填写；测试和保存后均不会回显。生产环境请通过 HTTPS 访问本平台。</span></label><span class="api-key-input-shell"><input id="career-model-api-key" v-model="modelForm.apiKey" :type="showModelApiKey ? 'text' : 'password'" autocomplete="new-password" spellcheck="false" placeholder="粘贴该服务商的 API Key" @input="invalidateConnectionTest" /><button class="api-key-visibility-button" type="button" :aria-label="showModelApiKey ? '隐藏 API Key' : '显示 API Key'" :aria-pressed="showModelApiKey" :title="showModelApiKey ? '隐藏 API Key' : '显示 API Key'" @click="showModelApiKey = !showModelApiKey"><svg v-if="showModelApiKey" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3l18 18"/><path d="M10.6 10.6a2 2 0 0 0 2.8 2.8"/><path d="M9.9 4.3A10.7 10.7 0 0 1 12 4c5 0 8.5 4.2 9.5 6.5a3.5 3.5 0 0 1 0 3A13 13 0 0 1 19 17.1M6.2 6.2a13 13 0 0 0-3.7 4.3 3.5 3.5 0 0 0 0 3C3.5 15.8 7 20 12 20a10.7 10.7 0 0 0 3.1-.5"/></svg><svg v-else viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 10.5C3.5 8.2 7 4 12 4s8.5 4.2 9.5 6.5a3.5 3.5 0 0 1 0 3C20.5 15.8 17 20 12 20s-8.5-4.2-9.5-6.5a3.5 3.5 0 0 1 0-3Z"/><circle cx="12" cy="12" r="3"/></svg></button></span></div>
               <label v-if="!usesPresetEndpoint" class="full-width">请求地址（API Base URL）<span>填写到 API Base URL 层级，不要附加 /chat/completions。</span><input v-model="modelForm.apiBaseUrl" placeholder="https://your-api-endpoint/v1" @input="invalidateConnectionTest" /></label>
             </div>
             <fieldset class="capability-fieldset"><legend>模型能力</legend><label class="capability-option"><input v-model="modelForm.text" type="checkbox" @change="invalidateConnectionTest" /> <span><strong>文字与 PDF 文本</strong><small>用于职位匹配、简历建议和面试准备</small></span></label><label class="capability-option"><input v-model="modelForm.vision" type="checkbox" @change="invalidateConnectionTest" /> <span><strong>图片简历</strong><small>仅在当前模型确实支持视觉输入时勾选</small></span></label><label class="capability-option"><input v-model="modelForm.tools" type="checkbox" @change="invalidateConnectionTest" /> <span><strong>Tool Calling</strong><small>模型确认支持 function tools 时勾选；未支持时只能执行 Skill 的文字工作流</small></span></label></fieldset>
@@ -2619,6 +2638,13 @@ onMounted(() => {
 .model-manager-button { border-color:#cfdcb7; background:#f1f7e5; color:#5c7a28; }.model-dialog-backdrop { position:fixed; z-index:1200; inset:0; display:grid; place-items:center; box-sizing:border-box; padding:28px; background:rgba(29,40,25,.42); backdrop-filter:blur(5px); }.model-dialog { display:flex; width:min(960px,100%); max-height:min(780px,calc(100vh - 56px)); flex-direction:column; overflow:hidden; border:1px solid #dce6cf; border-radius:24px; background:#fff; box-shadow:0 28px 80px rgba(23,37,20,.28); }.model-dialog-header { display:flex; align-items:flex-start; justify-content:space-between; gap:20px; border-bottom:1px solid #ecf0e5; padding:24px 28px 20px; }.model-dialog-header h2 { margin:4px 0 0; color:#243323; font-size:23px; }.dialog-close-button { display:grid; width:34px; height:34px; flex:0 0 auto; place-items:center; border:1px solid #e1e8d7; border-radius:10px; background:#fafcf7; color:#728067; font-size:23px; line-height:1; }.model-dialog-body { min-height:240px; overflow-y:auto; padding:22px 28px 26px; }.connection-toolbar { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:16px; }.connection-toolbar strong,.connection-toolbar small { display:block; }.connection-toolbar strong { color:#354333; font-size:16px; }.connection-toolbar small,.dialog-helper { margin-top:4px; color:#889281; font-size:12px; }.dialog-primary-button,.dialog-secondary-button { border:0; border-radius:11px; padding:10px 15px; font-size:13px; font-weight:850; }.dialog-primary-button { background:#89a93e; color:#fff; box-shadow:0 8px 18px rgba(112,144,51,.2); }.dialog-primary-button:disabled { cursor:wait; opacity:.6; }.dialog-secondary-button,.back-button { border:1px solid #e1e8d7; background:#fff; color:#64735a; }.connection-card-list { display:grid; gap:10px; }.connection-card { display:grid; width:100%; grid-template-columns:18px 42px minmax(0,1fr) auto; align-items:center; gap:13px; border:1px solid #e3ead9; border-radius:15px; background:#fff; color:#31402f; padding:13px 15px; text-align:left; transition:border-color .16s ease,background .16s ease,transform .16s ease; }.connection-card:hover { border-color:#a7c66d; background:#fbfdf7; transform:translateY(-1px); }.connection-drag { color:#bcc7b4; font-size:20px; letter-spacing:-3px; }.provider-avatar { display:grid; width:38px; height:38px; place-items:center; border:1px solid #dfe8d0; border-radius:12px; background:#f3f8e9; color:#6d8c33; font-size:11px; font-weight:900; }.provider-avatar.large { width:44px; height:44px; border-radius:14px; }.connection-card-copy { min-width:0; }.connection-card-copy strong,.connection-card-copy small { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.connection-card-copy strong { font-size:14px; }.connection-card-copy small { margin-top:3px; color:#899481; font-size:12px; }.connection-meta { display:grid; justify-items:end; gap:5px; }.connection-meta small { color:#98a18f; font-size:11px; }.connection-empty-state { display:grid; min-height:250px; place-content:center; justify-items:center; border:1px dashed #d9e4cb; border-radius:16px; background:#fbfdf8; color:#7a8870; text-align:center; }.connection-empty-state > span { color:#90b04c; font-size:30px; }.connection-empty-state strong { margin-top:8px; color:#526449; }.connection-empty-state p { max-width:320px; margin:7px 0 0; font-size:13px; line-height:1.6; }.back-button { border-radius:9px; padding:7px 10px; color:#66765b; font-size:12px; font-weight:800; }.model-dialog-body h3 { margin:20px 0 4px; color:#31402e; font-size:18px; }.provider-picker-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; margin-top:18px; }.provider-picker-card { display:grid; grid-template-columns:44px minmax(0,1fr); align-items:center; gap:11px; border:1px solid #e2ead8; border-radius:16px; background:#fbfcf9; color:#334131; padding:15px; text-align:left; transition:border-color .16s ease,box-shadow .16s ease; }.provider-picker-card:hover { border-color:#97ba57; box-shadow:0 10px 25px rgba(91,120,42,.1); }.provider-picker-card strong,.provider-picker-card small { display:block; }.provider-picker-card small { margin-top:4px; color:#84907c; font-size:11px; line-height:1.5; }.provider-picker-card em { grid-column:1 / -1; justify-self:start; border-radius:999px; background:#eef6df; color:#66842e; padding:4px 7px; font-size:10px; font-style:normal; font-weight:850; }.connection-form-body { padding-bottom:22px; }.selected-provider-banner { display:flex; align-items:center; gap:11px; margin-top:17px; border:1px solid #dce9c8; border-radius:15px; background:#f6faef; padding:12px; }.selected-provider-banner div { min-width:0; flex:1; }.selected-provider-banner strong,.selected-provider-banner small { display:block; }.selected-provider-banner small { margin-top:3px; color:#7d8973; font-size:12px; }.selected-provider-banner > span:last-child { border-radius:999px; background:#e7f1d4; color:#63822b; padding:5px 8px; font-size:11px; font-weight:850; }.connection-form-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; margin-top:18px; }.connection-form-grid label { display:grid; gap:5px; color:#4e5c49; font-size:13px; font-weight:850; }.connection-form-grid label > span { color:#8a9583; font-size:11px; font-weight:500; }.connection-form-grid input,.connection-form-grid select { width:100%; box-sizing:border-box; border:1px solid #dfe7d4; border-radius:10px; background:#fff; color:#354334; padding:10px 11px; font:inherit; outline:none; }.connection-form-grid input:focus,.connection-form-grid select:focus { border-color:#91b44b; box-shadow:0 0 0 3px rgba(137,169,62,.12); }.full-width { grid-column:1 / -1; }.capability-fieldset { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; margin:18px 0 0; border:0; padding:0; }.capability-fieldset legend { margin-bottom:8px; color:#4d5d48; font-size:13px; font-weight:850; }.capability-option { display:flex; align-items:flex-start; gap:8px; border:1px solid #e3ead9; border-radius:13px; background:#fbfcf9; padding:11px; }.capability-option input { margin-top:3px; accent-color:#89a93e; }.capability-option strong,.capability-option small { display:block; }.capability-option strong { color:#485846; font-size:12px; }.capability-option small { margin-top:3px; color:#899481; font-size:11px; line-height:1.45; }.connection-test-success,.connection-test-error { display:block; margin:14px 0 0; border-radius:11px; padding:10px 12px; font-size:12px; font-weight:750; line-height:1.6; }.connection-test-success { border:1px solid #cce5aa; background:#f4faea; color:#587b27; }.connection-test-error { border:1px solid #efcaca; background:#fff6f6; color:#9c4848; }.connection-test-error strong { display:block; margin-bottom:2px; }.model-dialog-footer { display:flex; justify-content:flex-end; gap:10px; border-top:1px solid #ecf0e5; background:#fbfcf9; padding:15px 28px; }
 .model-dialog { width:min(1080px,100%); max-height:min(840px,calc(100vh - 44px)); }
 .connection-setup-body { scroll-behavior:smooth; }
+.api-key-field { display:grid; gap:5px; }
+.api-key-input-shell { position:relative; display:block; color:inherit; font-size:13px; font-weight:850; }
+.connection-form-grid .api-key-input-shell input { padding-right:46px; }
+.api-key-visibility-button { position:absolute; top:50%; right:5px; display:grid; width:34px; height:34px; place-items:center; border:0; border-radius:8px; background:transparent; color:#75836f; padding:0; transform:translateY(-50%); cursor:pointer; }
+.api-key-visibility-button svg { width:19px; height:19px; fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; }
+.api-key-visibility-button:hover { background:#f0f6e7; color:#5f7f28; }
+.api-key-visibility-button:focus-visible { outline:3px solid rgba(137,169,62,.2); color:#5f7f28; }
 .connection-toolbar-actions { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:8px; }
 .provider-catalog-section { padding-bottom:22px; border-bottom:1px solid #edf0e7; }
 .provider-picker-grid-expanded { grid-template-columns:repeat(4,minmax(0,1fr)); }

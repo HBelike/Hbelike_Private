@@ -11,7 +11,8 @@ import EvaluationCenterPage from './components/EvaluationCenterPage.vue'
 import AdminConsolePage from './components/AdminConsolePage.vue'
 import ManualPipelinePanel from './components/ManualPipelinePanel.vue'
 import ThemeSwitcher from './components/ThemeSwitcher.vue'
-import { decorateOpenableImages } from './image-preview.js'
+import ImagePreviewDialog from './components/ImagePreviewDialog.vue'
+import { decorateOpenableImages, resolveImagePreviewRequest } from './image-preview.js'
 import {
   DEFAULT_APP_ROUTE,
   buildNavigationFallback,
@@ -32,6 +33,7 @@ const upgradingImages = ref(false)
 const errorMessage = ref('')
 const actionMessage = ref('')
 const imageUpgradeMessage = ref('')
+const imagePreviewDialog = ref(null)
 const approvalComment = ref('')
 const operatorName = ref('content-reviewer')
 const mainViewport = ref(null)
@@ -66,6 +68,22 @@ let starPopoverCloseTimer = null
 const vOpenableImages = {
   mounted: decorateOpenableImages,
   updated: decorateOpenableImages
+}
+
+function openImagePreview(source, alt = '图片预览') {
+  if (!source) return
+  imagePreviewDialog.value = { source, alt }
+}
+
+function closeImagePreview() {
+  imagePreviewDialog.value = null
+}
+
+function handleArticleImagePreview(event) {
+  const request = resolveImagePreviewRequest(event.target)
+  if (!request) return
+  event.preventDefault()
+  openImagePreview(request.source, request.alt)
 }
 
 const accountDisplayName = computed(() => authUser.value?.display_name || authUser.value?.username || '用户')
@@ -369,6 +387,23 @@ function contentIdFromLocation() {
   return normalizeContentId(new URLSearchParams(window.location.search).get('content_id'))
 }
 
+function formatArchiveTimestamp(value) {
+  if (!value) return '生成时间未知'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return `生成于 ${String(value)}`
+
+  const parts = new Intl.DateTimeFormat('zh-CN', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false
+  }).formatToParts(date)
+  const partMap = Object.fromEntries(parts.map((part) => [part.type, part.value]))
+  return `生成于 ${partMap.year}-${partMap.month}-${partMap.day} ${partMap.hour}:${partMap.minute}`
+}
+
 function normalizeRoute(pathname) {
   return normalizeAppRoute(pathname, routeItems.map((item) => item.path))
 }
@@ -575,7 +610,9 @@ async function refreshDashboard() {
 
   try {
     const cacheBuster = Date.now()
-    const requestedContentId = currentRoute.value === '/review/assets' ? contentIdFromLocation() : null
+    const requestedContentId = ['/review/assets', '/review/article'].includes(currentRoute.value)
+      ? contentIdFromLocation()
+      : null
     const previewEndpoint = requestedContentId
       ? `/api/execution-history/${requestedContentId}?_=${cacheBuster}`
       : `/api/preview/latest?_=${cacheBuster}`
@@ -1706,15 +1743,24 @@ onBeforeUnmount(() => {
 
       <template v-else-if="currentRoute === '/review/article'">
         <section class="detail-toolbar">
-          <button type="button" @click="navigateTo('/review')">← 返回总览</button>
-          <span>只读预览：正文内容不在审核台直接修改</span>
+          <button
+            type="button"
+            @click="navigateTo(contentIdFromLocation() ? `/review/assets?content_id=${activeContentId}` : '/review')"
+          >
+            {{ contentIdFromLocation() ? '← 返回本次归档' : '← 返回总览' }}
+          </button>
+          <span>{{ contentIdFromLocation() ? `历史原文 · content_id=${activeContentId}` : '只读预览：正文内容不在审核台直接修改' }}</span>
         </section>
 
-        <article class="detail-card article-detail">
+        <article class="detail-card article-detail" :class="{ 'is-archive-article': contentIdFromLocation() }">
           <header class="wechat-article-header">
             <span>{{ content?.week_end ?? '技术周报' }}</span>
             <h2>{{ wechatTitle }}</h2>
-            <small>审核预览与微信公众号草稿使用同一篇排版正文</small>
+            <small>
+              {{ contentIdFromLocation()
+                ? `${formatArchiveTimestamp(content?.created_at)} · 本页只读展示该次生成时保存的原文`
+                : '审核预览与微信公众号草稿使用同一篇排版正文' }}
+            </small>
           </header>
           <div class="panel-header">
             <div>
@@ -1729,13 +1775,14 @@ onBeforeUnmount(() => {
             v-openable-images
             class="article-body rendered"
             v-html="articleLayout.article_html"
+            @click="handleArticleImagePreview"
           ></div>
           <div v-else class="article-body">
             <pre>{{ previewText(content?.article_markdown, '暂无正文') }}</pre>
           </div>
         </article>
 
-        <section class="review-action-row">
+        <section v-if="!contentIdFromLocation()" class="review-action-row">
           <div class="review-state">
             <p class="eyebrow">Approval</p>
             <h2>人工审核</h2>
@@ -1886,17 +1933,16 @@ onBeforeUnmount(() => {
           <div v-else class="media-grid">
             <article v-for="asset in mediaLibraryAssets" :key="asset.id" class="media-card">
               <div class="media-preview">
-                <a
+                <button
                   v-if="asset.asset_type === 'image' && asset.preview_url"
+                  type="button"
                   class="media-image-link"
-                  :href="asset.preview_url"
-                  target="_blank"
-                  rel="noreferrer"
-                  :aria-label="`打开图片 ${asset.id} 原图`"
-                  title="点击查看原图"
+                  :aria-label="`预览图片 ${asset.id}`"
+                  title="点击预览图片"
+                  @click="openImagePreview(asset.preview_url, `图片 ${asset.id}`)"
                 >
                   <img :src="asset.preview_url" :alt="`图片 ${asset.id}`" />
-                </a>
+                </button>
                 <audio v-else-if="asset.asset_type === 'audio' && asset.preview_url" controls :src="asset.preview_url"></audio>
                 <video v-else-if="isPlayableVideoAsset(asset)" controls :src="asset.preview_url"></video>
                 <span v-else>{{ mediaTypeLabel(asset.asset_type) }}</span>
@@ -1908,7 +1954,15 @@ onBeforeUnmount(() => {
                 <small v-if="asset.status === 'failed' && mediaFailureReason(asset)" class="media-failure">
                   失败原因：{{ mediaFailureReason(asset) }}
                 </small>
-                <a v-if="asset.preview_url" :href="asset.preview_url" target="_blank" rel="noreferrer">打开预览</a>
+                <button
+                  v-if="asset.asset_type === 'image' && asset.preview_url"
+                  type="button"
+                  class="media-preview-action"
+                  @click="openImagePreview(asset.preview_url, `图片 ${asset.id}`)"
+                >
+                  打开预览
+                </button>
+                <a v-else-if="asset.preview_url" :href="asset.preview_url" target="_blank" rel="noreferrer">打开预览</a>
               </div>
             </article>
           </div>
@@ -1937,6 +1991,32 @@ onBeforeUnmount(() => {
             </div>
           </section>
         </section>
+
+        <button
+          v-if="activeContentId"
+          type="button"
+          class="archive-article-entry"
+          @click="navigateTo(`/review/article?content_id=${activeContentId}`)"
+        >
+          <span class="archive-article-entry-label">历史原文</span>
+          <div class="archive-article-entry-heading">
+            <div>
+              <h2>文章原文</h2>
+              <p>{{ shortText(content?.title, 72) }}</p>
+            </div>
+            <span>content_id={{ activeContentId }}</span>
+          </div>
+          <div class="archive-article-entry-preview" aria-hidden="true">
+            <span>本周技术周报</span>
+            <strong>{{ shortText(wechatTitle, 54) }}</strong>
+            <p>{{ articleExcerpt }}</p>
+            <i></i><i></i><i></i>
+          </div>
+          <div class="archive-article-entry-footer">
+            <time :datetime="content?.created_at">{{ formatArchiveTimestamp(content?.created_at) }}</time>
+            <strong>打开完整原文 →</strong>
+          </div>
+        </button>
       </template>
 
       <template v-else-if="currentRoute === '/review/history'">
@@ -1977,13 +2057,20 @@ onBeforeUnmount(() => {
               <h3>{{ item.title || `第 ${item.content_id} 次内容生成` }}</h3>
               <p>{{ shortText(item.digest, 150) || '该次推文尚未生成摘要。' }}</p>
               <div class="history-item-footer">
-                <strong>{{ item.assets?.total_asset_count ?? 0 }} 个有效素材</strong>
-                <span>
-                  图片 {{ item.assets?.image_count ?? 0 }} ·
-                  音频 {{ item.assets?.audio_count ?? 0 }} ·
-                  视频 {{ item.assets?.video_count ?? 0 }}
-                </span>
-                <em>查看专属素材 →</em>
+                <div class="history-asset-summary">
+                  <strong>{{ item.assets?.total_asset_count ?? 0 }} 个有效素材</strong>
+                  <span>
+                    图片 {{ item.assets?.image_count ?? 0 }} ·
+                    音频 {{ item.assets?.audio_count ?? 0 }} ·
+                    视频 {{ item.assets?.video_count ?? 0 }}
+                  </span>
+                </div>
+                <div class="history-item-bottom">
+                  <time class="history-item-time" :datetime="item.created_at">
+                    {{ formatArchiveTimestamp(item.created_at) }}
+                  </time>
+                  <em>查看原文与媒体资源 →</em>
+                </div>
               </div>
             </button>
           </div>
@@ -2062,6 +2149,13 @@ onBeforeUnmount(() => {
         </section>
       </template>
     </main>
+
+    <ImagePreviewDialog
+      v-if="imagePreviewDialog"
+      :source="imagePreviewDialog.source"
+      :alt="imagePreviewDialog.alt"
+      @close="closeImagePreview"
+    />
 
     <Teleport to="body">
       <aside

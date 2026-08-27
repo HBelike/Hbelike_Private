@@ -13,6 +13,22 @@ DeepSeek 的两个地址用途不同：
 
 请求地址必须填写到 API Base URL 层级，不能拼接 `/chat/completions`；生产环境必须使用 HTTPS。
 
+## 2026-08-27：模型上下文容量自动识别
+
+- 设计目标：创建或更新模型连接时按 `provider_key + model_id` 自动写入上下文容量，避免所有模型沿用历史统一 `8192 Token` 兜底值而在调用 Provider 前被错误拦截。
+- 识别规则：DeepSeek 官方资料确认 `deepseek-v4-flash`、`deepseek-v4-pro` 和实验视觉版本支持 1 Mi Token，写入 `1,048,576` 并标记为 `built_in`；未命中内置规则的模型按产品约定写入 `1,000,000`，标记为 `fallback`，方便管理员后续识别和覆盖。
+- 覆盖边界：管理员保存的 `admin` 策略优先级最高，普通模型连接更新不会覆盖它；`fallback` 和 `built_in` 档案在模型 ID 变化时重新计算。输出预留继续保持 `4096 Token`，不再因为上下文窗口只有 8192 而固定占用一半容量。
+- 调用链：`保存模型连接 → CareerModelProfileRepository.upsert_profile() → infer_model_context_policy() → PostgreSQL → ContextBudgetService`。迁移 `20260827_27` 对已有非 `admin` 档案执行同一规则，并把数据库未来默认容量调整为 1M。
+- 资料依据：[DeepSeek V4 Preview Release](https://api-docs.deepseek.com/news/news260424/) 明确两款 V4 API 模型均支持 1M 上下文；官方 Codex 接入配置给出的窗口值为 `1,048,576`。未知模型的 1M 是本产品兜底策略，不代表 Provider 官方承诺。
+- 验证：容量推导、未知模型兜底、模型档案写入、管理员覆盖 SQL 和迁移回填均有回归测试；本地 Alembic 已升级到 `20260827_27`，DeepSeek Flash/Pro 为 `1,048,576 built_in`，现有 Qwen 为 `1,000,000 fallback`。未部署生产。
+
+### 对话更新模型时同步上下文限制
+
+- 设计目标：新建对话、恢复历史对话或切换模型下拉框时，立即作废上一模型的占用展示，并按当前实际模型重新估算；编辑并保存当前模型连接时，即使档案 ID 不变，也会重新读取服务端刚更新的上下文容量。
+- 技术取舍：前端使用“会话 ID + 解析后的模型档案 ID + 模型连接修订号”作为刷新键。每次刷新先清空旧值，再携带 `model_profile_id` 请求；递增请求号保证较早发出的慢响应不能覆盖后来选择的模型结果。
+- 调用链：`模型下拉框/历史对话/连接保存 → 失效旧占用 → GET context-usage?model_profile_id=... → ModelGateway SPECIFIC_PROFILE → ContextBudgetService → 仅接收最新响应`。普通用户仍只看到近似百分比，不暴露准确 Token 容量和阈值。
+- 依赖与验证：没有新增运行时依赖。前端回归测试覆盖刷新键、旧值失效、同档案连接更新和请求号保护；本地 Web UI 全量 `191 passed`，Vite production build 成功。后端路由及上下文容量策略相关测试 `14 passed`，确认指定档案 ID 会原样进入 `SPECIFIC_PROFILE` 解析。未部署生产。
+
 ## API Key 与连通性
 
 API Key 在页面中显式填写，但仅用于当前测试和服务端加密保存：
@@ -21,6 +37,14 @@ API Key 在页面中显式填写，但仅用于当前测试和服务端加密保
 2. 测试成功才会启用“保存模型连接”。
 3. 保存时会再次验证，避免在测试后修改字段导致不可用连接入库。
 4. Key 在进入 PostgreSQL 前由服务端 `pyca/cryptography` 的 Fernet 加密；任何列表、读取接口、日志和编辑页都不会返回明文。
+
+### 2026-08-27：API Key 显示与隐藏
+
+- 设计目标：管理员填写 API Key 时可以通过输入框右侧的小眼睛临时核对内容，同时默认继续使用掩码显示。
+- 技术取舍：仅在当前浏览器表单内切换输入框的 `text/password` 类型，不新增依赖、不改变测试或保存请求，也不缓存、复制或回显服务端已保存的 Key。按钮使用可访问的“显示 API Key / 隐藏 API Key”名称和按下状态。
+- 交互边界：新建连接、编辑连接、切换服务商或关闭弹窗都会恢复隐藏状态；编辑已有连接时仍要求重新填写 Key，服务端不会把旧明文返回浏览器。
+- 调用链：`点击小眼睛 → showModelApiKey 切换 → 输入框 type 更新`；后续 `测试连接 → 保存模型连接 → 服务端加密入库` 链路保持不变。
+- 依赖与验证：没有新增运行时依赖。`career-api-key-visibility.test.js` 覆盖显示/隐藏、无障碍名称和上下文切换后的重置行为；2026-08-27 本地 Web UI 全量 `188 passed`，Vite production build 成功。浏览器自动检查因本地页面没有可用登录态而未进入配置弹窗，未尝试读取或使用登录凭据，也未部署生产。
 
 默认无需手动配置主密钥：服务首次启动会自动在 `data/career_credential_master.key` 创建一把 Fernet 主密钥，并在后续本地重启时复用。生产 Docker 环境中该文件位于持久化的 `application_data` 卷，因此容器更新不会使已经保存的模型 API Key 失效。
 
@@ -62,22 +86,32 @@ CAREER_CREDENTIAL_MASTER_KEY=<Fernet.generate_key() 生成的 URL-safe Base64 �
 
 | 服务商 | 免费方式 | API Base URL | Key 申请 | 接入/额度说明 | 费用与实时目录 |
 | --- | --- | --- | --- | --- | --- |
-| Google Gemini | 标准 Free Tier；地区和项目级限额以 AI Studio 为准 | `https://generativelanguage.googleapis.com/v1beta/openai` | [创建 Key](https://aistudio.google.com/app/apikey) | [OpenAI compatibility](https://ai.google.dev/gemini-api/docs/openai) | [Pricing](https://ai.google.dev/gemini-api/docs/pricing) |
+| Google Gemini | `gemini-3.7-flash`、`gemini-3.6-flash` 标准 Free Tier；地区和项目级限额以 AI Studio 为准 | `https://generativelanguage.googleapis.com/v1beta/openai` | [创建 Key](https://aistudio.google.com/app/apikey) | [OpenAI compatibility](https://ai.google.dev/gemini-api/docs/openai) | [Pricing](https://ai.google.dev/gemini-api/docs/pricing) |
+| Groq | `openai/gpt-oss-120b`、`openai/gpt-oss-20b` 提供 Free Plan 限额，按组织共享 | `https://api.groq.com/openai/v1` | [创建 Key](https://console.groq.com/keys) | [生产模型目录](https://console.groq.com/docs/models) | [Free Plan 限额](https://console.groq.com/docs/rate-limits) |
+| Mistral AI | Free mode 提供有限月度用量，无需信用卡 | `https://api.mistral.ai/v1` | [创建 Key](https://console.mistral.ai/api-keys) | [Free mode 接入](https://docs.mistral.ai/getting-started/quickstarts/studio/activate-and-generate-api-key) | [用量与限制](https://docs.mistral.ai/admin/billing-usage/usage-limits) |
+| 阿里云百炼 Qwen | 中国（北京）符合条件的新用户按模型获得通常 90 天有效的额度 | `https://dashscope.aliyuncs.com/compatible-mode/v1` | [创建 Key](https://bailian.console.aliyun.com/cn-beijing/?tab=app#/api-key) | [新人免费额度](https://help.aliyun.com/zh/model-studio/new-free-quota/) | [模型定价](https://help.aliyun.com/zh/model-studio/model-pricing) |
 | OpenRouter | `openrouter/free` 动态路由；未购额度账号为 50 次/日、20 RPM | `https://openrouter.ai/api/v1` | [创建 Key](https://openrouter.ai/settings/keys) | [Free Models Router](https://openrouter.ai/docs/guides/routing/routers/free-router) | [Pricing](https://openrouter.ai/pricing) |
-| ModelScope | 部分模型或账号可能有体验额度；无统一固定免费调用量 | `https://api-inference.modelscope.cn/v1` | [Access Token](https://modelscope.cn/my/myaccesstoken) | [API-Inference 文档](https://modelscope.cn/docs/model-service/API-Inference/intro) | [调用说明](https://www.modelscope.cn/learn/434367) |
-| 硅基流动 SiliconFlow | 部分模型或活动账号可能有免费额度，保存前以价格页为准 | `https://api.siliconflow.cn/v1` | [创建 Key](https://cloud.siliconflow.cn/account/ak) | [快速开始](https://docs.siliconflow.cn/cn/userguide/quickstart) | [模型定价](https://siliconflow.cn/pricing) |
+| ModelScope | 使用魔力值兑换 API-Inference 体验；需关联已实名认证的阿里云账号 | `https://api-inference.modelscope.cn/v1` | [Access Token](https://modelscope.cn/my/myaccesstoken) | [API-Inference 文档](https://modelscope.cn/docs/model-service/API-Inference/intro) | [魔力值与实时目录](https://modelscope.cn/docs/model-service/API-Inference/limits) |
+| 硅基流动 SiliconFlow | 仅预置价格页当前明确免费的 `THUDM/GLM-Z1-9B-0414` | `https://api.siliconflow.cn/v1` | [创建 Key](https://cloud.siliconflow.cn/account/ak) | [快速开始](https://docs.siliconflow.cn/cn/userguide/quickstart) | [模型定价](https://siliconflow.cn/pricing) |
 | NVIDIA NIM | Build 提供受限开发试用，非长期免费生产额度 | `https://integrate.api.nvidia.com/v1` | [创建 Key](https://build.nvidia.com/settings/api-keys) | [NIM LLM API](https://docs.api.nvidia.com/nim/reference/llm-apis) | [实时模型目录](https://build.nvidia.com/explore/discover?api-key=true) |
-| 阿里云百炼 Qwen | 新用户额度按账号、模型和地域发放，Token 数与有效期以控制台为准 | `https://dashscope.aliyuncs.com/compatible-mode/v1` | [创建 Key](https://bailian.console.aliyun.com/cn-beijing/?tab=app#/api-key) | [新人免费额度](https://help.aliyun.com/zh/model-studio/new-free-quota/) | [模型定价](https://help.aliyun.com/zh/model-studio/model-pricing) |
 
-目录中的模型 ID 是经过核对的调用标识，但“有这个模型”不等于“当前账号仍有免费额度”。ModelScope、OpenRouter 和 NVIDIA 的可用模型会动态变化，管理员保存连接前必须以官方实时目录为准并执行真实连通性测试。硅基流动的 Qwen 3 8B 调用标识是 `Qwen/Qwen3-8B`（不是 `Qwen/Qwen-3-8B`）；NVIDIA 目录使用当前仍明确提供免费端点的 `meta/llama-3.3-70b-instruct`，不再预置状态不稳定的 Stockmark 端点。Gemini 3.5 Flash-Lite 支持图片输入，因此目录会将其标记为 Vision 模型。
+目录中的模型 ID 是 2026-08-27 通过官方资料核对的调用标识，但“有这个模型”不等于“当前账号仍有免费额度”。ModelScope、OpenRouter 和 NVIDIA 的可用模型会动态变化，管理员保存连接前必须以官方实时目录为准并执行真实连通性测试。Gemini 3.7/3.6 Flash 标记为 Vision；Groq 的 Llama 端点当前属于 Enterprise，因此免费目录只保留 Free Plan 限额表明确列出的 GPT-OSS；硅基流动已删除转为收费或无法证明仍免费的旧 Qwen、GLM-4 条目；NVIDIA 暂保留当前 Build 页面仍存在的 `meta/llama-3.3-70b-instruct`。
 
-### 2026-08-07：上线优先的云端 Vision 选择
+### 2026-08-27：免费模型目录实时审计
 
-求职助手的生产请求不会依赖开发电脑的 NVIDIA GPU 或本地 Ollama。图片简历、职位截图与面经图片的云端语义理解默认推荐使用 `qwen2.5-vl-7b-instruct`：它支持图片输入和多轮求职对话，可通过百炼 OpenAI-compatible Chat Completions 接口接入。
+- 设计目标：目录优先展示主流、热门且能从官方资料证明当前存在免费层、免费路由或可用体验额度的模型；删除仅存在模型仓库但已无法证明可通过对应免费 API 调用的条目。
+- 技术取舍：长期或周期免费层作为主要候选；百炼新用户额度、ModelScope 魔力值和 NVIDIA 开发试用继续保留，但在卡片中明确资格、有效期和控制台复核要求。Cerebras 只有要求验证付款方式的 30 天 5 美元一次性额度，GitHub Models 已退役，因此不加入目录。
+- 调用链：`官方价格/限额/模型目录 → FREE_MODEL_PROVIDERS → /api/career/free-model-catalog → 免费模型弹窗 → 填写 Key 并真实测试 → 保存为 free_quota 连接`。目录从不代表连接已可调用，也不会绕过服务商账号条件。
+- 依赖与边界：调研使用 Firecrawl 抓取公开官方页面，结果写入已被 Git 忽略的 `.firecrawl/`；运行时没有新增依赖。目录不尝试在后台匿名探测服务商，也不承诺第三方未来仍维持免费政策。
+- 验证：`verify_career_free_model_catalog.py` 固定供应商集合、当前模型 ID、删除项和 HTTPS 官方链接；`verify_career_model_client.py` 覆盖新增 Mistral 默认 OpenAI-compatible 地址；`verify_career_deployment_settings.py` 与 Python `compileall` 通过，Web UI 全量 `191 passed`，Vite production build 成功。未调用任何第三方模型 Key，也未部署生产。
+
+### 2026-08-27：上线优先的云端 Vision 选择
+
+求职助手的生产请求不会依赖开发电脑的 NVIDIA GPU 或本地 Ollama。图片简历、职位截图与面经图片的云端语义理解默认推荐使用 `qwen3.6-flash`：它支持图文输入和多轮求职对话，可通过百炼 OpenAI-compatible Chat Completions 接口接入。
 
 在“模型与连接”中选择“阿里云百炼 Qwen”后填写：
 
-- 模型 ID：`qwen2.5-vl-7b-instruct`
+- 模型 ID：`qwen3.6-flash`
 - API Key：从百炼控制台创建的 `DASHSCOPE_API_KEY`
 - API Base URL：优先使用百炼当前工作空间在控制台显示的 OpenAI-compatible 地址；旧版通用地址为 `https://dashscope.aliyuncs.com/compatible-mode/v1`。
 - 能力：勾选“文字与 PDF 文本”和“图片简历”。
@@ -86,7 +120,7 @@ CAREER_CREDENTIAL_MASTER_KEY=<Fernet.generate_key() 生成的 URL-safe Base64 �
 
 百炼的免费额度具有账户、区域、模型准入和有效期条件，不能被标注为“永久免费”。系统只会在真实连接测试成功后，将其标记为平台可用。
 
-DeepSeek、Groq、腾讯云 TokenHub、腾讯混元、百度千帆、阿里云百炼、火山方舟与 MiniMax 都保留在“模型与连接”的手动配置项中。它们可能提供新用户赠送、免费体验或限时 Token 包，但并不等同于平台可持续的免费模型，因此不会被自动免费路由选中，也不会显示为“【免费】”。
+DeepSeek、腾讯云 TokenHub、腾讯混元、百度千帆、火山方舟与 MiniMax 继续保留在“模型与连接”的手动配置项中。Groq Free Plan、Mistral Free mode 和百炼新用户免费额度已进入免费目录，但只有管理员真实测试成功并明确保存为 `free_quota` 的连接才会进入免费自动选择和显示“【免费】”。
 
 ### 2026-08-25：DeepSeek 付费分类纠正
 

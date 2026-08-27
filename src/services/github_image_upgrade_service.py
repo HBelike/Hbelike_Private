@@ -70,7 +70,7 @@ class GitHubImageUpgradeService:
         self.logger = logger or logging.getLogger(__name__)
 
     def upgrade_content_images(self, content_id: int, force: bool = False) -> GitHubImageUpgradeResult:
-        """对指定内容的 5 个项目尝试新增 GitHub 仓库图。
+        """对指定内容的动态 N 个项目尝试新增 GitHub 仓库图。
 
         `force=False` 时，如果某个项目已经有可用的 GitHub 仓库图，会跳过这个项目；
         `force=True` 时仍然会再尝试新增一张，但依旧不会删除旧图。
@@ -96,7 +96,7 @@ class GitHubImageUpgradeService:
         not_found_repositories: list[str] = []
         failed_repositories: list[dict[str, str]] = []
 
-        for item in content.image_prompts[:5]:
+        for item in content.image_prompts:
             repository_full_name = str(item.get("repository_full_name", "")).strip()
             prompt = str(item.get("prompt", "")).strip()
             if not repository_full_name:
@@ -181,7 +181,7 @@ class GitHubImageUpgradeService:
         return GitHubImageUpgradeResult(
             content_id=content.id,
             week_end=content.week_end,
-            prompt_count=len(content.image_prompts[:5]),
+            prompt_count=len(content.image_prompts),
             created_count=len(created_assets),
             skipped_existing_count=len(skipped_repositories),
             not_found_count=len(not_found_repositories),

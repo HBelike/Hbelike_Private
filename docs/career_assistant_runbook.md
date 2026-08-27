@@ -52,6 +52,7 @@ WebUI 对话 / PDF / 图片 / 职位链接
 | Provider | 环境变量 | 默认兼容端点 | 用途 |
 | --- | --- | --- | --- |
 | Groq | `GROQ_API_KEY` | `https://api.groq.com/openai/v1` | 文本或 Vision（以平台实际模型能力为准） |
+| Mistral AI | `MISTRAL_API_KEY` | `https://api.mistral.ai/v1` | Free mode 文本模型 |
 | OpenRouter | `OPENROUTER_API_KEY` | `https://openrouter.ai/api/v1` | 选择带免费额度的文本或 Vision 模型 |
 | Gemini | `GEMINI_API_KEY` | `https://generativelanguage.googleapis.com/v1beta/openai` | 文本或 Vision |
 

@@ -42,18 +42,18 @@ def build_project_prompt_items() -> list[dict[str, object]]:
                 "teaching_goal": "让中文技术读者一眼读懂该项目的工程机制",
                 "visual_thesis": thesis,
                 "nodes": [
-                    {"id": "input", "label": "输入", "role": "起点"},
-                    {"id": "core", "label": "核心层", "role": "处理"},
-                    {"id": "verify", "label": "校验", "role": "反馈"},
-                    {"id": "output", "label": "结果", "role": "输出"},
+                    {"id": "evidence", "label": "事实证据", "role": "事实来源"},
+                    {"id": "orchestrator", "label": "编排规则", "role": "组织步骤"},
+                    {"id": "gate", "label": "质量校验", "role": "确认边界"},
+                    {"id": "artifact", "label": "交付结果", "role": "最终产物"},
                 ],
                 "relationships": [
-                    {"from": "input", "to": "core", "label": "进入"},
-                    {"from": "core", "to": "verify", "label": "校验"},
-                    {"from": "verify", "to": "output", "label": "产出"},
+                    {"from": "evidence", "to": "orchestrator", "label": "数据流"},
+                    {"from": "orchestrator", "to": "gate", "label": "同步调用"},
+                    {"from": "gate", "to": "artifact", "label": "事件推送"},
                 ],
-                "reading_order": ["input", "core", "verify", "output"],
-                "chinese_labels": ["输入", "核心层", "校验", "结果"],
+                "reading_order": ["evidence", "orchestrator", "gate", "artifact"],
+                "chinese_labels": ["事实证据", "编排规则", "质量校验", "交付结果"],
                 "palette_key": palette_key,
             },
             repository_full_name=repository,
@@ -102,20 +102,20 @@ def main() -> None:
         )
         for index, item in enumerate(prompt_items, start=1)
     ]
-    assert all(len(prompt) >= 700 for prompt in image_prompts), "最终 Ark 图片 Prompt 过短"
+    assert all(120 <= len(prompt) <= config.image_prompt_max_length for prompt in image_prompts), "最终 Ark 图片 Prompt 长度异常"
     assert all("http://" not in prompt and "https://" not in prompt for prompt in image_prompts)
-    assert all("本地叠字" in prompt and "Seedream" in prompt for prompt in image_prompts)
+    assert all("白底" in prompt and "正交折线" in prompt and "禁标题" in prompt for prompt in image_prompts)
     assert len(set(image_prompts)) == len(image_prompts), "五个项目不应编译为相同 Prompt"
 
     image_task = object.__new__(ImageTask)
-    protected_contract = "基础视觉合同：禁止本地叠字，中文标签可读，主关系优先。" * 20
+    protected_contract = "基础视觉合同：白底矩形模块，黑色正交折线箭头，短标签清晰可读。" * 20
     merged_prompt = image_task._apply_runtime_image_instruction(
         generation_prompt=protected_contract,
         runtime_instruction="运行时策略" * 500,
         max_length=256,
     )
     assert merged_prompt.startswith("基础视觉合同"), "运行时策略不能覆盖基础视觉合同"
-    assert "禁止本地叠字" in merged_prompt
+    assert "正交折线" in merged_prompt
 
     content = GeneratedContentForStoryboard(
         id=999,

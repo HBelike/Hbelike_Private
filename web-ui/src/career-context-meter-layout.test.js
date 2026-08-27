@@ -20,6 +20,13 @@ test('上下文余量圆环位于发送按钮左侧并提供无障碍状态', as
 test('页面切换会话与模型时使用递增请求号重新估算', async () => {
   const page = await readFile(new URL('./components/CareerAssistantPage.vue', import.meta.url), 'utf8')
   assert.match(page, /contextUsageRequestId/)
+  assert.match(page, /contextUsageRevision/)
+  assert.match(
+    page,
+    /selectedConversation\.value\?\.id,\s*resolvedSelectedProfileId\.value,\s*contextUsageRevision\.value/,
+  )
+  assert.match(page, /contextUsage\.value = null\s+void loadContextUsage\(\)/)
+  assert.match(page, /contextUsageRevision\.value \+= 1/)
   assert.match(page, /loadContextUsage/)
   assert.match(page, /model_profile_id=/)
 })

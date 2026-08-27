@@ -77,7 +77,7 @@
 {closing_markdown}
 ```
 
-`ArticleLayoutService` 现有逻辑会在项目标题后的第一个正文块之后插入对应项目图片，因此 `overview_text` 后自然形成“项目概述 -> 项目图片 -> 三个教学分点”的阅读顺序。正文不输出图片占位文字，也不修改排版服务。
+`ArticleLayoutService` 在项目标题后的第一个正文块之后插入对应项目图片，因此 `overview_text` 后自然形成“项目概述 -> 项目图片 -> 三个教学分点”的阅读顺序。正文不输出图片占位文字。实现验证发现旧的 `Top {rank}` 匹配会把“Top N 项目拆解”误判成排名 N 的项目标题，因此项目匹配保留仓库名、`项目 N` 和 `第 N`，取消 `Top N` 匹配；排版与手动 GitHub 图片升级均遍历完整 `image_prompts`，不再截断为前 5 个项目。
 
 ## 项目内容合同
 
@@ -153,7 +153,8 @@ stars 与本周增长必须保留数据库中的精确数字，不改写成模�
 - `src/tasks/summary_task.py`：读取动态 N、执行 N+1 调用、校验结果、拼装文章并保存；
 - `src/services/media_creative_brief_service.py`：继续规范化项目视觉节点与关系；
 - `src/services/image_prompt_design_service.py`：继续把视觉简报编译为最终生图 Prompt；
-- `src/services/article_layout_service.py`：复用现有项目首段后插图行为，本次不修改；
+- `src/services/article_layout_service.py`：复用项目首段后插图行为，取消会误匹配总标题的 `Top {rank}` 项目标记，并按动态 N 处理全部项目图片；
+- `src/services/github_image_upgrade_service.py`：手动图片升级同样消费全部 N 份项目图片合同；
 - `scripts/verify_summary_depth_contract.py` 及相关测试：验证动态 N、调用次数、文章顺序、事实数字、三分点和图片数量。
 
 ## 验证标准

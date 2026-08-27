@@ -370,8 +370,11 @@ class AppConfig:
 
     @property
     def audio_enabled(self) -> bool:
-        """是否允许生成音频；环境变量用于本地与生产统一控制。"""
+        """是否允许生成音频；工作台快照优先，其他运行可由环境变量控制。"""
 
+        runtime_override = self.raw["audio"].get("runtime_enabled")
+        if runtime_override is not None:
+            return bool(runtime_override)
         environment_override = _optional_env_bool("AUDIO_ENABLED")
         if environment_override is not None:
             return environment_override
@@ -441,6 +444,9 @@ class AppConfig:
 
     @property
     def video_submit_enabled(self) -> bool:
+        runtime_override = self.raw["video"].get("runtime_submit_enabled")
+        if runtime_override is not None:
+            return bool(runtime_override)
         environment_override = _optional_env_bool("VIDEO_SUBMIT_ENABLED")
         if environment_override is not None:
             return environment_override

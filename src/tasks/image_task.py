@@ -236,7 +236,7 @@ class ImageTask(BaseTask):
                             prompt=generation_prompt,
                             index=index,
                             raw_prompt=raw_prompt,
-                            prompt_stage="ark_final_v2",
+                            prompt_stage="ark_final_v3",
                         ),
                         "prompt_designed_by": "ImagePromptDesignService",
                         "image_post_processing": "none",
@@ -837,7 +837,7 @@ class ImageTask(BaseTask):
         visual_brief = item.get("visual_brief")
         if isinstance(visual_brief, dict):
             metadata["visual_brief"] = visual_brief
-            metadata["creative_brief_version"] = str(visual_brief.get("version", "creative_brief_v1"))
+            metadata["creative_brief_version"] = str(visual_brief.get("version", "creative_brief_v2"))
         video_brief = item.get("video_brief")
         if isinstance(video_brief, dict):
             metadata["video_brief"] = video_brief

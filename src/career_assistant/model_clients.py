@@ -106,6 +106,7 @@ class OpenAICompatibleChatClient:
         "groq": "https://api.groq.com/openai/v1",
         "openrouter": "https://openrouter.ai/api/v1",
         "gemini": "https://generativelanguage.googleapis.com/v1beta/openai",
+        "mistral": "https://api.mistral.ai/v1",
         "modelscope": "https://api-inference.modelscope.cn/v1",
         "siliconflow": "https://api.siliconflow.cn/v1",
         "qwen": "https://dashscope.aliyuncs.com/compatible-mode/v1",

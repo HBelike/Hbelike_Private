@@ -22,3 +22,7 @@ data/*.log
 data/career-temporary-attachments/
 data/skill_star_cache.json
 web-ui/.env.local
+src/test.py
+web-ui/pnpm-lock.yaml
+web-ui/pnpm-workspace.yaml
+web-ui/test-results/

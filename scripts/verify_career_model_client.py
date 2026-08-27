@@ -96,6 +96,24 @@ def main() -> None:
         )
         assert deepseek_reply == "OK"
 
+        def mistral_handler(request: httpx.Request) -> httpx.Response:
+            assert request.url == "https://api.mistral.ai/v1/chat/completions"
+            assert request.headers["authorization"] == "Bearer test-free-token"
+            return httpx.Response(200, json={"choices": [{"message": {"content": "OK"}}]})
+
+        mistral_client = OpenAICompatibleChatClient(
+            httpx.Client(transport=httpx.MockTransport(mistral_handler)),
+        )
+        mistral_reply = mistral_client.test_connection(
+            ModelConnectionTarget(
+                provider_key="mistral",
+                model_id="mistral-small-latest",
+                api_base_url=None,
+            ),
+            "test-free-token",
+        )
+        assert mistral_reply == "OK"
+
         def stream_handler(request: httpx.Request) -> httpx.Response:
             assert request.url == "https://mock-provider.example/v1/chat/completions"
             payload = json.loads(request.content)

@@ -32,6 +32,9 @@
 - Create: `tests/test_summary_generation_orchestration.py`：使用内存 Stub 验证 N+1 调用、选择性重试、动态 N、拼装顺序和 trace 元数据。
 - Modify: `tests/test_summary_visual_brief.py`：把旧六标签样本改为新三分点，继续验证真实节点和通用占位节点拒绝逻辑。
 - Modify: `tests/test_wechat_draft_image_count.py`：验证现有排版把每张项目图插在项目概述与三个分点之间。
+- Modify: `src/services/article_layout_service.py`：取消 `Top {rank}` 项目标记，避免“Top N 项目拆解”误触发排名 N 的图片。
+- Modify: `src/services/github_image_upgrade_service.py`：取消历史前 5 项截断，按动态 N 升级全部项目图片。
+- Create: `tests/test_dynamic_project_image_count.py`：验证 N=6 时排版与手动图片升级都处理全部项目。
 - Modify: `scripts/verify_summary_depth_contract.py`：更新离线完整合同，覆盖 N=1、N=3、N=6、三分点、项目概述和 N 张图片。
 - Modify: `docs/summary_writing_skill_research.md`：记录 Skill 目标、N+1 调用链、事实边界和验证结果。
 - Modify: `docs/weekly_media_pipeline.md`：同步 SummaryTask、ImageTask 与排版插图的最新调用关系。
@@ -785,6 +788,7 @@ git commit -m "feat: persist n-plus-one summary generation audit"
 **Files:**
 - Modify: `tests/test_summary_visual_brief.py`
 - Modify: `tests/test_wechat_draft_image_count.py`
+- Modify: `src/services/article_layout_service.py`
 - Modify: `scripts/verify_summary_depth_contract.py`
 
 **Interfaces:**
@@ -867,7 +871,7 @@ with tempfile.TemporaryDirectory() as temporary_dir:
     self.assertLess(image_index, feature_index)
 ```
 
-该测试只证明现有行为，不修改 `ArticleLayoutService`。
+如果测试显示图片出现在概述之前，检查 `find_project_repository_for_heading`。保留仓库全名、仓库短名、`项目 {rank}` 和 `第 {rank}`，从 `rank_markers` 删除 `Top {rank}` 与 `TOP {rank}`，防止总标题误匹配；不改变图片卡片渲染和其他排版接口。
 
 - [ ] **Step 4: 增加动态 N 与调用审计断言**
 
@@ -901,7 +905,7 @@ Expected: 输出 `摘要深度合同验证通过`，并报告动态项目数与 
 - [ ] **Step 6: 提交回归合同**
 
 ```bash
-git add tests/test_summary_visual_brief.py tests/test_wechat_draft_image_count.py scripts/verify_summary_depth_contract.py
+git add src/services/article_layout_service.py tests/test_summary_visual_brief.py tests/test_wechat_draft_image_count.py scripts/verify_summary_depth_contract.py
 git commit -m "test: verify dynamic project article contract"
 ```
 

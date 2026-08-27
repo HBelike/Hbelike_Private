@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import AdminModelContextPanel from './AdminModelContextPanel.vue'
+import { mediaSettingsForPayload, mediaSettingsFromConfig } from '../admin-pipeline-media-settings.js'
 
 const props = defineProps({
   currentRoute: {
@@ -55,6 +56,9 @@ const enabledRouteModuleCount = computed(() => routeModules.value.filter((item) 
 const form = reactive({
   top_n: 5,
   github_keywords: 'agent, AI, LLM, RAG',
+  image_generation_enabled: true,
+  video_generation_enabled: false,
+  audio_generation_enabled: false,
   summary_prompt: '',
   image_prompt: '',
   video_prompt: ''
@@ -176,11 +180,13 @@ async function loadConfig() {
     const item = (await response.json()).item
     if (item) {
       version.value = item.version
+      const mediaSettings = mediaSettingsFromConfig(item.config)
       Object.assign(form, {
         top_n: item.config?.top_n ?? 5,
         github_keywords: Array.isArray(item.config?.github_keywords)
           ? item.config.github_keywords.join(', ')
           : (item.config?.github_keywords ?? form.github_keywords),
+        ...mediaSettings,
         summary_prompt: item.config?.summary_prompt ?? '',
         image_prompt: item.config?.image_prompt ?? '',
         video_prompt: item.config?.video_prompt ?? ''
@@ -205,6 +211,7 @@ async function saveConfig() {
 
   saving.value = true
   try {
+    const mediaSettings = mediaSettingsForPayload(form)
     const response = await fetch('/api/admin/pipeline-config', {
       method: 'PUT',
       credentials: 'include',
@@ -213,6 +220,7 @@ async function saveConfig() {
         config: {
           top_n: topN,
           github_keywords: form.github_keywords.split(/[，,]/).map((item) => item.trim()).filter(Boolean),
+          ...mediaSettings,
           summary_prompt: form.summary_prompt.trim(),
           image_prompt: form.image_prompt.trim(),
           video_prompt: form.video_prompt.trim()
@@ -344,6 +352,77 @@ async function responseError(response, fallback) {
             <small>用逗号分隔。为空时使用 GitHub 通用热门排行。</small>
           </label>
         </div>
+
+        <section class="admin-media-controls" aria-labelledby="admin-media-controls-title">
+          <div class="admin-media-controls-heading">
+            <div>
+              <strong id="admin-media-controls-title">内容生成服务</strong>
+              <p>控制后续工作台运行是否调用图片、视频和语音生成服务。</p>
+            </div>
+            <span>按配置版本生效</span>
+          </div>
+          <div class="admin-media-control-grid">
+            <article class="admin-media-control" :class="{ active: form.image_generation_enabled }">
+              <div class="admin-media-control-copy">
+                <span aria-hidden="true">图</span>
+                <div>
+                  <strong>图片生成</strong>
+                  <p id="image-generation-help">关闭后仍生成文章和图片简报，但不会调用图片生成服务。</p>
+                </div>
+              </div>
+              <label class="admin-media-switch">
+                <input
+                  v-model="form.image_generation_enabled"
+                  type="checkbox"
+                  aria-label="图片生成服务"
+                  aria-describedby="image-generation-help"
+                />
+                <span aria-hidden="true"></span>
+                <em>{{ form.image_generation_enabled ? '已开启' : '已关闭' }}</em>
+              </label>
+            </article>
+
+            <article class="admin-media-control" :class="{ active: form.video_generation_enabled }">
+              <div class="admin-media-control-copy">
+                <span aria-hidden="true">影</span>
+                <div>
+                  <strong>视频生成</strong>
+                  <p id="video-generation-help">关闭后不进入视频分镜、生成和装配任务链。</p>
+                </div>
+              </div>
+              <label class="admin-media-switch">
+                <input
+                  v-model="form.video_generation_enabled"
+                  type="checkbox"
+                  aria-label="视频生成服务"
+                  aria-describedby="video-generation-help"
+                />
+                <span aria-hidden="true"></span>
+                <em>{{ form.video_generation_enabled ? '已开启' : '已关闭' }}</em>
+              </label>
+            </article>
+
+            <article class="admin-media-control" :class="{ active: form.audio_generation_enabled }">
+              <div class="admin-media-control-copy">
+                <span aria-hidden="true">声</span>
+                <div>
+                  <strong>语音生成</strong>
+                  <p id="audio-generation-help">关闭后不会调用语音合成服务，也不会生成旁白音频。</p>
+                </div>
+              </div>
+              <label class="admin-media-switch">
+                <input
+                  v-model="form.audio_generation_enabled"
+                  type="checkbox"
+                  aria-label="语音生成服务"
+                  aria-describedby="audio-generation-help"
+                />
+                <span aria-hidden="true"></span>
+                <em>{{ form.audio_generation_enabled ? '已开启' : '已关闭' }}</em>
+              </label>
+            </article>
+          </div>
+        </section>
       </section>
 
       <footer class="admin-config-footer">

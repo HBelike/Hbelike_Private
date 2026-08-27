@@ -5,7 +5,7 @@ from __future__ import annotations
 import unittest
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 from uuid import uuid4
 
 from fastapi import FastAPI
@@ -159,6 +159,61 @@ class CareerTurnApiTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CareerTurnApiRouteTests(unittest.TestCase):
+    def test_context_usage_resolves_explicit_model_profile(self) -> None:
+        from src.career_assistant.web import turn_router
+
+        actor_id = uuid4()
+        organization_id = uuid4()
+        conversation_id = uuid4()
+        profile_id = uuid4()
+        conversation_repository = SimpleNamespace(
+            get_conversation=Mock(return_value=SimpleNamespace(id=conversation_id)),
+            get_latest_agent_turn=Mock(return_value=None),
+            count_successful_turns=Mock(return_value=0),
+        )
+        resolution = SimpleNamespace(profile_id=profile_id)
+        model_gateway = SimpleNamespace(resolve=Mock(return_value=resolution))
+        prompt_context_service = SimpleNamespace(
+            empty_snapshot=Mock(
+                return_value=SimpleNamespace(
+                    context_usage=SimpleNamespace(
+                        used_percent=12,
+                        remaining_percent=88,
+                        state=SimpleNamespace(value="healthy"),
+                    )
+                )
+            )
+        )
+        services = SimpleNamespace(
+            conversation_repository=conversation_repository,
+            model_gateway=model_gateway,
+            prompt_context_service=prompt_context_service,
+        )
+        app = FastAPI()
+        app.include_router(turn_router.router)
+
+        with (
+            patch.object(turn_router, "get_career_services", return_value=services),
+            patch.object(
+                turn_router,
+                "get_request_actor",
+                return_value=SimpleNamespace(
+                    actor_id=actor_id,
+                    organization_id=organization_id,
+                ),
+            ),
+        ):
+            response = TestClient(app).get(
+                f"/api/career/conversations/{conversation_id}/context-usage",
+                params={"model_profile_id": str(profile_id)},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        selection = model_gateway.resolve.call_args.args[1]
+        self.assertEqual(selection.mode, ModelSelectionMode.SPECIFIC_PROFILE)
+        self.assertEqual(selection.profile_id, profile_id)
+        self.assertEqual(response.json()["context_usage"]["remaining_percent"], 88)
+
     def test_text_turn_endpoint_returns_202_and_server_queue_status(self) -> None:
         from src.career_assistant.web import turn_router
 

@@ -32,7 +32,7 @@ class ModelCostTier(StrEnum):
 class ModelContextPolicy:
     """单个模型的保守上下文预算策略。"""
 
-    context_window_tokens: int = 8_192
+    context_window_tokens: int = 1_000_000
     reserved_output_tokens: int = 4_096
     compression_trigger_percent: int = 80
     compression_target_percent: int = 60
@@ -51,6 +51,27 @@ class ModelContextPolicy:
             raise ValueError("压缩目标比例必须小于触发比例")
         if self.context_window_source not in {"fallback", "built_in", "admin"}:
             raise ValueError("上下文容量来源无效")
+
+
+_MODEL_CONTEXT_WINDOWS = {
+    ("deepseek", "deepseek-v4-flash"): 1_048_576,
+    ("deepseek", "deepseek-v4-pro"): 1_048_576,
+    ("deepseek", "deepseek-v4-flash-vision-exp"): 1_048_576,
+}
+
+
+def infer_model_context_policy(provider_key: str, model_id: str) -> ModelContextPolicy:
+    """按 Provider 与 Model ID 推导上下文策略，未知模型统一按 1M 处理。"""
+
+    normalized_key = (provider_key.strip().lower(), model_id.strip().lower())
+    context_window = _MODEL_CONTEXT_WINDOWS.get(normalized_key)
+    return ModelContextPolicy(
+        context_window_tokens=context_window or 1_000_000,
+        reserved_output_tokens=4_096,
+        compression_trigger_percent=80,
+        compression_target_percent=60,
+        context_window_source="built_in" if context_window is not None else "fallback",
+    )
 
 
 PAID_ONLY_PROVIDER_KEYS = frozenset({"deepseek"})
@@ -155,6 +176,10 @@ class CareerModelProfileRepository:
         """
 
         normalized_draft = self._normalize_draft(draft)
+        inferred_context_policy = infer_model_context_policy(
+            normalized_draft.provider_key,
+            normalized_draft.model_id,
+        )
         normalized_api_key = api_key.strip() if api_key is not None else None
         if normalized_api_key is not None and not normalized_api_key:
             raise ValueError("API Key 不能为空")
@@ -168,16 +193,20 @@ class CareerModelProfileRepository:
             row = connection.execute(
                 text(
                     """
-                    INSERT INTO career_assistant.model_profiles (
+                    INSERT INTO career_assistant.model_profiles AS current_profile (
                         id, organization_id, profile_key, display_name, provider_key,
                         model_id, api_base_url, provider_website_url, capability_codes,
-                        cost_tier, enabled, priority
+                        cost_tier, enabled, priority, context_window_tokens,
+                        reserved_output_tokens, compression_trigger_percent,
+                        compression_target_percent, context_window_source
                     )
                     VALUES (
                         :id, :organization_id, :profile_key, :display_name, :provider_key,
                         :model_id, :api_base_url, :provider_website_url,
                         CAST(:capability_codes AS jsonb),
-                        :cost_tier, :enabled, :priority
+                        :cost_tier, :enabled, :priority, :context_window_tokens,
+                        :reserved_output_tokens, :compression_trigger_percent,
+                        :compression_target_percent, :context_window_source
                     )
                     ON CONFLICT (organization_id, profile_key) DO UPDATE
                     SET display_name = EXCLUDED.display_name,
@@ -189,6 +218,31 @@ class CareerModelProfileRepository:
                         cost_tier = EXCLUDED.cost_tier,
                         enabled = EXCLUDED.enabled,
                         priority = EXCLUDED.priority,
+                        context_window_tokens = CASE
+                            WHEN current_profile.context_window_source = 'admin'
+                            THEN current_profile.context_window_tokens
+                            ELSE EXCLUDED.context_window_tokens
+                        END,
+                        reserved_output_tokens = CASE
+                            WHEN current_profile.context_window_source = 'admin'
+                            THEN current_profile.reserved_output_tokens
+                            ELSE EXCLUDED.reserved_output_tokens
+                        END,
+                        compression_trigger_percent = CASE
+                            WHEN current_profile.context_window_source = 'admin'
+                            THEN current_profile.compression_trigger_percent
+                            ELSE EXCLUDED.compression_trigger_percent
+                        END,
+                        compression_target_percent = CASE
+                            WHEN current_profile.context_window_source = 'admin'
+                            THEN current_profile.compression_target_percent
+                            ELSE EXCLUDED.compression_target_percent
+                        END,
+                        context_window_source = CASE
+                            WHEN current_profile.context_window_source = 'admin'
+                            THEN current_profile.context_window_source
+                            ELSE EXCLUDED.context_window_source
+                        END,
                         updated_at = NOW()
                     RETURNING id, organization_id, profile_key, display_name, provider_key,
                               model_id, api_base_url, provider_website_url, capability_codes,
@@ -213,6 +267,15 @@ class CareerModelProfileRepository:
                     "cost_tier": normalized_draft.cost_tier.value,
                     "enabled": normalized_draft.enabled,
                     "priority": normalized_draft.priority,
+                    "context_window_tokens": inferred_context_policy.context_window_tokens,
+                    "reserved_output_tokens": inferred_context_policy.reserved_output_tokens,
+                    "compression_trigger_percent": (
+                        inferred_context_policy.compression_trigger_percent
+                    ),
+                    "compression_target_percent": (
+                        inferred_context_policy.compression_target_percent
+                    ),
+                    "context_window_source": inferred_context_policy.context_window_source,
                 },
             ).mappings().one()
 
@@ -657,7 +720,7 @@ class CareerModelProfileRepository:
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             context_policy=ModelContextPolicy(
-                context_window_tokens=row.get("context_window_tokens", 8_192),
+                context_window_tokens=row.get("context_window_tokens", 1_000_000),
                 reserved_output_tokens=row.get("reserved_output_tokens", 4_096),
                 compression_trigger_percent=row.get("compression_trigger_percent", 80),
                 compression_target_percent=row.get("compression_target_percent", 60),

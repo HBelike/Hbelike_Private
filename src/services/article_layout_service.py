@@ -69,7 +69,7 @@ class ArticleLayoutService:
         content: GeneratedContentForLayout,
         media_assets: list[MediaAssetRecord],
     ) -> ArticleLayoutBuildResult:
-        """构建完整公众号 HTML，并尽量把五张项目图按项目顺序嵌入正文。"""
+        """构建完整公众号 HTML，并把动态 N 张项目图按项目顺序嵌入正文。"""
 
         if not content.title.strip():
             raise ValueError("排版内容标题不能为空")
@@ -215,7 +215,7 @@ class ArticleLayoutService:
                 rank = str(card.get("rank", "")).strip()
                 repo_short_name = repository_full_name.split("/", 1)[-1]
                 rank_markers = (
-                    [f"项目 {rank}", f"项目{rank}", f"第 {rank}", f"第{rank}", f"Top {rank}", f"TOP {rank}"]
+                    [f"项目 {rank}", f"项目{rank}", f"第 {rank}", f"第{rank}"]
                     if rank
                     else []
                 )
@@ -371,7 +371,7 @@ class ArticleLayoutService:
 
         cards: dict[str, dict[str, Any]] = {}
         cover_asset_id: int | None = None
-        for index, prompt_item in enumerate(content.image_prompts[:5], start=1):
+        for index, prompt_item in enumerate(content.image_prompts, start=1):
             repository_full_name = str(prompt_item.get("repository_full_name", "")).strip()
             if not repository_full_name:
                 continue
@@ -511,7 +511,7 @@ class ArticleLayoutService:
         return escaped
 
     def _group_image_assets(self, media_assets: list[MediaAssetRecord]) -> dict[str, list[MediaAssetRecord]]:
-        """按 repository_full_name 组织图片素材，方便与五个项目 prompt 对齐。"""
+        """按 repository_full_name 组织图片素材，方便与动态 N 个项目 prompt 对齐。"""
 
         grouped: dict[str, list[MediaAssetRecord]] = {}
         for asset in media_assets:

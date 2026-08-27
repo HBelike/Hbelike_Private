@@ -14,7 +14,7 @@ class MediaCreativeBriefService:
     不访问模型、不写数据库，也不持有共享状态，因此可被多个任务安全复用。
     """
 
-    version = "creative_brief_v1"
+    version = "creative_brief_v2"
     _diagram_types = {
         "structural_breakdown",
         "linear_progression",
@@ -33,6 +33,25 @@ class MediaCreativeBriefService:
     _url_pattern = re.compile(r"https?://\S+", re.IGNORECASE)
     _space_pattern = re.compile(r"\s+")
     _unsafe_label_pattern = re.compile(r"[^\u4e00-\u9fffA-Za-z0-9·+/#-]")
+    _relationship_labels = {
+        "强耦合",
+        "弱耦合",
+        "异步调用",
+        "同步调用",
+        "数据流",
+        "事件推送",
+    }
+    _relationship_label_aliases = {
+        "调用": "同步调用",
+        "同步": "同步调用",
+        "异步": "异步调用",
+        "流转": "数据流",
+        "传递": "数据流",
+        "输入": "数据流",
+        "输出": "数据流",
+        "事件": "事件推送",
+        "推送": "事件推送",
+    }
 
     def normalize_visual_brief(
         self,
@@ -200,7 +219,7 @@ class MediaCreativeBriefService:
             return []
         normalized: list[dict[str, str]] = []
         seen_ids: set[str] = set()
-        for index, raw_node in enumerate(raw_nodes[:6], start=1):
+        for index, raw_node in enumerate(raw_nodes[:4], start=1):
             if not isinstance(raw_node, dict):
                 continue
             node_id = self._safe_identifier(raw_node.get("id"), fallback=f"node_{index}")
@@ -225,7 +244,7 @@ class MediaCreativeBriefService:
             return []
         valid_ids = {node["id"] for node in nodes}
         normalized: list[dict[str, str]] = []
-        for raw_relationship in raw_relationships[:7]:
+        for raw_relationship in raw_relationships[:4]:
             if not isinstance(raw_relationship, dict):
                 continue
             from_node = self._safe_identifier(raw_relationship.get("from"), fallback="")
@@ -238,7 +257,7 @@ class MediaCreativeBriefService:
                 {
                     "from": from_node,
                     "to": to_node,
-                    "label": self._short_label(raw_relationship.get("label")) or "流转",
+                    "label": self._relationship_label(raw_relationship.get("label")),
                 }
             )
         return normalized
@@ -261,15 +280,15 @@ class MediaCreativeBriefService:
                 label = self._short_label(raw_label)
                 if label and label not in labels:
                     labels.append(label)
-                if len(labels) >= 8:
+                if len(labels) >= 4:
                     break
         for node in nodes:
             label = node["label"]
             if label not in labels:
                 labels.append(label)
-            if len(labels) >= 8:
+            if len(labels) >= 4:
                 break
-        return labels[:8]
+        return labels[:4]
 
     def _normalize_negative_constraints(self, raw_constraints: Any) -> list[str]:
         defaults = [
@@ -312,7 +331,7 @@ class MediaCreativeBriefService:
         ]
         if diagram_type == "circular_flow" and len(nodes) > 2:
             relationships.append({"from": nodes[-1]["id"], "to": nodes[0]["id"], "label": "反馈"})
-        return relationships[:7]
+        return relationships[:4]
 
     def _fallback_diagram_type(self, repository_full_name: str, project_index: int) -> str:
         name = repository_full_name.lower()
@@ -357,6 +376,14 @@ class MediaCreativeBriefService:
         if not label:
             return ""
         return label[:6]
+
+    def _relationship_label(self, value: Any) -> str:
+        """把连线文字限制为教学图约定的六类耦合或数据关系。"""
+
+        label = self._short_label(value)
+        if label in self._relationship_labels:
+            return label
+        return self._relationship_label_aliases.get(label, "数据流")
 
     @staticmethod
     def _safe_identifier(value: Any, fallback: str) -> str:

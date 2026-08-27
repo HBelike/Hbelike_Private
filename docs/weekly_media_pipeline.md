@@ -2,7 +2,7 @@
 
 ## 目标与边界
 
-本模块把每周 GitHub 热门项目的图文摘要扩展为可审核的短视频素材，服务于公众号草稿发布。目标是让“文案、五张技术教学插图、视频分镜、统一旁白、最终视频”在同一个 `content_id` 下可追溯、可重试。
+本模块把每周 GitHub 热门项目的图文摘要扩展为可审核的短视频素材，服务于公众号草稿发布。目标是让“文案、动态 N 张技术教学插图、视频分镜、统一旁白、最终视频”在同一个 `content_id` 下可追溯、可重试。N 来自管理台配置形成的当期周榜项目数量。
 
 本次实现不直接调用任何付费生成 API。当前默认配置仍保持 `video.submit_enabled: false`，因此本地可以验证任务编排和视频装配，但不会创建 Seedance 付费任务。
 
@@ -10,24 +10,46 @@
 
 ## 内容职责分层
 
-为避免一次 DeepSeek 调用同时生成长文章、五张图 Prompt、七段视频脚本和旁白而触发输出截断，当前链路按产物所有权拆分：
+为避免一次 DeepSeek 调用同时生成动态 Top N 长文章、N 张图 Prompt、七段视频脚本和旁白而触发输出截断，当前链路按项目和产物所有权拆分：
 
-- `SummaryTask`：只生成标题、摘要与深度文章，并从已校验文章中编译五份共享 `ContentBrief`。
+- `SummaryTask`：按排名串行执行 N 次单项目生成，再执行 1 次全局综合；代码确定性拼装单篇深度文章，并编译 N 份共享 `ContentBrief`。
 - `ShortVideoPromptTask`：基于 `ContentBrief` 生成渐进式讲稿、统一旁白与七段视频分镜，并回写 `video_script`、`voiceover_text`。
-- `ImageTask`：基于同一 `ContentBrief` 生成五张图片各自的 Ark 最终 Prompt，再调用 Seedream。
+- `ImageTask`：基于同一 `ContentBrief` 生成 N 张图片各自的 Ark 最终 Prompt，再调用 Seedream。每张图同时表达一个项目的模块架构与主数据流。
 - `VideoClipPlanTask`：把分镜翻译为 Seedance 分片计划，不重新总结项目事实。
 - `AudioTask`、`SeedanceClipTask`：只消费已生成的旁白与分片 Prompt，不承担内容创作。
 
 因此文章、图片、视频均引用同一份项目事实合同，但每个 Task 只生成自己负责的产物。`content_id` 继续作为全部正文、Prompt、分镜与媒体素材的隔离键。
+
+## 管理台媒体生成开关
+
+管理台“GitHub 热门”页提供“图片生成”“视频生成”和“语音生成”三个可视化开关，并随项目数量、关键词和提示词一起保存为版本化流水线配置。新字段为 `image_generation_enabled`、`video_generation_enabled` 与 `audio_generation_enabled`；旧配置缺少字段时分别按 `true`、`false` 与 `false` 兼容。
+
+运行时不新增第二套任务状态：`apply_pipeline_config` 将图片开关映射到现有 `image.paid_generation_enabled`，将视频开关映射到现有 `video.submit_enabled`，将语音开关映射到现有 `audio.enabled`。工作台创建的运行快照额外写入仅限本次运行的 `video.runtime_submit_enabled` 与 `audio.runtime_enabled`，优先级分别高于部署环境中的 `VIDEO_SUBMIT_ENABLED` 和 `AUDIO_ENABLED`；常规定时任务没有这些字段，仍保持原有环境变量行为。关闭图片后仍生成文章、项目视觉简报和排版结构，但 `ImageTask` 不调用外部图片生成服务；关闭视频后不进入分镜、Seedance、视觉质检和视频装配任务链；关闭语音后不调用语音合成服务，也不生成旁白音频。每次手动运行使用提交时冻结的配置版本，切换开关不会改写正在运行的任务或历史内容。
+
+前端在 PC 端使用三张并列服务卡展示开关与当前状态，窄屏回退为单列。开关保留原生 checkbox 语义、可见焦点和说明文本，不引入新的前端依赖。后端校验只接受布尔值，避免字符串 `"false"` 被误判为开启。
+
+`SummaryTask` 文章结构为：
+
+```text
+开篇总结
+  -> 本周主线
+  -> N x（项目概述 -> 项目图片 -> 技术特点 -> 机制拆解 -> 工程启发）
+  -> 全文末尾工程启发
+```
+
+项目调用只看到当前仓库证据，并同时产出正文与 `visual_brief`。全局综合只读取已经验证的项目结果，不重写项目事实。某个项目首次失败时只修复该项目；第二次仍失败则任务整体失败，不保存部分文章。
 
 ## 运行调用链
 
 ```text
 Application
   -> SearchTask
-  -> SummaryTask（文章 + ContentBrief）
+  -> SummaryTask
+       -> N 次项目生成（概述 + 三分点 + visual_brief）
+       -> 1 次全局综合（标题 + 摘要 + 开篇 + 主线 + 结尾）
+       -> 确定性拼装文章 + N 份 ContentBrief
   -> ShortVideoPromptTask（讲稿 + 旁白 + 分镜）
-  -> ImageTask（图片最终 Prompt + 原始图片）
+  -> ImageTask（N 份图片最终 Prompt + N 张原始图片）
   -> VideoClipPlanTask
   -> AudioTask
   -> StorageTask
@@ -43,6 +65,8 @@ Application
 周五 08:00 的内容生产 Job 负责生成文章、图片、分镜、旁白并提交 Seedance 分片任务。周五 09:00 的草稿 Job 先轮询分片状态；所有片段完成后再装配最终视频、刷新预览并推送公众号草稿箱。
 
 `VideoStatusTask` 仅为历史单段视频资产保留兼容入口；新链路不再依赖它完成分片视频。
+
+`ArticleLayoutService` 按仓库名、`项目 N` 或 `第 N` 识别项目标题，在项目概述后插入对应图片。它不再用 `Top N` 判断单个项目，避免“Top N 项目拆解”总标题误触发排名 N 的图片。排版和手动 GitHub 图片升级都遍历完整 `image_prompts`，不对动态 N 做前 5 项截断。
 
 ## 视频状态流转
 
@@ -88,8 +112,18 @@ video: created
 - **设计目标**：`/review/assets` 只展示用户可直接查看或播放的图片、音频、成片和视频片段，避免任务句柄与 JSON 报告占用大尺寸预览卡片。
 - **数据取舍**：`/api/media-assets` 的 `items` 与计数、工作台媒体概览以及执行历史素材数只包含 `image`、`audio`、`video`、`video_clip`；`video_clip_task`、`video_quality_report`、`video_narration_timeline` 继续保存在 `media_assets` 中供任务追溯，但不进入素材库。
 - **前端兜底**：素材页对接口结果再次按上述四种类型过滤，兼容旧服务或缓存返回的流程记录；标题统计使用“媒体文件”，不再把数据库记录数描述为实际文件数。
-- **图片查看交互**：素材库图片缩略图和正文预览中的排版图片均使用原生链接包裹，点击或通过键盘回车后在新标签页打开原图，并提供“点击查看原图”提示；不修改音频、视频或后端接口。
-- **验证方式**：单元测试覆盖素材类型边界和正文图片链接包装行为，前端生产构建验证页面模板与样式；PC 端浏览器验收确认素材库 6 张图片和正文 5 张排版图片均生成指向原图的 `target="_blank"` 原生链接，并确认原图接口返回图片内容。
+- **图片查看交互**：素材库图片缩略图、素材卡片的“打开预览”和正文排版图片均进入同一个应用内全屏查看器；查看器固定显示“下载原图”和“关闭预览”，同时支持 `Esc`、点击画布空白处关闭，不再依赖新标签页返回。
+- **调用链与依赖**：`decorateOpenableImages` 为正文图片保留原图地址并标记预览入口，`App.vue` 将正文和素材库点击统一写入预览状态，`ImagePreviewDialog.vue` 只负责展示、关闭、焦点恢复和下载链接；继续复用 `asset.preview_url`，不新增第三方依赖或后端接口。
+- **边界**：本次只调整 PC 端图片交互；音频、视频、媒体文件存储、鉴权和响应头保持原样，下载仅在用户点击查看器中的“下载原图”后触发。
+- **验证方式**：单元测试覆盖正文图片链接装饰、应用内预览请求和非图片点击忽略；前端 191 项测试与生产构建通过。PC 端浏览器验收确认查看器图片适配、关闭按钮、`Esc`、焦点状态与下载链接均可用。
+
+## 历史归档文章与媒体联查
+
+- **设计目标**：每个历史 `content_id` 都能联查生成时保存的原文章与对应媒体资源，历史列表同时显示精确到分钟的生成时间。
+- **调用链**：`/api/execution-history` 构建归档索引；历史卡片进入 `/review/assets?content_id=<id>`，`refreshDashboard` 通过 `/api/execution-history/{content_id}` 读取该批次正文，并通过 `/api/media-assets?content_id=<id>` 读取该批次媒体；资源页的“文章原文”入口进入 `/review/article?content_id=<id>`，继续复用同一历史详情负载。
+- **技术取舍**：不把完整正文塞进历史列表响应，也不复制文章到媒体表；文章继续以 `generated_contents.article_markdown` 和可选的 `article_layouts.article_html` 为唯一来源。历史文章页保持只读，避免误触旧批次审核或重新生成。
+- **页面边界**：历史列表负责选择归档，资源页负责汇总同批次文章入口与媒体，文章页负责阅读全文；三页分别保持单一主要任务。
+- **验证结果**：前端回归覆盖原文入口、`content_id` 路由、历史只读、时间戳和蓝白主题；PC 端本地页面确认历史卡片、六张媒体卡片、原文入口与完整文章按同一 `content_id` 串联。
 
 ## 音频与画面一致性
 

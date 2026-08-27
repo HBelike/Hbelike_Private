@@ -1,24 +1,27 @@
-"""离线验证 SummaryTask 的长文合同、共享 ContentBrief 与视频证据传递。
+"""离线验证 SummaryTask 的动态 N+1 文章合同与媒体证据传递。
 
 本脚本不读取 API Key、不调用 GitHub 或 DeepSeek。它只验证：
-1. 动态 Top N 的每个项目都必须包含固定分析标签和真实 stars / 本周增长数字；
-2. 标题、摘要、全文、项目章节和标签解释均不再设置长度合同；
-3. SummaryTask 只请求文章字段，并在 system message 挂载项目写作 Skill；
-4. 短视频任务会读取每个项目的证据卡，并生成同源旁白。
+1. 动态 N 次项目生成后只执行 1 次全局综合；
+2. 每个项目包含概述、三个教学分点、精确 stars 和一份架构加数据流简报；
+3. 标题、摘要、正文和分点不设置长度合同，Skill 会挂载到每次模型请求；
+4. 最终 N 份 ContentBrief 能继续进入图片、排版和短视频链路。
 """
 
 from __future__ import annotations
 
 from contextlib import contextmanager
+import json
 from pathlib import Path
 import logging
 import sqlite3
 import sys
+from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.providers.deepseek_provider import DeepSeekChatResponse, DeepSeekMessage
 from src.providers.github_client import GitHubRepositoryEvidence
 from src.repositories.generated_content_repository import (
     GeneratedContentForStoryboard,
@@ -27,6 +30,35 @@ from src.repositories.generated_content_repository import (
 from src.repositories.weekly_ranking_repository import WeeklyRankingRecord
 from src.tasks.short_video_prompt_task import ShortVideoPromptTask
 from src.tasks.summary_task import SummaryTask
+
+
+class StubProvider:
+    """离线返回预设 JSON，并记录模型调用阶段。"""
+
+    def __init__(self, payloads: list[dict[str, Any]]) -> None:
+        self.payloads = list(payloads)
+        self.calls: list[dict[str, Any]] = []
+
+    def chat(
+        self,
+        messages: list[DeepSeekMessage],
+        *,
+        retry_empty_content: bool,
+        trace_metadata: dict[str, Any],
+    ) -> DeepSeekChatResponse:
+        self.calls.append(
+            {
+                "messages": messages,
+                "retry_empty_content": retry_empty_content,
+                "trace_metadata": dict(trace_metadata),
+            }
+        )
+        payload = self.payloads.pop(0)
+        return DeepSeekChatResponse(
+            content=json.dumps(payload, ensure_ascii=False),
+            model="offline-stub",
+            raw_response={"offline_call": len(self.calls)},
+        )
 
 
 def build_rankings(count: int = 5) -> list[WeeklyRankingRecord]:
@@ -71,21 +103,19 @@ def build_evidence(rankings: list[WeeklyRankingRecord]) -> dict[str, GitHubRepos
 
 
 def build_project_section(item: WeeklyRankingRecord, index: int) -> str:
-    """构造结构与事实完整、各标签都刻意极短的项目正文。"""
+    """构造概述和三个教学分点完整的项目正文。"""
 
+    overview = (
+        f"{item.full_name} 本周新增 {item.star_growth} stars，总 stars 为 {item.current_stars}。"
+        "它把事实证据组织成可检查的工程流程，适合需要人工验收的代理任务。"
+    )
     labels_and_text = [
-        (
-            "本周判断",
-            f"{item.full_name} 当前 stars 为 {item.current_stars}，本周新增 {item.star_growth}。",
-        ),
-        ("问题与代价", "人工复制成本高。"),
-        ("机制拆解", "流程按职责分层。"),
-        ("落到工作流", "先接入一个小流程。"),
-        ("使用边界", "生产接入仍需人工确认。"),
-        ("工程启发", "优先保留可检查状态。"),
+        ("技术特点", "证据、编排、校验和交付模块按职责分层。"),
+        ("机制拆解", "证据卡先进入编排器，再经过校验门形成交付物。"),
+        ("工程启发", "生产接入仍需人工确认，阅读时先看证据入口再看校验边界。"),
     ]
     body = "\n\n".join(f"**{label}** {text}" for label, text in labels_and_text)
-    return f"#### 项目 {index}：{item.full_name}\n\n{body}"
+    return f"#### 项目 {index}：{item.full_name}\n\n{overview}\n\n{body}"
 
 
 def build_article(rankings: list[WeeklyRankingRecord]) -> str:
@@ -101,6 +131,7 @@ def build_article(rankings: list[WeeklyRankingRecord]) -> str:
     )
     return "\n\n".join(
         [
+            "本周项目都在处理同一个问题：代理给出结果以后，工程团队如何检查过程并验收输出。",
             "### 本周主线",
             mainline,
             f"### Top {len(rankings)} 项目拆解",
@@ -109,6 +140,78 @@ def build_article(rankings: list[WeeklyRankingRecord]) -> str:
             conclusion,
         ]
     )
+
+
+def build_project_briefs(rankings: list[WeeklyRankingRecord]) -> list[dict[str, object]]:
+    """构造与文章事实一致的项目摘要和结构关系。"""
+
+    return [
+        {
+            "repository_full_name": item.full_name,
+            "summary_text": "该项目减少人工复制成本，通过职责分层组织证据、编排与校验；生产接入仍需人工确认。",
+            "visual_brief": {
+                "diagram_type": "linear_progression",
+                "teaching_goal": "解释证据如何经过编排和校验形成可交付结果",
+                "visual_thesis": "职责分层让代理流程可检查、可修正",
+                "nodes": [
+                    {"id": "evidence", "label": "证据卡", "role": "事实来源"},
+                    {"id": "orchestrator", "label": "编排器", "role": "组织步骤"},
+                    {"id": "gate", "label": "校验门", "role": "人工确认"},
+                    {"id": "artifact", "label": "交付物", "role": "输出结果"},
+                ],
+                "relationships": [
+                    {"from": "evidence", "to": "orchestrator", "label": "数据流"},
+                    {"from": "orchestrator", "to": "gate", "label": "同步调用"},
+                    {"from": "gate", "to": "artifact", "label": "事件推送"},
+                ],
+                "reading_order": ["evidence", "orchestrator", "gate", "artifact"],
+                "chinese_labels": ["证据卡", "编排器", "校验门", "交付物"],
+            },
+        }
+        for item in rankings
+    ]
+
+
+def build_project_output(item: WeeklyRankingRecord) -> dict[str, Any]:
+    """构造一次单项目模型调用的合法 JSON。"""
+
+    brief = build_project_briefs([item])[0]
+    return {
+        "repository_full_name": item.full_name,
+        "overview_text": (
+            f"{item.full_name} 本周新增 {item.star_growth} stars，总 stars 为 {item.current_stars}。"
+            "它把事实证据组织成可检查的工程流程，适合需要人工验收的代理任务。"
+        ),
+        "technical_features_markdown": "证据、编排、校验和交付模块按职责分层。",
+        "mechanism_breakdown_markdown": (
+            "证据卡先把事实传给编排器，编排器同步调用校验门，校验通过后形成交付物。"
+        ),
+        "engineering_insights_markdown": (
+            "生产接入仍需人工确认，阅读源码时先找证据入口，再看编排与校验边界。"
+        ),
+        "project_brief": {
+            "summary_text": brief["summary_text"],
+            "visual_brief": brief["visual_brief"],
+        },
+    }
+
+
+def build_global_output() -> dict[str, str]:
+    """构造全局综合调用的合法 JSON。"""
+
+    return {
+        "title": "代理工具开始把生成能力放进可检查的工程流程",
+        "digest": "本周项目共同处理证据、编排和验收边界，帮助开发者判断工具如何进入现有工作流。",
+        "opening_markdown": (
+            "本周项目的增长落在同一个问题上：模型给出结果以后，工程团队如何检查过程并验收输出。"
+        ),
+        "weekly_theme_markdown": (
+            "这些项目分别处理证据、编排、校验和交付环节，共同要求输入与责任边界可以追踪。"
+        ),
+        "closing_markdown": (
+            "接入代理工具前，应先明确事实入口、责任边界和验收方式，再决定自动化范围。"
+        ),
+    }
 
 
 def main() -> None:
@@ -127,7 +230,20 @@ def main() -> None:
     )
     assert len(project_sections) == len(rankings)
 
-    # 长度不再是生成失败条件：极短标签可通过，超长项目正文也可通过。
+    skill_text = (PROJECT_ROOT / ".agents/skills/github-project-blog/SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    for required_text in (
+        "单项目生成模式",
+        "全局综合模式",
+        "技术特点",
+        "机制拆解",
+        "工程启发",
+        "项目概述",
+    ):
+        assert required_text in skill_text
+
+    # 长度不再是生成失败条件：超长分点与全局字段仍能通过结构校验。
     first_item = rankings[0]
     long_article = article.replace(
         project_sections[first_item.full_name],
@@ -139,21 +255,16 @@ def main() -> None:
         ranking_evidence=evidence,
     )
     assert len(long_sections) == len(rankings)
-    long_title = "标题" * 1_000
-    long_digest = "摘要" * 1_000
-    normalized_long_content = task._normalize_model_output(
-        parsed={
-            "title": long_title,
-            "digest": long_digest,
-            "article_markdown": long_article,
-        },
-        rankings=rankings,
-        highest_star_repository=max(rankings, key=lambda item: item.current_stars),
-        ranking_evidence=evidence,
-    )
-    assert normalized_long_content["title"] == long_title
-    assert normalized_long_content["digest"] == long_digest
-    assert normalized_long_content["article_markdown"] == long_article
+    long_project_output = build_project_output(first_item)
+    long_project_output["technical_features_markdown"] += "补充模块说明" * 2_000
+    normalized_long_project = task._normalize_project_output(long_project_output, first_item)
+    assert len(normalized_long_project["technical_features_markdown"]) > 2_000
+    long_global_output = build_global_output()
+    long_global_output["title"] = "标题" * 1_000
+    long_global_output["digest"] = "摘要" * 1_000
+    normalized_long_global = task._normalize_global_output(long_global_output, rankings)
+    assert normalized_long_global["title"] == long_global_output["title"]
+    assert normalized_long_global["digest"] == long_global_output["digest"]
 
     # 工作台可配置任意 Top N；用非默认数量验证标题、章节和校验器都不依赖 5。
     compact_rankings = build_rankings(count=3)
@@ -178,8 +289,9 @@ def main() -> None:
     incomplete_article = article.replace(
         project_sections[first_item.full_name],
         (
-            f"**本周判断** {first_item.full_name} 当前 stars 为 {first_item.current_stars}，"
-            f"本周新增 {first_item.star_growth}，这一段故意缺少其余标签以验证结构合同。"
+            f"{first_item.full_name} 总 stars 为 {first_item.current_stars}，"
+            f"本周新增 {first_item.star_growth}。\n\n"
+            "**技术特点** 这一段故意缺少其余标签以验证结构合同。"
         ),
     )
     try:
@@ -194,13 +306,13 @@ def main() -> None:
     else:
         raise AssertionError("缺少固定标签的项目正文必须被质量合同拒绝")
 
-    article_skill_instructions = "# GitHub 项目文章\n\n只根据输入证据写作，并解释技术机制。"
-    messages = task._build_messages(
-        rankings=rankings,
-        week_end="2026-08-14",
-        highest_star_repository=rankings[0],
-        ranking_evidence=evidence,
+    article_skill_instructions = skill_text
+    messages = task._build_project_messages(
+        ranking=first_item,
+        ranking_evidence=evidence[first_item.full_name],
         article_skill_instructions=article_skill_instructions,
+        regeneration_feedback=None,
+        summary_instruction="",
     )
     assert article_skill_instructions in messages[0].content
     main_prompt = messages[-1].content
@@ -208,38 +320,83 @@ def main() -> None:
         assert length_rule not in main_prompt
     assert "source_evidence" in main_prompt
     assert "article_markdown 1900 字以内" not in main_prompt
-    assert "JSON 只能包含 title、digest、article_markdown 三个字段" in main_prompt
+    assert "overview_text" in main_prompt
+    assert "technical_features_markdown" in main_prompt
+    assert "mechanism_breakdown_markdown" in main_prompt
+    assert "engineering_insights_markdown" in main_prompt
+    assert "至少一条 label 为数据流" in main_prompt
     assert "video_script 必须" not in main_prompt
     assert "image_prompts 必须" not in main_prompt
+    assert all(item.full_name not in main_prompt for item in rankings[1:])
 
-    retry_messages = task._build_retry_messages(
-        rankings=rankings,
-        week_end="2026-08-14",
-        highest_star_repository=rankings[0],
-        ranking_evidence=evidence,
+    retry_messages = task._build_project_messages(
+        ranking=first_item,
+        ranking_evidence=evidence[first_item.full_name],
         article_skill_instructions=article_skill_instructions,
+        regeneration_feedback=None,
+        summary_instruction="",
+        validation_error="概述缺少本周增长",
     )
     assert article_skill_instructions in retry_messages[0].content
     retry_prompt = retry_messages[-1].content
-    assert "只修正合同缺陷" in retry_prompt
+    assert "请只修复当前项目的合同错误" in retry_prompt
+    assert "概述缺少本周增长" in retry_prompt
     for length_rule in ("字以内", "中文字符", "最低字数", "至少 45", "不得超过"):
         assert length_rule not in retry_prompt
-    assert "字段必须只有以下三个" in retry_prompt
-    assert "voiceover_text:" not in retry_prompt
+    assert "voiceover_text" not in retry_prompt
 
-    normalized = task._normalize_model_output(
-        parsed={
-            "title": "离线长文合同验证",
-            "digest": "验证文章阶段只产出事实正文，并确定性构造下游共享内容简报。",
-            "article_markdown": article,
-        },
+    project_outputs = [build_project_output(item) for item in rankings]
+    global_messages = task._build_global_messages(
         rankings=rankings,
-        highest_star_repository=rankings[0],
-        ranking_evidence=evidence,
+        week_end="2026-08-14",
+        highest_star_repository=max(rankings, key=lambda item: item.current_stars),
+        project_contents=project_outputs,
+        article_skill_instructions=article_skill_instructions,
+        regeneration_feedback=None,
+        summary_instruction="",
     )
+    assert article_skill_instructions in global_messages[0].content
+    assert "visual_brief" not in global_messages[-1].content
+    assert all(item.full_name in global_messages[-1].content for item in rankings)
+
+    normalized: dict[str, Any] | None = None
+    for count in (1, 3, 5, 6):
+        dynamic_rankings = build_rankings(count=count)
+        dynamic_evidence = build_evidence(dynamic_rankings)
+        provider = StubProvider(
+            [build_project_output(item) for item in dynamic_rankings] + [build_global_output()]
+        )
+        _, generated, audit = task._generate_normalized_content(
+            provider=provider,
+            rankings=dynamic_rankings,
+            week_end="2026-08-14",
+            highest_star_repository=max(dynamic_rankings, key=lambda item: item.current_stars),
+            ranking_evidence=dynamic_evidence,
+            article_skill_instructions=article_skill_instructions,
+            regeneration_feedback=None,
+            summary_instruction="",
+        )
+        assert audit["project_count"] == count
+        assert audit["provider_call_count"] == count + 1
+        assert len(provider.calls) == count + 1
+        assert len(generated["image_prompts"]) == count
+        assert generated["article_markdown"].count("**技术特点**") == count
+        assert generated["article_markdown"].count("**机制拆解**") == count
+        assert generated["article_markdown"].count("**工程启发**") == count
+        assert all(
+            any(
+                relation["label"] == "数据流"
+                for relation in item["visual_brief"]["relationships"]
+            )
+            for item in generated["image_prompts"]
+        )
+        if count == len(rankings):
+            normalized = generated
+
+    assert normalized is not None
     assert set(normalized) == {"title", "digest", "article_markdown", "image_prompts"}
     assert len(normalized["image_prompts"]) == len(rankings)
-    assert all(item["prompt_stage"] == "content_brief_v1" for item in normalized["image_prompts"])
+    assert all(item["prompt_stage"] == "content_brief_v2" for item in normalized["image_prompts"])
     assert all(item["project_analysis_markdown"] for item in normalized["image_prompts"])
 
     content = GeneratedContentForStoryboard(
@@ -314,7 +471,7 @@ def main() -> None:
 
     print(
         "摘要深度合同验证通过："
-        f"projects={len(project_sections)} length_limits=disabled"
+        f"projects={len(project_sections)} call_contract=N+1 length_limits=disabled"
     )
 
 

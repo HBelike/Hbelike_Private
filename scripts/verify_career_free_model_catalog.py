@@ -33,6 +33,8 @@ def main() -> None:
     assert len(providers) == len(FREE_MODEL_PROVIDERS), "provider_key 不得重复"
     assert set(providers) == {
         "gemini",
+        "groq",
+        "mistral",
         "qwen",
         "openrouter",
         "modelscope",
@@ -55,15 +57,34 @@ def main() -> None:
         assert len(model_ids) == len(set(model_ids)), f"{provider.provider_key} 的 model_id 不得重复"
 
     gemini_models = {item.model_id: item for item in providers["gemini"].templates}
-    assert gemini_models["gemini-3.5-flash-lite"].supports_vision is True
+    assert set(gemini_models) == {"gemini-3.7-flash", "gemini-3.6-flash"}
+    assert gemini_models["gemini-3.7-flash"].supports_vision is True
     assert providers["gemini"].setup_url == "https://aistudio.google.com/app/apikey"
-    assert providers["modelscope"].free_label == "体验额度"
-    assert providers["siliconflow"].free_label == "部分模型可能免费"
+    assert providers["groq"].free_label == "免费层"
+    assert providers["mistral"].free_label == "免费模式"
+    assert providers["modelscope"].free_label == "魔力值体验"
+    assert providers["siliconflow"].free_label == "当前免费模型"
     assert providers["nvidia"].free_label == "开发试用"
 
+    groq_ids = {item.model_id for item in providers["groq"].templates}
+    assert groq_ids == {"openai/gpt-oss-120b", "openai/gpt-oss-20b"}
+
+    mistral_ids = {item.model_id for item in providers["mistral"].templates}
+    assert mistral_ids == {"mistral-small-latest"}
+
+    qwen_ids = {item.model_id for item in providers["qwen"].templates}
+    assert qwen_ids == {"qwen3.6-flash", "qwen3.7-plus"}
+
+    modelscope_ids = {item.model_id for item in providers["modelscope"].templates}
+    assert modelscope_ids == {
+        "deepseek-ai/DeepSeek-V4-Pro",
+        "ZhipuAI/GLM-5.2",
+    }
+    assert not any("Qwen2.5" in model_id for model_id in modelscope_ids)
+
     siliconflow_ids = {item.model_id for item in providers["siliconflow"].templates}
-    assert "Qwen/Qwen3-8B" in siliconflow_ids
-    assert "Qwen/Qwen-3-8B" not in siliconflow_ids
+    assert siliconflow_ids == {"THUDM/GLM-Z1-9B-0414"}
+    assert not any(model_id.startswith("Qwen/") for model_id in siliconflow_ids)
 
     nvidia_ids = {item.model_id for item in providers["nvidia"].templates}
     assert "meta/llama-3.3-70b-instruct" in nvidia_ids
@@ -81,7 +102,7 @@ def main() -> None:
         profile=SimpleNamespace(
             id="gemini-ready-profile",
             provider_key="gemini",
-            model_id="gemini-3.5-flash-lite",
+            model_id="gemini-3.7-flash",
             display_name="Gemini 简历理解",
             cost_tier=ModelCostTier.FREE_QUOTA,
         ),
@@ -92,7 +113,7 @@ def main() -> None:
     }
     assert ready_payload["gemini"]["availability_label"] == "该服务商已有可用模型"
     assert ready_payload["qwen"]["availability_label"] == "需管理员申请并保存 API Key"
-    assert ready_payload["gemini"]["configured_profiles"][0]["model_id"] == "gemini-3.5-flash-lite"
+    assert ready_payload["gemini"]["configured_profiles"][0]["model_id"] == "gemini-3.7-flash"
 
     print("career_free_model_catalog_ok")
 

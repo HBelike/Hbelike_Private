@@ -64,13 +64,46 @@ FREE_MODEL_PROVIDERS: tuple[FreeModelProvider, ...] = (
             "可用地区、项目级限额和模型限额以 AI Studio 为准，免费层内容可能用于改进 Google 产品。"
         ),
         templates=(
-            FreeModelTemplate(
-                "gemini-3.5-flash-lite",
-                "Gemini 3.5 Flash-Lite",
-                supports_vision=True,
-            ),
-            FreeModelTemplate("gemini-3.5-flash", "Gemini 3.5 Flash", supports_vision=True),
+            FreeModelTemplate("gemini-3.7-flash", "Gemini 3.7 Flash", supports_vision=True),
             FreeModelTemplate("gemini-3.6-flash", "Gemini 3.6 Flash", supports_vision=True),
+        ),
+    ),
+    FreeModelProvider(
+        provider_key="groq",
+        display_name="Groq",
+        api_base_url="https://api.groq.com/openai/v1",
+        website_url="https://console.groq.com",
+        setup_url="https://console.groq.com/keys",
+        documentation_url="https://console.groq.com/docs/models",
+        pricing_url="https://console.groq.com/docs/rate-limits",
+        free_label="免费层",
+        free_description=(
+            "Groq Free Plan 对部分生产模型提供按 RPM、RPD、TPM 和 TPD 计算的免费调用额度；"
+            "限额按组织共享，并会随模型和账号状态调整，以控制台 Limits 页面为准。"
+        ),
+        templates=(
+            FreeModelTemplate("openai/gpt-oss-120b", "GPT-OSS 120B"),
+            FreeModelTemplate("openai/gpt-oss-20b", "GPT-OSS 20B"),
+        ),
+    ),
+    FreeModelProvider(
+        provider_key="mistral",
+        display_name="Mistral AI",
+        api_base_url="https://api.mistral.ai/v1",
+        website_url="https://console.mistral.ai",
+        setup_url="https://console.mistral.ai/api-keys",
+        documentation_url=(
+            "https://docs.mistral.ai/getting-started/quickstarts/studio/"
+            "activate-and-generate-api-key"
+        ),
+        pricing_url="https://docs.mistral.ai/admin/billing-usage/usage-limits",
+        free_label="免费模式",
+        free_description=(
+            "Mistral Studio Free mode 无需信用卡即可创建 API Key，并按账号获得有限的月度用量；"
+            "具体可用模型和限额以 Studio 的 Limits 页面为准。"
+        ),
+        templates=(
+            FreeModelTemplate("mistral-small-latest", "Mistral Small（最新稳定版）"),
         ),
     ),
     FreeModelProvider(
@@ -83,8 +116,8 @@ FREE_MODEL_PROVIDERS: tuple[FreeModelProvider, ...] = (
         pricing_url="https://help.aliyun.com/zh/model-studio/model-pricing",
         free_label="新用户免费额度",
         free_description=(
-            "百炼会按账号、模型和地域发放限时免费额度，新用户额度通常有有效期；"
-            "具体 Token 数、可用模型、地域和到期后的计费，以当前控制台为准。"
+            "百炼在中国（北京）为符合条件的新用户按模型发放通常 90 天有效的免费额度；"
+            "请使用通用 API Key 并在控制台开启“仅使用免费额度”，到期、耗尽或不符合地域条件后不可继续免费调用。"
         ),
         templates=(
             # 此通用 Vision-Language 模型可作为管理员另行保存的会话模型；
@@ -92,6 +125,11 @@ FREE_MODEL_PROVIDERS: tuple[FreeModelProvider, ...] = (
             FreeModelTemplate(
                 "qwen3.6-flash",
                 "Qwen 3.6 Flash（通用图文理解）",
+                supports_vision=True,
+            ),
+            FreeModelTemplate(
+                "qwen3.7-plus",
+                "Qwen 3.7 Plus（高精度图文理解）",
                 supports_vision=True,
             ),
         ),
@@ -120,15 +158,15 @@ FREE_MODEL_PROVIDERS: tuple[FreeModelProvider, ...] = (
         website_url="https://www.modelscope.cn/home?tab=model",
         setup_url="https://modelscope.cn/my/myaccesstoken",
         documentation_url="https://modelscope.cn/docs/model-service/API-Inference/intro",
-        pricing_url="https://www.modelscope.cn/learn/434367",
-        free_label="体验额度",
+        pricing_url="https://modelscope.cn/docs/model-service/API-Inference/limits",
+        free_label="魔力值体验",
         free_description=(
-            "API Inference 的部分开源模型或账号可能提供体验额度，但官方没有承诺统一、长期固定的"
-            "免费调用量；实际可用模型、限流和额度以模型页与账号控制台为准。"
+            "API Inference 通过魔力值兑换免费体验调用；账号需关联已实名认证的阿里云账号。"
+            "模型范围、单次消耗和并发会动态调整，仅列出模型页仍提供 API-Inference 示例的候选项。"
         ),
         templates=(
-            FreeModelTemplate("Qwen/Qwen2.5-7B-Instruct", "Qwen 2.5 7B Instruct"),
-            FreeModelTemplate("Qwen/Qwen2.5-Coder-32B-Instruct", "Qwen 2.5 Coder 32B"),
+            FreeModelTemplate("deepseek-ai/DeepSeek-V4-Pro", "DeepSeek V4 Pro"),
+            FreeModelTemplate("ZhipuAI/GLM-5.2", "GLM 5.2"),
         ),
     ),
     FreeModelProvider(
@@ -139,15 +177,13 @@ FREE_MODEL_PROVIDERS: tuple[FreeModelProvider, ...] = (
         setup_url="https://cloud.siliconflow.cn/account/ak",
         documentation_url="https://docs.siliconflow.cn/cn/userguide/quickstart",
         pricing_url="https://siliconflow.cn/pricing",
-        free_label="部分模型可能免费",
+        free_label="当前免费模型",
         free_description=(
-            "部分模型或活动账号可能提供免费额度，目录中的候选模型仍需在控制台核对当前价格和准入；"
-            "带 Pro/ 前缀或价格页未标记免费的模型不能按免费连接保存。"
+            "只列出硅基流动价格页当前明确将输入和输出都标记为免费的文本模型；"
+            "价格和准入可能调整，保存前仍应在控制台再次核对。"
         ),
         templates=(
-            FreeModelTemplate("Qwen/Qwen2.5-7B-Instruct", "Qwen 2.5 7B Instruct"),
-            FreeModelTemplate("Qwen/Qwen3-8B", "Qwen 3 8B"),
-            FreeModelTemplate("THUDM/GLM-4-9B-0414", "GLM 4 9B"),
+            FreeModelTemplate("THUDM/GLM-Z1-9B-0414", "GLM-Z1 9B"),
         ),
     ),
     FreeModelProvider(

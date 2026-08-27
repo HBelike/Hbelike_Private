@@ -12,6 +12,9 @@ from src.config.config_manager import AppConfig
 DEFAULT_PIPELINE_CONFIG: dict[str, object] = {
     "top_n": 5,
     "github_keywords": ["agent", "AI", "LLM", "RAG"],
+    "image_generation_enabled": True,
+    "video_generation_enabled": False,
+    "audio_generation_enabled": False,
     "summary_prompt": "",
     "image_prompt": "",
     "video_prompt": "",
@@ -50,6 +53,15 @@ def normalize_pipeline_config(value: dict[str, object] | None) -> dict[str, obje
         "top_n": top_n,
         "github_keywords": keywords,
     }
+    for field, label in (
+        ("image_generation_enabled", "图片生成开关"),
+        ("video_generation_enabled", "视频生成开关"),
+        ("audio_generation_enabled", "语音生成开关"),
+    ):
+        enabled = source.get(field, DEFAULT_PIPELINE_CONFIG[field])
+        if not isinstance(enabled, bool):
+            raise ValueError(f"{label}必须是布尔值")
+        normalized[field] = enabled
     for field in ("summary_prompt", "image_prompt", "video_prompt"):
         prompt = str(source.get(field, "")).strip()
         if len(prompt) > 8_000:
@@ -73,7 +85,12 @@ def apply_pipeline_config(base_config: AppConfig, value: dict[str, object] | Non
     runtime_config = pipeline_config_for_ui(value)
     raw = deepcopy(base_config.raw)
     raw.setdefault("ranking", {})["top_n"] = runtime_config["top_n"]
+    raw.setdefault("image", {})["paid_generation_enabled"] = runtime_config["image_generation_enabled"]
     raw.setdefault("video", {})["required_image_count"] = runtime_config["top_n"]
+    raw.setdefault("video", {})["submit_enabled"] = runtime_config["video_generation_enabled"]
+    raw["video"]["runtime_submit_enabled"] = runtime_config["video_generation_enabled"]
+    raw.setdefault("audio", {})["enabled"] = runtime_config["audio_generation_enabled"]
+    raw["audio"]["runtime_enabled"] = runtime_config["audio_generation_enabled"]
     raw.setdefault("github", {})["search_query"] = _build_github_query(runtime_config["github_keywords"])
     raw["runtime_prompts"] = {
         "summary": runtime_config["summary_prompt"],
