@@ -12,5 +12,5 @@
 8. **技能库**：57 个 `SKILL.md` 已作为 `deploy/skill-seeds` 种子；持久卷中的已编辑 Skill 不会被重新部署覆盖。生产种子另带已核验的公开仓库来源，当前可为 `ai-image-generation`、`baoyu-url-to-markdown`、`grill-me`、`og-image-design` 刷新真实 Star，其余来源不明的项目 Skill 显示“本地 Skill”。
 9. **调度边界**：周五 08:00 生产、09:00 建微信草稿；Scheduler 与人工流水线共享文件锁，生产只能单实例运行。本地默认保持音视频关闭；生产已显式设置 `VIDEO_SUBMIT_ENABLED=true`、`AUDIO_ENABLED=true`，会运行 Seedance、视觉质检、豆包 TTS 与最终视频装配并产生相应调用。
 10. **上线修复**：`eba2f08` 为生产 Nginx 增加静态 `root /usr/share/nginx/html` 与 `index index.html`；服务器已通过标准 Git 拉取、重建 Web/Caddy，`career-web` 健康检查恢复正常。
-11. **当前生产版本**：2026-08-27 已全量部署业务代码提交 `e7ff69b`；API/Web/PostgreSQL/Scheduler/Worker 均正常，PostgreSQL 已迁移到 `20260827_26`，上下文治理、记忆停用、响应式首道门禁、全网公开面经、小红书采集和浏览器助手 `0.2.9` 已上线。
+11. **当前生产版本**：2026-08-27 已全量部署业务代码提交 `51446e6`；API/Web/PostgreSQL/Scheduler/Worker 均正常，PostgreSQL 已迁移到 `20260827_27`。动态 N+1 周榜文章与图片规划、媒体生成开关、模型上下文自动识别，以及归档原文、图片预览和 API Key 显隐交互已上线。
 12. **当前边界**：平台角色仅保留 `admin` 与 `user`；生产数据库已核验只有 `2963613812@qq.com` 这 1 个 admin，其余账号均为 user。生产保持登录强制、公开注册、CLI 首管理员模式与既有内容配置；Firecrawl Key 仅保存在服务器 `.env.production`，本地与生产容器最小 search+scrape 均已通过，线上扩展 SHA-256 与本地一致。前端仅维护电脑端与手机端。

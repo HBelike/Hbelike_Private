@@ -115,3 +115,14 @@ docker compose --env-file .env.production -f docker-compose.production.yml exec 
 - **Firecrawl**：生产 `.env.production` 已以不回显方式注入 `FIRECRAWL_API_KEY`，API 容器读取成功；本地与生产容器各执行一次最小 `/search` + `/scrape` smoke test，均返回 `public_web_firecrawl_smoke_ok`，未写业务数据库。
 - **公网验收**：健康接口、首页、求职助手、面经库、职位库、扩展教程和 `0.2.9` ZIP 均返回 `200`；匿名记忆与公开面经任务接口均返回 `401`。线上扩展为 `21948` 字节，SHA-256 为 `060FDB174E668B0E15B461DB176FF77871EC71A4760FCE4F6424B15904528D0F`，与本地一致。
 - **外部调用边界**：除上述两次 Firecrawl 最小验证外，未调用聊天模型、未触发微信草稿、Seedance、TTS 或真人 BOSS 招呼语发送。
+
+## 2026-08-27 动态内容全量生产部署记录
+
+- **发布目标**：发布动态 Top N 的 N+1 周榜文章编排、逐项目视觉简报与图片数量、自适应模型上下文容量、管理台图片/视频/语音开关，以及 PC 端归档原文、图片预览和 API Key 显隐交互。
+- **发布版本**：业务代码提交 `51446e6`，生产仓库从 `84988ba` 快进更新；本地插件 Skill、个人 `data/`、临时 `src/test.py`、重复 pnpm 文件、Playwright 产物和旧版扩展 ZIP 未进入发布。
+- **发布前验证**：Python `395 passed`，WebUI `195 passed`，浏览器扩展 `28 passed`；Vite production build、变更契约脚本、部署设置、Alembic 单一 head、源码编译、补丁密钥扫描与 Compose 配置均通过。
+- **部署调用链**：推送 GitHub `main` → 生产 `git pull --ff-only origin main` → `docker compose ... up -d --build` → `skill-seed` 与 `career-migrate` 退出码均为 `0` → API、Worker、Scheduler、Web 全量重建完成。
+- **数据库与运行状态**：Alembic 从 `20260827_26` 升级到 `20260827_27 (head)`；API、Web、PostgreSQL 均为 healthy，Worker、Scheduler、Caddy、Docling、Gotenberg 正常运行；Scheduler 已注册次日周五 08:00 生产与 09:00 草稿任务，启动日志未出现 `ERROR`、`Traceback` 或 `Exception`。
+- **Skill 持久卷**：`skill-seed` 按既有规则跳过 57 个已存在 Skill；哈希确认 `github-project-blog` 持久副本与上一版种子完全一致且没有线上编辑后，仅将该文件更新到本次种子，更新后两者 SHA-256 均为 `EE675749BF08783A1EE51E29FC25A81E4C7610CE3256EDD92B7B122425DF8997`。
+- **公网验收**：健康接口与首页、求职助手、面经库、职位库、工作台均返回 `200`；匿名会话和面经树接口均返回 `401`。线上主资源 `/assets/index-BG2ekzHc.js` 已确认包含“显示 API Key”“文章原文”“图片生成”。
+- **生产开关与外部调用边界**：API 的 `VIDEO_SUBMIT_ENABLED`、`AUDIO_ENABLED`、`CAREER_ALLOW_PAID_PROFILES`、`PLATFORM_AUTH_REQUIRED`、`CAREER_REDACTION_ENABLED` 以及 Scheduler 的音视频开关均保持 `true`；本次未主动调用聊天模型、Firecrawl、微信草稿、Seedance、TTS 或真人 BOSS 发送动作。
