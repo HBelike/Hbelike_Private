@@ -8,10 +8,12 @@ export function detectBrowserInterviewSupport({
   AudioContextImpl = window.AudioContext || window.webkitAudioContext,
   WebSocketImpl = window.WebSocket
 } = {}) {
-  const isDesktopChrome = /Chrome\/\d+/i.test(userAgent)
-    && !/(Edg|OPR|Android|Mobile|CriOS)\//i.test(userAgent)
+  const isMobileBrowser = /(Android|Mobile|CriOS|FxiOS|EdgiOS)/i.test(userAgent)
+  const isDesktopChromium = /Chrome\/\d+/i.test(userAgent) && !/OPR\//i.test(userAgent)
+  const isDesktopFirefox = /Firefox\/\d+/i.test(userAgent)
+  const isSupportedDesktopBrowser = !isMobileBrowser && (isDesktopChromium || isDesktopFirefox)
   const missing = []
-  if (!isDesktopChrome) missing.push('请使用桌面版 Chrome')
+  if (!isSupportedDesktopBrowser) missing.push('请使用桌面版 Chrome、Edge 或 Firefox')
   if (typeof mediaDevices?.getDisplayMedia !== 'function') missing.push('浏览器不支持电脑音频共享')
   if (typeof mediaDevices?.getUserMedia !== 'function') missing.push('浏览器不支持麦克风授权')
   // Chrome 的 audioWorklet 是实例 getter；从 prototype 读取会抛出 Illegal invocation。
@@ -72,7 +74,7 @@ export class BrowserAudioCapture {
     const interviewerTrack = displayStream.getAudioTracks()[0]
     if (!interviewerTrack) {
       this._stopStream(displayStream)
-      throw new Error('没有检测到共享电脑声音。请在 Chrome 授权窗口选择“整个屏幕”并开启“共享系统音频”，或选择正在通话的浏览器标签页并共享音频。')
+      throw new Error('没有检测到共享电脑声音。请在浏览器授权窗口选择带声音的共享来源，并在可用时开启音频共享；如果浏览器没有提供音频选项，请改用 Chrome 或 Edge。')
     }
     await this._connectTrack(interviewerTrack, 'interviewer')
 

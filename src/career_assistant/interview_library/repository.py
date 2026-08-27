@@ -988,6 +988,43 @@ class InterviewLibraryRepository:
             ).mappings().one_or_none()
         return self._to_collection_candidate(row) if row is not None else None
 
+    def get_collection_candidate_by_canonical_url(
+        self,
+        organization_id: UUID,
+        collection_job_id: UUID,
+        canonical_url: str,
+    ) -> InterviewCollectionCandidateRecord | None:
+        """按任务和规范来源读取候选，供浏览器采集恢复时跳过已完成项。"""
+
+        normalized_url = self._normalize_optional_url(canonical_url)
+        if normalized_url is None:
+            raise ValueError("候选资料必须提供有效的规范来源地址")
+        with self._database.transaction() as connection:
+            row = connection.execute(
+                text(
+                    """
+                    SELECT candidate.id, candidate.collection_job_id, candidate.source_url,
+                           candidate.canonical_url, candidate.source_platform, candidate.title,
+                           candidate.snippet, candidate.published_at,
+                           candidate.extracted_markdown, candidate.content_hash,
+                           candidate.status, candidate.error_code, candidate.error_message,
+                           candidate.metadata_json, candidate.created_at, candidate.updated_at
+                    FROM career_assistant.interview_collection_candidates AS candidate
+                    INNER JOIN career_assistant.interview_collection_jobs AS job
+                        ON job.id = candidate.collection_job_id
+                    WHERE candidate.collection_job_id = :collection_job_id
+                      AND candidate.canonical_url = :canonical_url
+                      AND job.organization_id = :organization_id
+                    """,
+                ),
+                {
+                    "collection_job_id": collection_job_id,
+                    "canonical_url": normalized_url,
+                    "organization_id": organization_id,
+                },
+            ).mappings().one_or_none()
+        return self._to_collection_candidate(row) if row is not None else None
+
     def update_collection_candidate(
         self,
         organization_id: UUID,
@@ -1295,7 +1332,7 @@ class InterviewLibraryRepository:
                                                 EXCLUDED.metadata_json -> 'discovery_keywords',
                                                 '[]'::jsonb
                                             )
-                                        ) AS keyword
+                                        ) AS items(keyword)
                                     ) AS unique_keywords
                                 )
                             ),
@@ -1518,6 +1555,46 @@ class InterviewLibraryRepository:
             status=InterviewWebDocumentStatus.DUPLICATE,
         )
 
+    def mark_web_document_duplicate_pending(
+        self,
+        organization_id: UUID,
+        document_id: UUID,
+        *,
+        metadata_json: Mapping[str, object] | None = None,
+    ) -> InterviewWebDocumentRecord:
+        """正文重复但主记录尚未入库时，保留别名等待后续统一关联。"""
+
+        metadata = self._normalize_metadata_json(metadata_json, "重复来源元数据") or {}
+        with self._database.transaction() as connection:
+            row = connection.execute(
+                text(
+                    """
+                    UPDATE career_assistant.interview_web_documents
+                    SET status = 'duplicate',
+                        next_retry_at = NULL,
+                        error_code = NULL,
+                        error_message = NULL,
+                        metadata_json = metadata_json || CAST(:metadata_json AS jsonb),
+                        updated_at = NOW()
+                    WHERE id = :document_id AND organization_id = :organization_id
+                    RETURNING id, organization_id, canonical_url, source_url,
+                              source_platform, title, search_snippet, status,
+                              normalized_markdown, content_hash, imported_experience_id,
+                              attempt_count, error_code, error_message, first_seen_at,
+                              last_seen_at, last_fetched_at, next_retry_at, metadata_json,
+                              created_at, updated_at
+                    """,
+                ),
+                {
+                    "document_id": document_id,
+                    "organization_id": organization_id,
+                    "metadata_json": self._serialize_metadata_json(metadata),
+                },
+            ).mappings().one_or_none()
+        if row is None:
+            raise LookupError("公开网页账本不存在或无访问权限")
+        return self._to_web_document(row)
+
     def mark_web_document_filtered(
         self,
         organization_id: UUID,
@@ -1736,7 +1813,7 @@ class InterviewLibraryRepository:
                     )
                     SELECT :id, :organization_id, experience.id, :canonical_url,
                            :source_url, :source_platform, :is_primary,
-                           jsonb_build_array(:keyword)
+                           jsonb_build_array(CAST(:keyword AS text))
                     FROM career_assistant.interview_experiences AS experience
                     WHERE experience.id = :experience_id
                       AND experience.organization_id = :organization_id
@@ -1749,11 +1826,25 @@ class InterviewLibraryRepository:
                                 SELECT DISTINCT keyword
                                 FROM jsonb_array_elements_text(
                                     interview_experience_sources.discovery_keywords_json
-                                    || jsonb_build_array(:keyword)
-                                ) AS keyword
+                                    || jsonb_build_array(CAST(:keyword AS text))
+                                ) AS items(keyword)
                             ) AS unique_keywords
                         ),
-                        is_primary = interview_experience_sources.is_primary
+                        is_primary = CASE
+                            WHEN interview_experience_sources.is_primary THEN TRUE
+                            WHEN CAST(:is_primary AS boolean)
+                                 AND interview_experience_sources.experience_id = :experience_id
+                                 AND NOT EXISTS (
+                                     SELECT 1
+                                     FROM career_assistant.interview_experience_sources
+                                          AS existing_primary
+                                     WHERE existing_primary.organization_id = :organization_id
+                                       AND existing_primary.experience_id = :experience_id
+                                       AND existing_primary.is_primary
+                                 )
+                                THEN TRUE
+                            ELSE FALSE
+                        END
                     RETURNING id, organization_id, experience_id, canonical_url,
                               source_url, source_platform, is_primary,
                               discovery_keywords_json, first_seen_at, last_seen_at,
@@ -1828,6 +1919,43 @@ class InterviewLibraryRepository:
                     """,
                 ),
                 {"experience_id": experience_id, "organization_id": organization_id},
+            ).mappings().one_or_none()
+        return self._to_experience(row) if row is not None else None
+
+    def get_experience_by_source_url(
+        self,
+        organization_id: UUID,
+        source_url: str,
+    ) -> InterviewExperienceRecord | None:
+        """按规范来源读取已入库面经，避免同一平台笔记跨关键词重复写入。"""
+
+        normalized_url = self._normalize_optional_url(source_url)
+        if normalized_url is None:
+            raise ValueError("面经来源地址不正确")
+        with self._database.transaction() as connection:
+            row = connection.execute(
+                text(
+                    """
+                    SELECT experience.id, experience.organization_id, experience.company_id,
+                           company.display_name AS company_name, experience.job_name,
+                           experience.role_name, experience.normalized_role_name,
+                           experience.interview_date, experience.source_type,
+                           experience.source_platform, experience.source_url,
+                           experience.source_content_hash, experience.markdown_content,
+                           experience.normalized_markdown, experience.summary_text,
+                           experience.tags, experience.status, experience.chunking_version,
+                           experience.indexed_at, experience.created_at, experience.updated_at
+                    FROM career_assistant.interview_experiences AS experience
+                    INNER JOIN career_assistant.interview_companies AS company
+                        ON company.id = experience.company_id
+                    WHERE experience.organization_id = :organization_id
+                      AND experience.source_platform = '小红书'
+                      AND experience.source_url = :source_url
+                    ORDER BY experience.updated_at DESC
+                    LIMIT 1
+                    """,
+                ),
+                {"organization_id": organization_id, "source_url": normalized_url},
             ).mappings().one_or_none()
         return self._to_experience(row) if row is not None else None
 

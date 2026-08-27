@@ -8,6 +8,13 @@ import {
   pingExtensionWithRetry
 } from './job-library-bridge.js'
 
+test('浏览器桥公开小红书关键词与详情动作', async () => {
+  const source = await import('node:fs/promises').then(({ readFile }) => readFile(new URL('job-library-bridge.js', import.meta.url), 'utf8'))
+  assert.match(source, /search_xiaohongshu_notes/)
+  assert.match(source, /get_xiaohongshu_note/)
+  assert.match(source, /signedUrl/)
+})
+
 test('createJobDetailPayload converts a reactive-style job into clone-safe data', () => {
   const source = new Proxy({
     id: 'job-1',

@@ -84,7 +84,9 @@ function requestExtension(action, payload = {}, timeoutMs = DEFAULT_TIMEOUT_MS) 
         'extension_unavailable',
         action === 'ping'
           ? '未检测到职位库浏览器助手，请先安装并启用扩展。'
-          : '职位库浏览器助手响应超时，请确认 BOSS 页面可以正常访问。'
+          : action.includes('xiaohongshu')
+            ? '浏览器助手响应超时，请确认小红书页面可以正常访问。'
+            : '职位库浏览器助手响应超时，请确认 BOSS 页面可以正常访问。'
       ))
     }, timeoutMs)
 
@@ -148,6 +150,20 @@ export const jobLibraryBridge = {
   },
   getJobDetail(job) {
     return requestExtension('get_job_detail', createJobDetailPayload(job))
+  },
+  searchXiaohongshuNotes(keyword, limit = 20) {
+    return requestExtension('search_xiaohongshu_notes', {
+      keyword: cloneString(keyword),
+      limit: Math.max(5, Math.min(50, Number(limit) || 20))
+    }, 90000)
+  },
+  getXiaohongshuNote(card) {
+    return requestExtension('get_xiaohongshu_note', {
+      noteId: cloneString(card?.noteId),
+      signedUrl: cloneString(card?.signedUrl),
+      title: cloneString(card?.title),
+      authorName: cloneString(card?.authorName)
+    }, 60000)
   },
   preflightGreeting(job, message) {
     return requestExtension('preflight_greeting', createGreetingRequestPayload(job, message))

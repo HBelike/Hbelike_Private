@@ -1,14 +1,15 @@
 {
   "manifest_version": 3,
   "name": "Find Job 职位库助手",
-  "version": "0.2.7",
-  "description": "通过用户已登录的 BOSS 页面读取职位，并在用户确认后逐条发送岗位招呼语。",
+  "version": "0.2.9",
+  "description": "通过用户已登录的招聘与内容页面读取职位、小红书公开面经，并执行用户确认的岗位操作。",
   "permissions": [
     "tabs",
     "scripting"
   ],
   "host_permissions": [
     "https://www.zhipin.com/*",
+    "https://www.xiaohongshu.com/*",
     "http://127.0.0.1/*",
     "http://localhost/*",
     "https://xingxingtech.cn/*",

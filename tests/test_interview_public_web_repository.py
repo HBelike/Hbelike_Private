@@ -179,7 +179,8 @@ def test_add_duplicate_source_does_not_replace_primary() -> None:
 
     sql, params = database.connection.calls[0]
     assert "ON CONFLICT (organization_id, canonical_url) DO UPDATE" in sql
-    assert "is_primary = interview_experience_sources.is_primary" in sql
+    assert "WHEN interview_experience_sources.is_primary THEN TRUE" in sql
+    assert "AND NOT EXISTS" in sql
     assert params["organization_id"] == ORG_ID
     assert source.is_primary is False
 

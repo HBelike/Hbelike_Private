@@ -8,7 +8,11 @@ from uuid import uuid4
 
 import pytest
 
-from src.career_assistant.career_memory import CareerMemoryDraft, CareerMemoryType
+from src.career_assistant.career_memory import (
+    CareerMemoryDraft,
+    CareerMemoryStatus,
+    CareerMemoryType,
+)
 from src.career_assistant.persistence.memory_repository import CareerMemoryRepository
 
 
@@ -101,6 +105,46 @@ def test_list_memories_requires_organization_actor_and_space() -> None:
     assert params["organization_id"] == organization_id
     assert params["actor_id"] == actor_id
     assert params["career_space_id"] == space_id
+
+
+def test_list_memories_omits_unset_optional_filters() -> None:
+    database = FakeDatabase([FakeResult(rows=[])])
+    repository = CareerMemoryRepository(database)
+    organization_id = uuid4()
+    actor_id = uuid4()
+
+    repository.list_memories(organization_id, actor_id)
+
+    sql, params = database.connection.calls[0]
+    assert "organization_id = :organization_id" in sql
+    assert "actor_id = :actor_id" in sql
+    assert "career_space_id" not in sql
+    assert "status = :status" not in sql
+    assert params == {
+        "organization_id": organization_id,
+        "actor_id": actor_id,
+    }
+
+
+def test_list_memories_adds_only_requested_optional_filters() -> None:
+    database = FakeDatabase([FakeResult(rows=[])])
+    repository = CareerMemoryRepository(database)
+    organization_id = uuid4()
+    actor_id = uuid4()
+    space_id = uuid4()
+
+    repository.list_memories(
+        organization_id,
+        actor_id,
+        career_space_id=space_id,
+        status=CareerMemoryStatus.ACTIVE,
+    )
+
+    sql, params = database.connection.calls[0]
+    assert "career_space_id = :career_space_id" in sql
+    assert "status = :status" in sql
+    assert params["career_space_id"] == space_id
+    assert params["status"] == "active"
 
 
 def test_supersede_active_updates_old_and_links_replacement_in_one_transaction() -> None:

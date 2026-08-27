@@ -1,7 +1,6 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import CareerAssistantPage from './components/CareerAssistantPage.vue'
-import CareerMemoryPage from './components/CareerMemoryPage.vue'
 import BrowserInterviewMasterPage from './components/BrowserInterviewMasterPage.vue'
 import ResumeAssistantPage from './components/ResumeAssistantPage.vue'
 import InterviewLibraryPage from './components/InterviewLibraryPage.vue'
@@ -218,9 +217,6 @@ const activeRoute = computed(() => {
   if (currentRoute.value === '/career') {
     return { path: '/career', label: '求职助手', description: '简历匹配与职业咨询' }
   }
-  if (currentRoute.value === '/career/memories') {
-    return { path: '/career/memories', label: '我的求职记忆', description: '查看和管理长期求职信息' }
-  }
   if (currentRoute.value === '/resume-assistant') {
     return { path: '/resume-assistant', label: '简历助手', description: '按目标岗位生成可审核的简历优化版本' }
   }
@@ -429,7 +425,7 @@ function toggleMobileNavigation() {
 }
 
 function syncMobileViewport() {
-  isMobileViewport.value = window.matchMedia('(max-width: 900px)').matches
+  isMobileViewport.value = window.matchMedia('(max-width: 1023.98px)').matches
   if (!isMobileViewport.value) closeMobileNavigation()
 }
 
@@ -461,7 +457,7 @@ function canAccessNavItem(item) {
 
 function navItemForRoute(route) {
   if (route.startsWith('/review')) return appNavItems.find((item) => item.moduleKey === 'workbench')
-  if (route === '/career/interview-master' || route === '/career/memories') return appNavItems.find((item) => item.moduleKey === 'career_assistant')
+  if (route === '/career/interview-master') return appNavItems.find((item) => item.moduleKey === 'career_assistant')
   if (route === '/interviews/jobs') return appNavItems.find((item) => item.moduleKey === 'job_library')
   if (route === '/interviews') return appNavItems.find((item) => item.moduleKey === 'interview_library')
   if (route.startsWith('/admin/')) return appNavItems.find((item) => item.moduleKey === 'admin_console')
@@ -1226,10 +1222,6 @@ onBeforeUnmount(() => {
 <template>
   <template v-if="!authReady || !authUser">
     <LoginPage @authenticated="handleAuthenticated" />
-    <div class="login-theme-switcher">
-      <span>界面主题</span>
-      <ThemeSwitcher :model-value="uiTheme" @update:model-value="setUiTheme" />
-    </div>
   </template>
 
   <section v-else-if="!navigationReady" class="platform-route-loading" aria-live="polite">
@@ -1388,7 +1380,6 @@ onBeforeUnmount(() => {
       </section>
 
       <CareerAssistantPage v-else-if="currentRoute === '/career'" @navigate="navigateTo" />
-      <CareerMemoryPage v-else-if="currentRoute === '/career/memories'" @navigate="navigateTo" />
 
       <ResumeAssistantPage
         v-else-if="currentRoute === '/resume-assistant'"

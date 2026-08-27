@@ -21,7 +21,7 @@ const setupOptions = ref(null)
 const selectedAnswerModelId = ref('')
 const candidateEnabled = ref(false)
 const consentAccepted = ref(false)
-const support = ref({ supported: false, missing: ['正在检查 Chrome 能力'] })
+const support = ref({ supported: false, missing: ['正在检查浏览器能力'] })
 const phase = ref('preparing')
 const message = ref('')
 const errorMessage = ref('')
@@ -87,7 +87,7 @@ const canOpenPip = computed(() => phase.value === 'active' && supportsAnswerPict
 const setupProgressLabel = computed(() => {
   if (setupProgress.value >= 100) return '模型与声音已准备完成'
   if (setupProgress.value >= 24) return '正在读取模型配置'
-  return '正在检查 Chrome 能力'
+  return '正在检查浏览器能力'
 })
 const canSaveArchive = computed(() => (
   !archiveLoading.value
@@ -441,9 +441,9 @@ onBeforeUnmount(() => {
     <section v-if="phase === 'preparing' && !sessionIds.length" class="preparation-layout">
       <article class="preparation-thesis">
         <div class="pulse-orbit" aria-hidden="true"><span></span><span></span><span></span></div>
-        <p class="section-label">Chrome 电脑声音实时辅助</p>
+        <p class="section-label">浏览器电脑声音实时辅助</p>
         <h1>听清问题，<br />把回答组织成能开口的话。</h1>
-        <p>Chrome 获得电脑声音授权后，Qwen 负责中英混合转写，当前文本模型把面试官的问题实时整理为中文回答。腾讯会议、飞书、QQ、微信或浏览器通话都走同一条电脑音频轨，不需要绑定平台。</p>
+        <p>浏览器获得电脑声音授权后，Qwen 负责中英混合转写，当前文本模型把面试官的问题实时整理为中文回答。腾讯会议、飞书、QQ、微信或浏览器通话都走同一条电脑音频轨，不需要绑定平台。</p>
         <div class="capture-boundary">
           <strong>本场只处理你主动授权的声音</strong>
           <span>不保存原始音频、屏幕画面、转写半句或你的麦克风文本。</span>
@@ -502,8 +502,8 @@ onBeforeUnmount(() => {
           <div class="browser-check" :class="{ ok: support.supported }">
             <span class="status-dot"></span>
             <div>
-              <strong>{{ support.supported ? '桌面 Chrome 能力正常' : '当前环境暂不可开始' }}</strong>
-              <small>{{ support.supported ? '点击开始后，在 Chrome 授权窗口选择“整个屏幕”并开启“共享系统音频”；浏览器会议也可直接选择对应标签页。' : support.missing.join('；') }}</small>
+              <strong>{{ support.supported ? '桌面版 Chrome、Edge 或 Firefox 能力正常' : '当前环境暂不可开始' }}</strong>
+              <small>{{ support.supported ? '点击开始后请选择带声音的共享来源；Chrome、Edge 可优先选择“整个屏幕”并开启系统音频，Firefox 请使用授权窗口实际提供的音频来源。' : support.missing.join('；') }}</small>
             </div>
           </div>
 

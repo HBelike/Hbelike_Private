@@ -132,7 +132,7 @@ def setup_options(request: Request, actor=Depends(get_live_actor)) -> dict[str, 
             if ModelCapability.TEXT in item.profile.capabilities
         ],
         "audio_policy": {
-            "platform": "桌面 Chrome 或 Windows 10/11 Electron",
+            "platform": "桌面版 Chrome、Edge、Firefox 或 Windows 10/11 Electron",
             "raw_audio_persisted": False,
             "notice": "仅在参与者已知情并允许使用 AI 的场景开始采集。",
         },

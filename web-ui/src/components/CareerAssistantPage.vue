@@ -10,7 +10,6 @@ import CareerGreetingDialog from './CareerGreetingDialog.vue'
 import CareerJobSearchDialog from './CareerJobSearchDialog.vue'
 import CareerMessageContent from './CareerMessageContent.vue'
 import CareerContextMeter from './CareerContextMeter.vue'
-import CareerMemoryUsageDrawer from './CareerMemoryUsageDrawer.vue'
 import { toTargetRolePayload } from '../job-library-target-role.js'
 import { isAssessmentPending } from '../career-assessment-view.js'
 import { openBrowserInterviewMaster } from '../browser-interview-launcher.js'
@@ -48,6 +47,10 @@ import {
   pageRequestUrl,
   resolveHistoryPageSize
 } from '../career-history-pagination.js'
+import {
+  getCareerLayoutMode,
+  getPanelAfterLayoutChange
+} from '../career-responsive-layout.js'
 
 const emit = defineEmits(['navigate'])
 
@@ -120,13 +123,17 @@ const historyTotal = ref(0)
 const historyLoading = ref(false)
 const contextRailWidth = ref(620)
 const resizingContextRail = ref(false)
-const viewportWidth = ref(typeof window === 'undefined' ? 1600 : window.innerWidth)
+const careerWorkspaceRef = ref(null)
+const historyDrawerTrigger = ref(null)
+const contextDrawerTrigger = ref(null)
+const historyDrawerClose = ref(null)
+const contextDrawerClose = ref(null)
+const workspaceWidth = ref(typeof window === 'undefined' ? 1600 : window.innerWidth)
+const layoutMode = ref(getCareerLayoutMode(workspaceWidth.value))
+const compactPanel = ref('')
 const contextUsage = ref(null)
 const contextUsageLoading = ref(false)
 const turnLimit = ref(normalizeTurnLimit())
-const memoryUsageDrawerOpen = ref(false)
-const memoryUsageDrawerLoading = ref(false)
-const memoryUsageItems = ref([])
 
 const HISTORY_COLLAPSED_STORAGE_KEY = 'career-assistant-history-collapsed'
 const HISTORY_PAGE_SIZE_STORAGE_KEY = 'career-assistant-history-page-size'
@@ -142,10 +149,10 @@ const composerHighlightSegments = computed(() => buildComposerHighlightSegments(
 ))
 
 const visibleContextRailWidth = computed(() => {
-  if (viewportWidth.value <= 640) return viewportWidth.value
-  const historyWidth = historyCollapsed.value ? 48 : (viewportWidth.value <= 1500 ? 280 : 300)
-  const minimumChatWidth = viewportWidth.value <= 1500 ? 480 : 560
-  const availableWidth = viewportWidth.value - historyWidth - minimumChatWidth - 50
+  if (layoutMode.value !== 'wide') return Math.min(contextRailWidth.value, 420)
+  const historyWidth = historyCollapsed.value ? 48 : 280
+  const minimumChatWidth = 480
+  const availableWidth = workspaceWidth.value - historyWidth - minimumChatWidth - 28
   return Math.min(contextRailWidth.value, Math.max(CONTEXT_RAIL_MIN_WIDTH, availableWidth))
 })
 
@@ -186,6 +193,7 @@ let interviewMentionRequestId = 0
 let skillMentionDebounceTimer = null
 let skillMentionRequestId = 0
 let contextUsageRequestId = 0
+let careerResizeObserver = null
 const turnObservationCoordinator = createTurnObservationCoordinator()
 
 function dismissError() {
@@ -211,7 +219,9 @@ onBeforeUnmount(() => {
   if (interviewMentionDebounceTimer) clearTimeout(interviewMentionDebounceTimer)
   if (skillMentionDebounceTimer) clearTimeout(skillMentionDebounceTimer)
   document.removeEventListener('pointerdown', handleConversationActionPointerDown)
-  window.removeEventListener('resize', updateCareerViewportWidth)
+  document.removeEventListener('keydown', handleCareerPanelKeydown)
+  careerResizeObserver?.disconnect()
+  careerResizeObserver = null
   stopContextRailResize()
   stopActiveTurnObservation()
   stopTurnRecoveryPolling()
@@ -327,8 +337,41 @@ function resetContextRailWidth() {
   persistContextRailWidth()
 }
 
-function updateCareerViewportWidth() {
-  viewportWidth.value = window.innerWidth
+function syncCareerWorkspaceWidth(width) {
+  const nextWidth = Math.max(0, Math.round(Number(width) || 0))
+  const nextMode = getCareerLayoutMode(nextWidth)
+  compactPanel.value = getPanelAfterLayoutChange(layoutMode.value, nextMode, compactPanel.value)
+  workspaceWidth.value = nextWidth
+  layoutMode.value = nextMode
+}
+
+function toggleCompactPanel(panel) {
+  if (compactPanel.value === panel) {
+    closeCompactPanel()
+    return
+  }
+  compactPanel.value = panel
+  nextTick(() => {
+    const closeButton = panel === 'history' ? historyDrawerClose.value : contextDrawerClose.value
+    closeButton?.focus()
+  })
+}
+
+function closeCompactPanel(restoreFocus = true) {
+  const closingPanel = compactPanel.value
+  if (!closingPanel) return
+  compactPanel.value = ''
+  if (!restoreFocus) return
+  nextTick(() => {
+    const trigger = closingPanel === 'history' ? historyDrawerTrigger.value : contextDrawerTrigger.value
+    trigger?.focus()
+  })
+}
+
+function handleCareerPanelKeydown(event) {
+  if (event.key !== 'Escape' || !compactPanel.value) return
+  event.preventDefault()
+  closeCompactPanel()
 }
 
 function handleConversationActionPointerDown(event) {
@@ -1127,10 +1170,7 @@ async function createConversation({
       body: JSON.stringify({
         title,
         candidate_profile_id: candidateProfileId || null,
-        target_role_profile_id: targetRoleProfileId || null,
-        career_space_id: selectedConversation.value?.career_space_id
-          || window.localStorage.getItem('career-selected-space-id')
-          || null
+        target_role_profile_id: targetRoleProfileId || null
       })
     })
     historyPage.value = 1
@@ -1795,14 +1835,13 @@ function startConversationDelete(conversationId) {
   deletingConversationId.value = conversationId
 }
 
-async function deleteConversation(conversation, forgetDerivedMemories = false) {
+async function deleteConversation(conversation) {
   if (conversationActionLoadingId.value || savingJobSearch.value) return
   resetJobSearch()
   conversationActionLoadingId.value = conversation.id
   errorMessage.value = ''
   try {
-    const suffix = forgetDerivedMemories ? '?forget_derived_memories=true' : ''
-    const result = await requestJson(`/api/career/conversations/${conversation.id}${suffix}`, { method: 'DELETE' })
+    await requestJson(`/api/career/conversations/${conversation.id}`, { method: 'DELETE' })
     conversations.value = conversations.value.filter((item) => item.id !== conversation.id)
     historyTotal.value = Math.max(0, historyTotal.value - 1)
     historyPage.value = Math.min(historyPage.value, historyTotalPages.value)
@@ -1816,30 +1855,13 @@ async function deleteConversation(conversation, forgetDerivedMemories = false) {
       resetConversationDraft()
       useFreeQuotaFirstSelection()
     }
-    feedback.value = forgetDerivedMemories
-      ? `会话已删除，并遗忘 ${result.forgotten_memory_count || 0} 条由本对话产生的求职记忆。`
-      : '会话及其历史记录已永久删除，长期求职记忆已保留。'
+    feedback.value = '会话及其历史记录已永久删除。'
     closeConversationActions()
     void loadConversationPage(historyPage.value)
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '会话删除失败'
   } finally {
     conversationActionLoadingId.value = ''
-  }
-}
-
-async function openMemoryUsageDrawer(turnId) {
-  if (!turnId) return
-  memoryUsageDrawerOpen.value = true
-  memoryUsageDrawerLoading.value = true
-  memoryUsageItems.value = []
-  try {
-    const payload = await requestJson(`/api/career/turns/${turnId}/memory-usages`)
-    memoryUsageItems.value = payload.items || []
-  } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '回答来源读取失败'
-  } finally {
-    memoryUsageDrawerLoading.value = false
   }
 }
 
@@ -2037,8 +2059,15 @@ onMounted(() => {
   if (Number.isFinite(storedContextRailWidth) && storedContextRailWidth > 0) {
     contextRailWidth.value = clampContextRailWidth(storedContextRailWidth)
   }
-  viewportWidth.value = window.innerWidth
-  window.addEventListener('resize', updateCareerViewportWidth)
+  const workspaceElement = careerWorkspaceRef.value
+  if (workspaceElement && typeof ResizeObserver !== 'undefined') {
+    careerResizeObserver = new ResizeObserver(([entry]) => {
+      syncCareerWorkspaceWidth(entry?.contentRect?.width ?? workspaceElement.clientWidth)
+    })
+    careerResizeObserver.observe(workspaceElement)
+    syncCareerWorkspaceWidth(workspaceElement.clientWidth)
+  }
+  document.addEventListener('keydown', handleCareerPanelKeydown)
   document.addEventListener('pointerdown', handleConversationActionPointerDown)
   void refreshData()
 })
@@ -2046,13 +2075,27 @@ onMounted(() => {
 
 <template>
   <section
+    ref="careerWorkspaceRef"
     class="career-workspace"
-    :class="{ 'has-context-rail': conversationContext, 'history-collapsed': historyCollapsed, 'resizing-context-rail': resizingContextRail }"
+    :class="{
+      'has-context-rail': conversationContext,
+      'history-collapsed': historyCollapsed,
+      'resizing-context-rail': resizingContextRail,
+      'compact-history-open': compactPanel === 'history',
+      'compact-context-open': compactPanel === 'context'
+    }"
     :style="{ '--context-rail-width': `${visibleContextRailWidth}px` }"
     aria-label="求职助手"
   >
-    <aside class="career-history-panel" :class="{ collapsed: historyCollapsed }">
-      <template v-if="historyCollapsed">
+    <aside id="career-history-panel" class="career-history-panel" :class="{ collapsed: historyCollapsed }">
+      <button
+        ref="historyDrawerClose"
+        class="compact-panel-close"
+        type="button"
+        aria-label="关闭会话历史"
+        @click="closeCompactPanel"
+      >×</button>
+      <template v-if="historyCollapsed && layoutMode !== 'single'">
         <button class="history-rail-button" type="button" aria-label="展开会话历史" title="展开会话历史" @click="toggleHistoryPanel">›</button>
         <button class="history-rail-button primary" type="button" :disabled="creating || submittingTurnCount > 0 || savingJobSearch" aria-label="开启新对话" title="开启新对话" @click="startNewConversation">＋</button>
         <span class="history-rail-count" :title="`${historyTotal} 个会话`">{{ historyTotal }}</span>
@@ -2116,14 +2159,11 @@ onMounted(() => {
             </template>
 
             <template v-else-if="deletingConversationId === conversation.id">
-              <p><strong>永久删除该会话？</strong><span>你可以保留长期求职记忆，或同时遗忘本对话产生的记忆。</span></p>
+              <p><strong>永久删除该会话？</strong><span>会话及其历史记录将被永久删除，此操作无法撤销。</span></p>
               <div class="conversation-action-buttons">
                 <button type="button" @click="closeConversationActions">取消</button>
                 <button type="button" class="danger" :disabled="conversationActionLoadingId === conversation.id" @click="deleteConversation(conversation)">
-                  {{ conversationActionLoadingId === conversation.id ? '删除中…' : '仅删除对话' }}
-                </button>
-                <button type="button" class="danger" :disabled="conversationActionLoadingId === conversation.id" @click="deleteConversation(conversation, true)">
-                  删除并遗忘本对话记忆
+                  {{ conversationActionLoadingId === conversation.id ? '删除中…' : '永久删除' }}
                 </button>
               </div>
             </template>
@@ -2170,10 +2210,26 @@ onMounted(() => {
             <span v-if="conversationContext.target_role">{{ conversationContext.target_role.company_name }} · {{ conversationContext.target_role.role_name }} v{{ conversationContext.target_role.version }}</span>
           </p>
         </div>
+        <div class="compact-panel-triggers" aria-label="辅助面板">
+          <button
+            ref="historyDrawerTrigger"
+            type="button"
+            class="compact-panel-trigger history-trigger"
+            aria-controls="career-history-panel"
+            :aria-expanded="compactPanel === 'history'"
+            @click="toggleCompactPanel('history')"
+          >历史</button>
+          <button
+            v-if="conversationContext"
+            ref="contextDrawerTrigger"
+            type="button"
+            class="compact-panel-trigger context-trigger"
+            aria-controls="career-context-panel"
+            :aria-expanded="compactPanel === 'context'"
+            @click="toggleCompactPanel('context')"
+          >职位信息</button>
+        </div>
         <div v-if="selectedConversation" class="chat-material-actions" aria-label="求职资料快捷操作">
-          <button type="button" class="chat-material-button" title="查看和管理长期求职信息" @click="emit('navigate', '/career/memories')">
-            <span>我的求职记忆</span>
-          </button>
           <button
             type="button"
             class="chat-material-button interview-master"
@@ -2225,7 +2281,6 @@ onMounted(() => {
         <article v-for="message in messages" :key="message.id" class="message" :class="[message.role === 'user' ? 'from-user' : 'from-agent', message.local_state ? `message-${message.local_state}` : '']" :aria-label="message.role === 'user' ? '你的消息' : '求职助手消息'">
           <header v-if="message.role !== 'user'" class="message-role"><i aria-hidden="true">职</i><strong>求职助手</strong></header>
           <CareerMessageContent :content="message.content" />
-          <button v-if="message.role === 'assistant' && message.memory_usage_count > 0" class="memory-usage-link" type="button" @click="openMemoryUsageDrawer(message.turn_id)">查看本回答使用的求职记忆</button>
           <small class="message-time">{{ formatDate(message.created_at) }}<template v-if="message.local_state === 'sending'"> · 正在发送</template><template v-else-if="message.local_state === 'queued'"> · 等待回复</template><template v-else-if="message.local_state === 'failed'"> · 发送失败</template></small>
         </article>
         <article v-if="sending" class="agent-message agent-pending">
@@ -2251,7 +2306,6 @@ onMounted(() => {
         <div class="composer-toolbar" aria-label="会话与材料工具">
           <div class="input-tools">
             <button v-if="selectedConversation" class="chip-button active-context-chip" :class="{ active: conversationContext }" type="button" @click="openContextSetup">{{ contextButtonLabel }}</button>
-            <CareerContextMeter :usage="contextUsage" :loading="contextUsageLoading" class="composer-context-meter" />
             <select class="model-select" :value="modelSelectionValue" :disabled="!hasReadyModel" aria-label="本轮模型选择" @change="chooseModel">
               <option v-if="!hasReadyModel" value="">尚未配置可用模型</option>
               <option v-if="hasReadyFreeModel" value="free_quota_first">【免费】自动选择</option>
@@ -2298,18 +2352,24 @@ onMounted(() => {
           <span>{{ sending ? '当前回复完成后可继续发送' : turnLimitView.message }}</span>
           <button v-if="turnLimitView.blocked" class="quiet-button" type="button" @click="startNewConversation">开启新对话</button>
         </div>
-        <div class="composer-footer"><small>当前模型：{{ modelLabel }}。输入 @ 可引用面经，输入 / 可调用 Skill；每条消息都会保存，并按发送顺序回复。</small><button class="send-button" type="button" :disabled="!selectedConversation || turnInputBlocked" @click="sendMessage">{{ sending ? '回复中' : '发送' }}</button></div>
+        <div class="composer-footer">
+          <small>当前模型：{{ modelLabel }}。输入 @ 可引用面经，输入 / 可调用 Skill；每条消息都会保存，并按发送顺序回复。</small>
+          <div class="composer-submit-tools">
+            <CareerContextMeter :usage="contextUsage" :loading="contextUsageLoading" class="composer-context-meter" />
+            <button class="send-button" type="button" :disabled="!selectedConversation || turnInputBlocked" @click="sendMessage">{{ sending ? '回复中' : '发送' }}</button>
+          </div>
+        </div>
       </footer>
     </section>
 
-    <CareerMemoryUsageDrawer
-      :open="memoryUsageDrawerOpen"
-      :loading="memoryUsageDrawerLoading"
-      :items="memoryUsageItems"
-      @close="memoryUsageDrawerOpen = false"
-    />
-
-    <div v-if="conversationContext" class="context-rail-slot">
+    <div v-if="conversationContext" id="career-context-panel" class="context-rail-slot">
+      <button
+        ref="contextDrawerClose"
+        class="compact-panel-close context-panel-close"
+        type="button"
+        aria-label="关闭职位信息"
+        @click="closeCompactPanel"
+      >×</button>
       <button
         class="context-rail-resizer"
         type="button"
@@ -2335,6 +2395,13 @@ onMounted(() => {
         @retry-assessment="retryJobAssessment"
       />
     </div>
+    <button
+      v-if="compactPanel"
+      class="career-panel-scrim"
+      type="button"
+      aria-label="关闭辅助面板"
+      @click="closeCompactPanel"
+    ></button>
   </section>
 
   <CareerContextSetupDialog
@@ -2490,6 +2557,8 @@ onMounted(() => {
 .career-workspace.history-collapsed { grid-template-columns:52px minmax(0,1fr); }
 .career-workspace.has-context-rail.history-collapsed { grid-template-columns:52px minmax(560px,1fr) var(--context-rail-width,620px); }
 .career-history-panel,.career-chat-panel { border:1px solid #e0e6d8; border-radius:20px; background:#fff; box-shadow:none; }
+.compact-panel-triggers,.compact-panel-close,.career-panel-scrim{display:none}
+.compact-panel-trigger,.compact-panel-close{min-width:40px;min-height:40px;border:1px solid #dbe5d2;border-radius:11px;background:#fff;color:#557044;font-size:12px;font-weight:850}
 .context-rail-slot{position:relative;height:100%;min-width:0;min-height:0;overflow:visible}.context-rail-slot>:deep(.context-rail){height:100%;max-height:100%}.context-rail-resizer{position:absolute;z-index:30;top:0;bottom:0;left:-13px;width:12px;border:0;background:transparent;padding:0;cursor:col-resize;touch-action:none}.context-rail-resizer:before{position:absolute;top:0;bottom:0;left:5px;width:2px;border-radius:999px;background:transparent;content:"";transition:background .15s ease,box-shadow .15s ease}.context-rail-resizer i{position:absolute;top:50%;left:1px;display:block;width:10px;height:42px;transform:translateY(-50%);border:1px solid var(--ui-line-strong);border-radius:999px;background:var(--ui-surface);box-shadow:0 3px 12px rgba(31,60,96,.1)}.context-rail-resizer i:after{position:absolute;top:50%;left:3px;width:2px;height:18px;transform:translateY(-50%);border-radius:999px;background:var(--ui-accent);content:""}.context-rail-resizer:hover:before,.context-rail-resizer:focus-visible:before,.resizing-context-rail .context-rail-resizer:before{background:var(--ui-accent);box-shadow:0 0 0 3px var(--ui-focus)}.context-rail-resizer:focus-visible{outline:0}
 .career-history-panel { display:flex; height:100%; min-height:0; flex-direction:column; gap:0; overflow:hidden; padding:14px; }
 .career-history-panel.collapsed{align-items:center;gap:9px;padding:10px 7px;border-radius:16px}.history-actions{display:grid;grid-template-columns:minmax(0,1fr) 34px;gap:7px;margin-bottom:14px}.history-collapse-button,.history-rail-button{display:grid;place-items:center;border:1px solid var(--ui-line);border-radius:10px;background:var(--ui-surface-soft);color:var(--ui-text-secondary);font-size:22px;font-weight:850;cursor:pointer}.history-collapse-button:hover,.history-rail-button:hover{border-color:var(--ui-accent);background:var(--ui-surface-active);color:var(--ui-accent-ink)}.history-rail-button{width:36px;height:36px}.history-rail-button.primary{border-color:var(--ui-accent);background:var(--ui-accent);color:#fff;font-size:18px}.history-rail-button:disabled{cursor:wait;opacity:.6}.history-rail-count{display:grid;min-width:25px;height:25px;place-items:center;border-radius:999px;background:var(--ui-surface-soft);color:var(--ui-text-muted);font-size:10px;font-weight:850}
@@ -2527,9 +2596,8 @@ onMounted(() => {
 .message-sending,.message-queued { opacity:.76; }.message-failed { border-color:#edcaca; background:#fff8f8 !important; }.message-failed small { color:#b35454; font-weight:800; }.agent-pending { width:min(560px,86%); color:var(--ui-text-secondary); }.stream-pending-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; color:var(--ui-text-secondary); }.stream-pending-heading .message-role { margin-bottom:0; }.stream-pending-heading::before { width:13px; height:13px; flex:0 0 auto; border:2px solid var(--ui-line-strong); border-top-color:var(--ui-accent); border-radius:50%; content:''; animation:career-thinking-spin .8s linear infinite; }.stream-pending-heading span { color:var(--ui-text-muted); font-size:11px; font-weight:800; }.stream-progress-list { display:grid; gap:7px; margin:11px 0 0; padding:0; list-style:none; }.stream-progress-item { display:flex; align-items:center; gap:8px; color:var(--ui-text-muted); font-size:12px; line-height:1.45; }.stream-progress-item i { width:7px; height:7px; flex:0 0 auto; border-radius:50%; background:var(--ui-line-strong); }.stream-progress-item.running { color:var(--ui-accent-ink); font-weight:750; }.stream-progress-item.running i { background:var(--ui-accent); animation:career-progress-pulse 1s ease-in-out infinite; }.stream-progress-item.completed i { background:var(--ui-success); }.stream-status,.streamed-answer { margin:10px 0 0 !important; }.streamed-answer { border-top:1px solid var(--ui-line); padding-top:10px; } @keyframes career-progress-pulse { 50% { transform:scale(.72); opacity:.55; } }
 .turn-queue-preview{display:grid;width:min(560px,86%);gap:7px;border:1px dashed var(--ui-line-strong);border-radius:12px;background:var(--ui-surface-soft);padding:10px 12px;color:var(--ui-text-secondary)}.turn-queue-preview>strong{font-size:11px}.turn-queue-preview article{display:grid;grid-template-columns:20px minmax(0,1fr) auto;align-items:start;gap:7px}.turn-queue-preview article span{display:grid;width:18px;height:18px;place-items:center;border-radius:50%;background:var(--ui-surface-active);color:var(--ui-accent-ink);font-size:10px;font-weight:850}.turn-queue-preview article p{overflow:hidden;margin:0;font-size:12px;line-height:1.45;text-overflow:ellipsis;white-space:nowrap}.turn-queue-preview article small{border-radius:999px;background:#fff;padding:2px 6px;color:var(--ui-text-muted);font-size:10px;font-weight:800}
 @keyframes career-thinking-spin { to { transform:rotate(360deg); } }
-.composer { border-top:1px solid #edf0e7; background:#fff; padding:12px 16px 14px; }.composer-toolbar { min-height:36px; flex-wrap:wrap; border-bottom:1px solid #edf0e7; padding-bottom:9px; }.input-tools,.session-tools { display:flex; min-width:0; flex-wrap:wrap; align-items:center; gap:7px; }.session-tools { margin-left:auto; justify-content:flex-end; }.job-url-row { display:grid; grid-template-columns:auto 1fr; align-items:center; gap:8px; margin:10px 0 9px; color:#738068; font-size:12px; font-weight:800; }.job-url-row input,.composer textarea { padding:10px 11px; }.composer textarea { display:block; min-height:68px; resize:vertical; }.composer-footer { margin-top:9px; }.input-tools { justify-content:flex-start; }.resume-input { display:none; }.chip-button.active { max-width:240px; overflow:hidden; background:#eaf4d4; color:#5a7d21; text-overflow:ellipsis; white-space:nowrap; }.file-clear-button { border-color:#f0d5d5; background:#fff8f8; color:#a65a5a; }.free-model-entry-button { border-style:dashed; background:#fff; color:#62812d; }.free-model-entry-button:hover { border-color:#9fbd67; background:#f5f9ed; }.model-select { width:auto; max-width:300px; padding:7px 9px; color:#65775a; font-size:12px; font-weight:700; }.send-button { min-width:88px; padding:9px 13px; }.composer-footer > small { color:#98a18e; font-size:11px; }
+.composer { border-top:1px solid #edf0e7; background:#fff; padding:12px 16px 14px; }.composer-toolbar { min-height:36px; flex-wrap:wrap; border-bottom:1px solid #edf0e7; padding-bottom:9px; }.input-tools,.session-tools { display:flex; min-width:0; flex-wrap:wrap; align-items:center; gap:7px; }.session-tools { margin-left:auto; justify-content:flex-end; }.job-url-row { display:grid; grid-template-columns:auto 1fr; align-items:center; gap:8px; margin:10px 0 9px; color:#738068; font-size:12px; font-weight:800; }.job-url-row input,.composer textarea { padding:10px 11px; }.composer textarea { display:block; min-height:68px; resize:vertical; }.composer-footer { margin-top:9px; }.composer-submit-tools { display:flex; flex:none; align-items:center; gap:10px; }.input-tools { justify-content:flex-start; }.resume-input { display:none; }.chip-button.active { max-width:240px; overflow:hidden; background:#eaf4d4; color:#5a7d21; text-overflow:ellipsis; white-space:nowrap; }.file-clear-button { border-color:#f0d5d5; background:#fff8f8; color:#a65a5a; }.free-model-entry-button { border-style:dashed; background:#fff; color:#62812d; }.free-model-entry-button:hover { border-color:#9fbd67; background:#f5f9ed; }.model-select { width:auto; max-width:300px; padding:7px 9px; color:#65775a; font-size:12px; font-weight:700; }.send-button { min-width:88px; padding:9px 13px; }.composer-footer > small { color:#98a18e; font-size:11px; }
 .turn-limit-notice { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-top:9px; border-radius:10px; background:#f7f4e6; padding:8px 10px; color:#75672d; font-size:12px; }.turn-limit-notice.blocked { background:#fff0ee; color:#9a4b40; }
-.memory-usage-link{display:block;margin-top:8px;border:0;background:transparent;color:#66823b;padding:0;font-size:11px;font-weight:700;cursor:pointer}
 .composer-toolbar{min-height:32px;flex-wrap:nowrap;gap:6px;border:1px solid var(--ui-line);border-radius:10px;background:var(--ui-surface-soft);padding:5px 6px}.composer-toolbar .input-tools,.composer-toolbar .session-tools{flex-wrap:nowrap;gap:5px}.composer-toolbar .input-tools{flex:1}.composer-toolbar :is(.chip-button,.quiet-button,.model-select){height:30px;border-color:var(--ui-line);border-radius:8px;background:var(--ui-surface);padding:5px 9px;color:var(--ui-text-secondary);font-size:11px}.composer-toolbar .active-context-chip{max-width:132px!important;flex:none;border-color:var(--ui-line-strong)!important;background:var(--ui-surface-active)!important;color:var(--ui-accent-ink)!important}.composer-toolbar .model-select{min-width:132px;max-width:230px;flex:1 1 164px}.composer-toolbar .free-model-entry-button{flex:none;border-style:solid;background:var(--ui-surface);color:var(--ui-accent-ink)}.composer-toolbar .model-manager-button{flex:none}.conversation-action-options button{min-width:0;padding-right:6px;padding-left:6px}
 .composer-context-meter{flex:none}
 @media(max-width:640px){.composer-toolbar{flex-wrap:wrap}.composer-toolbar .input-tools,.composer-toolbar .session-tools{width:100%;flex-wrap:wrap}.composer-toolbar .model-select{max-width:100%;flex:1 1 150px}}
@@ -2564,8 +2632,7 @@ onMounted(() => {
 .free-directory-intro { display:flex; align-items:flex-start; justify-content:space-between; gap:24px; margin:18px 0 20px; border-bottom:1px solid #e7ecdf; padding-bottom:18px; }.free-directory-intro > div { max-width:690px; }.free-directory-intro span { color:#8aa34c; font-size:10px; font-weight:900; letter-spacing:.14em; }.free-directory-intro h3 { margin:5px 0 4px; font-size:20px; }.free-directory-intro p { margin:0; color:#778372; font-size:12px; line-height:1.65; }.free-directory-intro > strong { flex:0 0 auto; border-radius:999px; background:#eaf3d8; color:#66852d; padding:7px 10px; font-size:11px; }
 .free-provider-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; }.free-provider-card { display:flex; min-width:0; flex-direction:column; border:1px solid #dfe8d4; border-radius:18px; background:#fff; padding:16px; box-shadow:0 8px 24px rgba(65,82,50,.05); }.free-provider-card > header { display:grid; grid-template-columns:44px minmax(0,1fr) auto; align-items:center; gap:11px; }.free-provider-card > header strong,.free-provider-card > header small { display:block; }.free-provider-card > header strong { color:#31402e; font-size:14px; }.free-provider-card > header small { margin-top:3px; color:#839078; font-size:11px; }.catalog-readiness { border-radius:999px; background:#f4eee1; color:#9a7327; padding:5px 7px; font-size:10px; font-weight:850; }.catalog-readiness.ready { background:#eaf4d8; color:#5f8228; }.free-provider-card > p { min-height:44px; margin:13px 0 9px; color:#727f6c; font-size:12px; line-height:1.65; }.catalog-access-summary { margin-bottom:12px; border-left:3px solid #d9b86c; border-radius:0 9px 9px 0; background:#fff9eb; color:#866922; padding:8px 10px; font-size:11px; font-weight:800; line-height:1.5; }.catalog-access-summary.ready { border-left-color:#8dac4b; background:#f0f7e5; color:#5d7d28; }.free-model-template-list { display:grid; gap:8px; }.free-model-template { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:4px 10px; border:1px solid #e7ecdf; border-radius:12px; background:#fafcf7; padding:10px; }.free-model-template > div { min-width:0; }.free-model-template strong,.free-model-template code { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.free-model-template strong { color:#445340; font-size:12px; }.free-model-template code { margin-top:3px; color:#84917d; font-size:10px; }.free-model-template-meta { display:flex; align-items:center; gap:10px; }.free-model-template-meta small { color:#96a08f; font-size:10px; }.free-model-template-meta a { color:#557825; font-size:10px; font-weight:850; text-decoration:none; white-space:nowrap; }.free-model-template-meta a:hover { text-decoration:underline; }.free-model-template-meta a:focus-visible { border-radius:4px; outline:2px solid currentColor; outline-offset:2px; }.free-model-template button { grid-row:1 / 3; grid-column:2; align-self:center; border:1px solid #b9cf8e; border-radius:9px; background:#f0f7e3; color:#5d7d28; padding:7px 9px; font-size:11px; font-weight:850; }.free-provider-card > footer { display:flex; flex-wrap:wrap; gap:8px 14px; margin-top:auto; padding-top:14px; }.free-provider-card > footer a { color:#557825; font-size:11px; font-weight:850; text-decoration:none; }.free-provider-card > footer a:hover { text-decoration:underline; }
 .catalog-load-error { display:flex; align-items:center; justify-content:space-between; gap:14px; flex-wrap:wrap; }.catalog-load-error > div { min-width:0; flex:1 1 420px; }.catalog-load-error span { display:block; }.catalog-load-error button { flex:0 0 auto; background:#fff; }
-/* 只维护电脑与手机两档；手机端保留一个页面级滚动面。 */
-@media (max-width:1500px) and (min-width:641px){.career-workspace{grid-template-columns:280px minmax(0,1fr);gap:10px}.career-workspace.has-context-rail{grid-template-columns:280px minmax(480px,1fr) min(var(--context-rail-width,620px),calc(100vw - 810px))}.career-workspace.history-collapsed{grid-template-columns:48px minmax(0,1fr)}.career-workspace.has-context-rail.history-collapsed{grid-template-columns:48px minmax(480px,1fr) min(var(--context-rail-width,620px),calc(100vw - 578px))}.career-history-panel{padding:11px}.career-history-panel.collapsed{padding:8px 5px}.chat-header{padding-right:14px;padding-left:14px}.message-list{padding-right:14px;padding-left:14px}}
+/* 业务区域跟随主内容容器，而不是跟随物理屏幕或浏览器缩放值。 */
 @media (max-width:640px) { .career-workspace,.career-workspace.history-collapsed,.career-workspace.has-context-rail.history-collapsed { height:auto; min-height:calc(100dvh - 92px); grid-template-columns:1fr; grid-template-rows:auto auto auto; align-content:start; gap:10px; overflow:visible; }.career-chat-panel { height:auto; min-height:520px; overflow:visible; }.chat-header { min-height:60px; align-items:flex-start; flex-direction:column; padding:12px 14px; }.chat-material-actions{width:100%}.chat-material-button{min-width:0;flex:1}.message-list { min-height:270px; flex:none; overflow:visible; padding:14px; }.composer { position:sticky; z-index:5; bottom:0; padding:10px 12px max(12px, env(safe-area-inset-bottom)); box-shadow:0 -10px 22px rgba(47,62,37,.08); }.composer-toolbar,.composer-footer { align-items:flex-start; flex-direction:column; }.session-tools { margin-left:0; }.career-history-panel { height:auto; max-height:none; overflow:visible; }.career-history-panel.collapsed{height:auto;flex-direction:row;justify-content:flex-start;padding:8px}.conversation-list { grid-template-columns:1fr; max-height:200px; flex:none; overflow:auto; }.model-settings,.model-form,.provider-picker-grid,.provider-picker-grid-expanded { grid-template-columns:1fr; }.message,.agent-message { max-width:94%; }.model-select { max-width:100%; }.send-button { align-self:stretch; min-height:44px; }.career-error-toast { width:calc(100vw - 28px); gap:12px; padding:17px; }.career-error-toast strong { font-size:16px; }.career-error-toast p { font-size:15px; }.model-dialog-backdrop { align-items:end; padding:0; }.model-dialog { max-height:90dvh; border-radius:22px 22px 0 0; }.model-dialog-header,.model-dialog-body,.model-dialog-footer { padding-right:18px; padding-left:18px; }.connection-toolbar,.connection-card { align-items:flex-start; }.connection-toolbar { flex-direction:column; }.connection-toolbar-actions { width:100%; justify-content:stretch; }.connection-toolbar-actions button { flex:1; }.connection-card { grid-template-columns:18px 38px minmax(0,1fr); }.connection-meta { grid-column:3; justify-items:start; }.connection-form-grid,.capability-fieldset { grid-template-columns:1fr; }.dialog-primary-button,.dialog-secondary-button { min-height:44px; }.free-directory-intro { align-items:flex-start; flex-direction:column; gap:10px; }.free-provider-grid { grid-template-columns:1fr; }.free-provider-card { padding:14px; }.free-provider-card > header { grid-template-columns:40px minmax(0,1fr); }.free-provider-card > header .catalog-readiness { grid-column:2; justify-self:start; }.free-provider-card > p { min-height:0; }.free-model-template { grid-template-columns:1fr; }.free-model-template button { grid-row:auto; grid-column:auto; min-height:42px; }.free-provider-card > footer a { min-height:36px; display:inline-flex; align-items:center; } }
 
 @media (max-width:640px) {
@@ -2646,6 +2713,197 @@ onMounted(() => {
 
   .composer textarea {
     min-height:56px;
+  }
+}
+
+@container app-main (max-width:1239px) {
+  .career-workspace,
+  .career-workspace.has-context-rail {
+    grid-template-columns:280px minmax(0,1fr);
+    gap:10px;
+  }
+
+  .career-workspace.history-collapsed,
+  .career-workspace.has-context-rail.history-collapsed {
+    grid-template-columns:48px minmax(0,1fr);
+  }
+
+  .career-history-panel {
+    padding:11px;
+  }
+
+  .career-history-panel.collapsed {
+    padding:8px 5px;
+  }
+
+  .chat-header {
+    gap:10px;
+    padding-right:14px;
+    padding-left:14px;
+  }
+
+  .message-list {
+    padding-right:14px;
+    padding-left:14px;
+  }
+
+  .compact-panel-triggers {
+    display:flex;
+    flex:0 0 auto;
+    gap:8px;
+    margin-left:auto;
+  }
+
+  .compact-panel-trigger.history-trigger {
+    display:none;
+  }
+
+  .context-rail-slot {
+    position:fixed;
+    z-index:930;
+    top:12px;
+    right:12px;
+    bottom:12px;
+    width:min(420px,calc(100vw - 24px));
+    height:auto;
+    overflow:visible;
+    border-radius:20px;
+    background:#fff;
+    box-shadow:0 24px 72px rgba(25,44,20,.24);
+    transform:translateX(calc(100% + 28px));
+    transition:transform .2s ease;
+  }
+
+  .compact-context-open .context-rail-slot {
+    transform:translateX(0);
+  }
+
+  .context-rail-resizer {
+    display:none;
+  }
+
+  .compact-panel-close.context-panel-close {
+    position:absolute;
+    z-index:40;
+    top:10px;
+    right:10px;
+    display:grid;
+    place-items:center;
+    font-size:22px;
+  }
+
+  .career-panel-scrim {
+    position:fixed;
+    z-index:920;
+    inset:0;
+    display:block;
+    border:0;
+    background:rgba(18,35,18,.3);
+    cursor:default;
+  }
+}
+
+@container app-main (max-width:819px) {
+  .career-workspace,
+  .career-workspace.has-context-rail,
+  .career-workspace.history-collapsed,
+  .career-workspace.has-context-rail.history-collapsed {
+    height:calc(100dvh - 92px);
+    min-height:400px;
+    grid-template-columns:minmax(0,1fr);
+    grid-template-rows:minmax(0,1fr);
+    gap:0;
+    overflow:hidden;
+  }
+
+  .career-chat-panel {
+    height:100%;
+    min-height:0;
+    grid-row:1;
+    grid-column:1;
+    overflow:hidden;
+  }
+
+  .career-history-panel {
+    position:fixed;
+    z-index:940;
+    top:12px;
+    bottom:12px;
+    left:12px;
+    display:flex;
+    width:min(360px,calc(100vw - 24px));
+    height:auto;
+    max-height:none;
+    flex-direction:column;
+    overflow:hidden;
+    padding:16px;
+    box-shadow:0 24px 72px rgba(25,44,20,.24);
+    transform:translateX(calc(-100% - 28px));
+    transition:transform .2s ease;
+  }
+
+  .compact-history-open .career-history-panel {
+    transform:translateX(0);
+  }
+
+  .compact-panel-close:not(.context-panel-close) {
+    position:absolute;
+    z-index:10;
+    top:10px;
+    right:10px;
+    display:grid;
+    place-items:center;
+    font-size:22px;
+  }
+
+  .compact-panel-trigger.history-trigger {
+    display:block;
+  }
+
+  .conversation-list {
+    min-height:0;
+    max-height:none;
+    flex:1;
+    overflow:auto;
+  }
+
+  .chat-header {
+    min-height:60px;
+    align-items:center;
+    flex-direction:row;
+    flex-wrap:wrap;
+    padding:10px 12px;
+  }
+
+  .chat-header > div:first-child {
+    flex:1 1 180px;
+  }
+
+  .chat-material-actions {
+    width:100%;
+    overflow-x:auto;
+  }
+
+  .chat-material-button {
+    min-width:max-content;
+  }
+
+  .message-list {
+    min-height:0;
+    flex:1;
+    overflow:auto;
+  }
+
+  .composer {
+    position:relative;
+    bottom:auto;
+  }
+}
+
+@media (prefers-reduced-motion:reduce) {
+  .career-history-panel,
+  .context-rail-slot {
+    transition:none;
   }
 }
 </style>

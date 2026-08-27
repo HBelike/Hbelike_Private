@@ -71,6 +71,11 @@ test('interview master view recognizes its single-task route', () => {
   assert.equal(isInterviewMasterPath('/career'), false)
 })
 
+test('interview master view explains the supported desktop browsers', () => {
+  assert.match(interviewMasterPage, /Chrome、Edge 或 Firefox/)
+  assert.doesNotMatch(interviewMasterPage, /Chrome 电脑声音实时辅助/)
+})
+
 test('interview master view formats duration and Qwen estimate', () => {
   assert.equal(formatDuration(125), '02:05')
   assert.equal(estimateAsrCost(3600, 1), 1.188)

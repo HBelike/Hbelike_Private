@@ -8,6 +8,11 @@ import socket
 import httpx
 import pytest
 
+from src.career_assistant.interview_library.collection import InterviewEvidenceAnalysis
+from src.career_assistant.interview_library.public_web_collection import (
+    PublicWebCollectionCoordinator,
+)
+
 from src.career_assistant.interview_library.public_web import (
     FirecrawlClient,
     FirecrawlRequestError,
@@ -208,3 +213,61 @@ def test_firecrawl_error_classification(
 def test_infer_public_platform_uses_known_label_or_hostname() -> None:
     assert infer_public_platform("https://www.nowcoder.com/discuss/1") == "牛客"
     assert infer_public_platform("https://interview.example.com/a") == "interview.example.com"
+
+
+def test_pending_model_uses_strict_deterministic_interview_evidence() -> None:
+    pending = InterviewEvidenceAnalysis(
+        is_valid_interview=None,
+        confidence=1.0,
+        company_name="字节跳动",
+        role_name="AI Agent",
+        interview_date=None,
+        interview_stage=None,
+        tags=("Agent",),
+        summary_text="自动识别到 3 个面试问题。",
+        questions=(),
+        normalized_markdown=None,
+        rejection_reason=None,
+        analyzer_status="pending_model",
+        analyzer_message="模型未配置",
+        model_label=None,
+    )
+    result = PublicWebCollectionCoordinator._apply_deterministic_fallback(
+        pending,
+        title="字节 AI Agent 二面面经",
+        markdown=(
+            "1. Agent 如何管理长期记忆？\n"
+            "2. 如何设计工具调用失败后的重试？\n"
+            "3. RAG 召回质量如何评估？"
+        ),
+    )
+
+    assert result.is_valid_interview is True
+    assert result.analyzer_status == "deterministic_fallback"
+    assert len(result.questions) == 3
+
+
+def test_deterministic_fallback_rejects_weak_or_promotional_content() -> None:
+    pending = InterviewEvidenceAnalysis(
+        is_valid_interview=None,
+        confidence=1.0,
+        company_name="字节跳动",
+        role_name="AI Agent",
+        interview_date=None,
+        interview_stage=None,
+        tags=(),
+        summary_text=None,
+        questions=(),
+        normalized_markdown=None,
+        rejection_reason=None,
+        analyzer_status="pending_model",
+        analyzer_message="模型未配置",
+        model_label=None,
+    )
+    result = PublicWebCollectionCoordinator._apply_deterministic_fallback(
+        pending,
+        title="AI Agent 学习资料",
+        markdown="限时领取课程。\n1. 添加客服领取资料。",
+    )
+
+    assert result.is_valid_interview is None

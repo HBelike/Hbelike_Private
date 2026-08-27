@@ -107,3 +107,29 @@ def test_confirmed_resume_fact_is_written_active_without_conversation_source() -
     params = database.connection.calls[-1][1]
     assert params["status"] == "active"
     assert params["source_conversation_id"] is None
+
+
+def test_new_resume_version_supersedes_active_memories_from_same_named_resume() -> None:
+    profile_id = uuid4()
+    job = CareerMemoryJobRecord(
+        id=uuid4(), organization_id=uuid4(), actor_id=uuid4(),
+        candidate_profile_id=profile_id, candidate_profile_version=3,
+        job_kind="resume_indexing", status="running", attempt_count=1,
+        created_at=datetime.now(UTC),
+    )
+    draft = CareerMemoryDraft(
+        memory_type=CareerMemoryType.WORK_EXPERIENCE,
+        normalized_value={"summary": "负责新版支付系统"},
+        display_text="负责新版支付系统",
+        source_kind="confirmed_resume",
+        candidate_profile_id=profile_id,
+        candidate_profile_version=3,
+    )
+    database = Database([None, memory_row(job, draft, "active")])
+
+    CareerMemoryRepository(database).apply_extracted_memories(job, (draft,))
+
+    supersede_sql, supersede_params = database.connection.calls[0]
+    assert "old_profile.display_name = current_profile.display_name" in supersede_sql
+    assert "memory.status = 'active'" in supersede_sql
+    assert supersede_params["candidate_profile_id"] == profile_id

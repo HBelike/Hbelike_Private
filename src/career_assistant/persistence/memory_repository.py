@@ -115,23 +115,29 @@ class CareerMemoryRepository:
         career_space_id: UUID | None = None,
         status: CareerMemoryStatus | None = None,
     ) -> tuple[CareerMemoryItemRecord, ...]:
+        conditions = [
+            "organization_id = :organization_id",
+            "actor_id = :actor_id",
+        ]
+        parameters: dict[str, object] = {
+            "organization_id": organization_id,
+            "actor_id": actor_id,
+        }
+        if career_space_id is not None:
+            conditions.append("career_space_id = :career_space_id")
+            parameters["career_space_id"] = career_space_id
+        if status is not None:
+            conditions.append("status = :status")
+            parameters["status"] = status.value
+
         with self._database.transaction() as connection:
             rows = connection.execute(
                 text(
-                    """
-                    SELECT * FROM career_assistant.career_memory_items
-                    WHERE organization_id = :organization_id AND actor_id = :actor_id
-                      AND (:career_space_id IS NULL OR career_space_id = :career_space_id)
-                      AND (:status IS NULL OR status = :status)
-                    ORDER BY updated_at DESC, id DESC
-                    """,
+                    "SELECT * FROM career_assistant.career_memory_items "
+                    f"WHERE {' AND '.join(conditions)} "
+                    "ORDER BY updated_at DESC, id DESC",
                 ),
-                {
-                    "organization_id": organization_id,
-                    "actor_id": actor_id,
-                    "career_space_id": career_space_id,
-                    "status": status.value if status is not None else None,
-                },
+                parameters,
             ).mappings().all()
         return tuple(self._memory_record(row) for row in rows)
 

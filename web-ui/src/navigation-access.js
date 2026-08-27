@@ -7,7 +7,6 @@ export function normalizeAppRoute(pathname, reviewRoutes = []) {
   if (!pathname || pathname === '/') return DEFAULT_APP_ROUTE
   if (AUTH_ROUTES.has(pathname)) return pathname
   if (pathname === '/career') return '/career'
-  if (pathname === '/career/memories') return '/career/memories'
   if (pathname === '/career/interview-master') return '/career/interview-master'
   if (pathname === '/resume-assistant' || pathname.startsWith('/resume-assistant/')) return '/resume-assistant'
   if (pathname === '/interviews/jobs') return '/interviews/jobs'

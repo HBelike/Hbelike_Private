@@ -21,20 +21,43 @@ import {
   retryTransientTabEdit,
   withGreetingRetryContext
 } from './boss-greeting.js'
+import {
+  buildXiaohongshuSearchUrl,
+  classifyXiaohongshuPageState,
+  normalizeXiaohongshuNote,
+  normalizeXiaohongshuSearchCards
+} from './xiaohongshu-data.js'
+import {
+  openXiaohongshuNoteFromSearchPage,
+  readXiaohongshuNotePage,
+  readXiaohongshuSearchPage,
+  restoreXiaohongshuSearchPage
+} from './xiaohongshu-page.js'
 
 const WEB_CHANNEL = 'find-job-job-library-web-v1'
 const GREETING_CAPABILITIES = Object.freeze([
   'retry_greeting_message',
   'greeting_submission_state',
-  'greeting_fire_and_continue'
+  'greeting_fire_and_continue',
+  'xiaohongshu_keyword_collection'
 ])
 const ALLOWED_APP_HOSTS = new Set(['127.0.0.1', 'localhost', 'xingxingtech.cn', 'www.xingxingtech.cn'])
+const APP_PAGE_PATTERNS = [
+  'http://127.0.0.1/*',
+  'http://localhost/*',
+  'https://xingxingtech.cn/*',
+  'https://www.xingxingtech.cn/*'
+]
 const BOSS_HOME = 'https://www.zhipin.com/web/geek/jobs?city=101020100&ka=open_joblist'
 const REQUEST_GAP_MS = 1000
 const SESSION_SETTLE_MS = 1500
+const XIAOHONGSHU_HOME = 'https://www.xiaohongshu.com/explore'
+const XIAOHONGSHU_DETAIL_GAP_MS = 5000
 let requestQueue = Promise.resolve()
 let lastRequestAt = 0
 let greetingTabId = null
+let lastXiaohongshuDetailAt = 0
+let xiaohongshuSearchContext = null
 
 function isAllowedSender(sender) {
   try {
@@ -88,6 +111,202 @@ async function getBossTab(initialUrl = BOSS_HOME) {
   const created = await chrome.tabs.create({ url: initialUrl, active: false })
   if (!created.id) throw new Error('无法打开 BOSS 直聘后台页面。')
   return waitForTabReady(created.id)
+}
+
+async function getXiaohongshuTab(initialUrl = XIAOHONGSHU_HOME) {
+  const tabs = await chrome.tabs.query({ url: 'https://www.xiaohongshu.com/*' })
+  const reusable = tabs
+    .filter((tab) => tab.id && !tab.active)
+    .sort((left, right) => Number(right.lastAccessed ?? 0) - Number(left.lastAccessed ?? 0))[0]
+  if (reusable?.id) {
+    return reusable.status === 'complete' ? reusable : waitForTabReady(reusable.id, 20000)
+  }
+  const created = await chrome.tabs.create({ url: initialUrl, active: false })
+  if (!created.id) throw new Error('无法打开小红书后台页面。')
+  return waitForTabReady(created.id, 20000)
+}
+
+async function navigateXiaohongshuTab(tabId, url) {
+  const parsed = new URL(url)
+  if (parsed.protocol !== 'https:' || !parsed.hostname.endsWith('xiaohongshu.com')) {
+    throw new Error('小红书页面地址不正确。')
+  }
+  const targetUrl = parsed.toString()
+  const current = await chrome.tabs.get(tabId)
+  if (current.status === 'complete' && current.url === targetUrl) return current
+  const ready = new Promise((resolve, reject) => {
+    const timeoutId = setTimeout(() => {
+      chrome.tabs.onUpdated.removeListener(listener)
+      reject(new Error('小红书页面加载超时，请检查网络后重试。'))
+    }, 25000)
+    const listener = (updatedTabId, changeInfo, tab) => {
+      if (updatedTabId !== tabId || changeInfo.status !== 'complete') return
+      clearTimeout(timeoutId)
+      chrome.tabs.onUpdated.removeListener(listener)
+      resolve(tab)
+    }
+    chrome.tabs.onUpdated.addListener(listener)
+  })
+  await retryTransientTabEdit(() => chrome.tabs.update(tabId, { url: targetUrl, active: false }))
+  return ready
+}
+
+async function runXiaohongshuPageReader(tabId, reader, args = []) {
+  const [{ result } = {}] = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: 'MAIN',
+    func: reader,
+    args
+  })
+  return result ?? {}
+}
+
+async function activateXiaohongshuTab(tabId) {
+  try {
+    const tab = await chrome.tabs.update(tabId, { active: true })
+    if (tab.windowId) await chrome.windows.update(tab.windowId, { focused: true })
+  } catch {
+    // 无法聚焦时仍返回原始可操作错误，不以窗口状态覆盖真正原因。
+  }
+}
+
+async function restoreXiaohongshuSearchContext(tabId, searchUrl) {
+  try {
+    const restored = await runXiaohongshuPageReader(
+      tabId,
+      restoreXiaohongshuSearchPage,
+      [searchUrl]
+    )
+    if (restored.restored) return
+  } catch {
+    // 完整页面导航会销毁注入上下文，随后使用普通搜索页导航恢复。
+  }
+  await navigateXiaohongshuTab(tabId, searchUrl)
+}
+
+async function getXiaohongshuSearchContext() {
+  const context = xiaohongshuSearchContext
+  if (!context?.tabId || !context.searchUrl) return null
+  try {
+    const tab = await chrome.tabs.get(context.tabId)
+    if (!tab.url?.startsWith('https://www.xiaohongshu.com/')) return null
+    if (tab.status !== 'complete') await waitForTabReady(tab.id, 20000)
+    return context
+  } catch {
+    return null
+  }
+}
+
+async function injectBridgeIntoOpenAppTabs() {
+  const tabs = await chrome.tabs.query({ url: APP_PAGE_PATTERNS })
+  await Promise.allSettled(
+    tabs.filter((tab) => tab.id).map((tab) => chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      files: ['content-script.js']
+    }))
+  )
+}
+
+async function handleXiaohongshuOperation(action, payload) {
+  if (action === 'search_xiaohongshu_notes') {
+    let searchUrl
+    try {
+      searchUrl = buildXiaohongshuSearchUrl(payload.keyword)
+    } catch (error) {
+      return { ok: false, error: { code: 'invalid_keyword', message: error.message } }
+    }
+    const limit = Math.max(5, Math.min(50, Number(payload.limit) || 20))
+    const tab = await getXiaohongshuTab(searchUrl)
+    await navigateXiaohongshuTab(tab.id, searchUrl)
+    const snapshot = await runXiaohongshuPageReader(tab.id, readXiaohongshuSearchPage, [limit])
+    const failure = classifyXiaohongshuPageState(snapshot)
+    if (failure) {
+      await activateXiaohongshuTab(tab.id)
+      return { ok: false, error: failure }
+    }
+    const cards = normalizeXiaohongshuSearchCards(snapshot.cards, limit)
+    if (!cards.length) {
+      return {
+        ok: false,
+        error: {
+          code: 'search_results_empty',
+          message: '小红书搜索页没有返回可读取的笔记卡片，请检查关键词或页面状态。'
+        }
+      }
+    }
+    xiaohongshuSearchContext = { tabId: tab.id, searchUrl }
+    return { ok: true, data: { keyword: String(payload.keyword).trim(), cards } }
+  }
+
+  const signedUrl = String(payload.signedUrl ?? '').trim()
+  const noteId = String(payload.noteId ?? '').trim()
+  let parsed
+  try {
+    parsed = new URL(signedUrl)
+  } catch {
+    return { ok: false, error: { code: 'invalid_note_url', message: '小红书笔记临时地址不正确。' } }
+  }
+  if (parsed.protocol !== 'https:' || !parsed.hostname.endsWith('xiaohongshu.com') || !noteId) {
+    return { ok: false, error: { code: 'invalid_note_url', message: '小红书笔记临时地址不正确。' } }
+  }
+  const context = await getXiaohongshuSearchContext()
+  if (!context) {
+    return {
+      ok: false,
+      error: {
+        code: 'search_context_lost',
+        message: '小红书搜索页上下文已失效，任务已暂停；请点击继续收集以重新搜索。',
+        stopBatch: true,
+        retryable: true
+      }
+    }
+  }
+  const gap = Date.now() - lastXiaohongshuDetailAt
+  if (gap < XIAOHONGSHU_DETAIL_GAP_MS) await wait(XIAOHONGSHU_DETAIL_GAP_MS - gap)
+  lastXiaohongshuDetailAt = Date.now()
+
+  const opened = await runXiaohongshuPageReader(
+    context.tabId,
+    openXiaohongshuNoteFromSearchPage,
+    [noteId]
+  )
+  if (!opened.clicked) {
+    return {
+      ok: false,
+      error: {
+        code: 'note_card_unavailable',
+        message: '搜索页中的这张卡片已不可用，已跳过并继续处理下一篇。',
+        stopBatch: false,
+        retryable: false
+      }
+    }
+  }
+
+  await wait(900)
+  const current = await chrome.tabs.get(context.tabId)
+  if (current.status !== 'complete') await waitForTabReady(context.tabId, 20000)
+  const snapshot = await runXiaohongshuPageReader(
+    context.tabId,
+    readXiaohongshuNotePage,
+    [noteId]
+  )
+  const failure = classifyXiaohongshuPageState(snapshot)
+  if (failure?.stopBatch) {
+    await activateXiaohongshuTab(context.tabId)
+    return { ok: false, error: failure }
+  }
+  try {
+    if (failure) return { ok: false, error: failure }
+    return { ok: true, data: normalizeXiaohongshuNote(snapshot, payload) }
+  } catch (error) {
+    return { ok: false, error: { code: 'note_parse_failed', message: error.message } }
+  } finally {
+    try {
+      await restoreXiaohongshuSearchContext(context.tabId, context.searchUrl)
+    } catch {
+      xiaohongshuSearchContext = null
+    }
+  }
 }
 
 function isBossSearchPage(url) {
@@ -683,6 +902,9 @@ async function handleMessage(message, sender) {
   if (['preflight_greeting', 'send_greeting', 'retry_greeting_message'].includes(message.action)) {
     return handleGreetingOperation(message.action, message.payload ?? {})
   }
+  if (['search_xiaohongshu_notes', 'get_xiaohongshu_note'].includes(message.action)) {
+    return handleXiaohongshuOperation(message.action, message.payload ?? {})
+  }
   if (!['list_cities', 'search_jobs', 'get_job_detail'].includes(message.action)) {
     return { ok: false, error: { code: 'unsupported_action', message: '职位库助手不支持该操作。' } }
   }
@@ -702,4 +924,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
     }))
   return true
+})
+
+chrome.runtime.onInstalled.addListener(() => {
+  void injectBridgeIntoOpenAppTabs()
 })

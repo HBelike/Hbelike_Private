@@ -51,8 +51,6 @@ from src.career_assistant.context_profiles import (
     extract_job_requirements,
 )
 from src.career_assistant.context_budget import ContextBudgetService
-from src.career_assistant.career_memory_extraction import CareerMemoryExtractionService
-from src.career_assistant.career_memory import CareerMemoryService
 from src.career_assistant.conversation_memory import ConversationMemoryService
 from src.career_assistant.document_parsing import DoclingServiceDocumentParser
 from src.career_assistant.cloud_vision import CloudVisionRouter
@@ -84,6 +82,10 @@ from src.career_assistant.interview_library.metadata import (
     InterviewMaterialMetadataExtractor,
 )
 from src.career_assistant.interview_library.repository import InterviewLibraryRepository
+from src.career_assistant.interview_library.public_web import (
+    FirecrawlClient,
+    load_firecrawl_settings,
+)
 from src.career_assistant.interview_library.retrieval import (
     InterviewRetrievalService,
 )
@@ -129,7 +131,6 @@ from src.career_assistant.persistence import (
     CareerJobAssessmentRepository,
     CareerModelProfileRepository,
     CareerModelUsageRepository,
-    CareerMemoryRepository,
     CareerTurnJobRepository,
     MessageRole,
     ModelCostTier,
@@ -189,7 +190,6 @@ class CareerAssistantReadServices:
     job_assessment_repository: CareerJobAssessmentRepository
     model_profile_repository: CareerModelProfileRepository
     model_gateway: ModelGateway
-    memory_repository: CareerMemoryRepository
 
 
 @dataclass
@@ -216,9 +216,6 @@ class CareerAssistantServices:
     compaction_repository: CareerCompactionRepository
     model_usage_repository: CareerModelUsageRepository
     conversation_memory_service: ConversationMemoryService
-    memory_repository: CareerMemoryRepository
-    memory_extraction_service: CareerMemoryExtractionService
-    memory_service: CareerMemoryService
     prompt_context_service: PromptContextService
     temporary_attachment_store: TemporaryAttachmentStore
     attachment_parser: AttachmentParser
@@ -254,7 +251,6 @@ class CreateConversationRequest(BaseModel):
     title: str = Field(min_length=1, max_length=160)
     candidate_profile_id: UUID | None = None
     target_role_profile_id: UUID | None = None
-    career_space_id: UUID | None = None
 
 
 class CreateCandidateProfileRequest(BaseModel):
@@ -424,6 +420,14 @@ class CreateXiaohongshuBrowserImportRequest(BaseModel):
     requested_limit: int = Field(default=20, ge=5, le=50)
 
 
+class CreatePublicWebImportRequest(BaseModel):
+    """创建一个只检索公开网页的关键词信息收集任务。"""
+
+    model_config = ConfigDict(extra="forbid")
+    keyword: str = Field(min_length=1, max_length=120)
+    requested_limit: int = Field(default=20, ge=5, le=50)
+
+
 class XiaohongshuBrowserDiscoveryRequest(BaseModel):
     """一张已经移除临时访问参数的搜索卡片。"""
 
@@ -452,6 +456,8 @@ class ProcessXiaohongshuBrowserNoteRequest(BaseModel):
     published_at: str | None = Field(default=None, max_length=80)
     tags: list[str] = Field(default_factory=list, max_length=30)
     image_urls: list[str] = Field(default_factory=list, max_length=20)
+    source_error_code: str | None = Field(default=None, max_length=80)
+    source_error_message: str | None = Field(default=None, max_length=1000)
 
     def to_domain(self) -> XiaohongshuBrowserNote:
         return XiaohongshuBrowserNote(
@@ -462,6 +468,8 @@ class ProcessXiaohongshuBrowserNoteRequest(BaseModel):
             published_at=self.published_at,
             author_name=self.author_name,
             tags=tuple(self.tags),
+            source_error_code=self.source_error_code,
+            source_error_message=self.source_error_message,
         )
 
 
@@ -537,9 +545,6 @@ def install_career_assistant_api(
     from src.career_assistant.web.admin_context_router import router as admin_context_router
 
     app.include_router(admin_context_router)
-    from src.career_assistant.web.memory_router import router as memory_router
-
-    app.include_router(memory_router)
     from src.career_assistant.live_interview.web import router as live_interview_router
 
     app.include_router(live_interview_router)
@@ -667,13 +672,6 @@ def get_career_services(request: Request) -> CareerAssistantServices:
             memory_worker_settings = load_career_memory_worker_settings()
             compaction_repository = CareerCompactionRepository(database)
             model_usage_repository = CareerModelUsageRepository(database)
-            memory_repository = read_services.memory_repository
-            memory_extraction_service = CareerMemoryExtractionService(
-                memory_repository,
-                model_connection_client,
-                model_usage_repository,
-            )
-            career_memory_service = CareerMemoryService(memory_repository)
             conversation_memory_service = ConversationMemoryService(
                 conversation_repository,
                 compaction_repository,
@@ -687,7 +685,6 @@ def get_career_services(request: Request) -> CareerAssistantServices:
                 conversation_memory_service,
                 ContextBudgetService(),
                 request.app.state.career_skill_tool_registry,
-                career_memory_service,
             )
             job_assessment_repository = read_services.job_assessment_repository
             job_assessment_service = CareerJobAssessmentService(
@@ -752,6 +749,11 @@ def get_career_services(request: Request) -> CareerAssistantServices:
                 model_connection_client=model_connection_client,
                 temporary_attachment_store=temporary_attachment_store,
                 attachment_parser=attachment_parser,
+                firecrawl_client=(
+                    FirecrawlClient(firecrawl_settings)
+                    if (firecrawl_settings := load_firecrawl_settings()) is not None
+                    else None
+                ),
             )
             services = CareerAssistantServices(
                 database=database,
@@ -784,8 +786,6 @@ def get_career_services(request: Request) -> CareerAssistantServices:
                     skill_tool_registry=request.app.state.career_skill_tool_registry,
                     prompt_context=prompt_context_service,
                     model_usage_repository=model_usage_repository,
-                    memory_extraction_service=memory_extraction_service,
-                    memory_service=career_memory_service,
                     max_persisted_response_characters=(
                         response_generation_settings.max_persisted_response_characters
                     ),
@@ -795,9 +795,6 @@ def get_career_services(request: Request) -> CareerAssistantServices:
                 compaction_repository=compaction_repository,
                 model_usage_repository=model_usage_repository,
                 conversation_memory_service=conversation_memory_service,
-                memory_repository=memory_repository,
-                memory_extraction_service=memory_extraction_service,
-                memory_service=career_memory_service,
                 prompt_context_service=prompt_context_service,
                 temporary_attachment_store=temporary_attachment_store,
                 attachment_parser=attachment_parser,
@@ -870,7 +867,6 @@ def get_career_read_services(
             context_repository = CareerContextRepository(database)
             job_assessment_repository = CareerJobAssessmentRepository(database)
             model_profile_repository = CareerModelProfileRepository(database)
-            memory_repository = CareerMemoryRepository(database)
             model_gateway = ModelGateway(
                 model_profile_repository,
                 load_model_gateway_settings(
@@ -892,7 +888,6 @@ def get_career_read_services(
             job_assessment_repository=job_assessment_repository,
             model_profile_repository=model_profile_repository,
             model_gateway=model_gateway,
-            memory_repository=memory_repository,
         )
         request.app.state.career_assistant_read_services = read_services
         return read_services
@@ -1100,15 +1095,6 @@ def create_candidate_profile(
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    try:
-        services.memory_extraction_service.enqueue_resume(
-            actor.organization_id,
-            actor.actor_id,
-            profile.id,
-            profile.version,
-        )
-    except Exception:
-        logger.exception("确认简历的长期记忆索引任务入队失败：profile_id=%s", profile.id)
     return _candidate_profile_payload(profile)
 
 
@@ -1217,19 +1203,11 @@ def create_conversation(
         services = None
         agent_loop = CareerAgentLoop(read_services.conversation_repository)
 
-    if request_body.career_space_id is None:
-        conversation = agent_loop.open_conversation(
-            actor.organization_id,
-            actor.actor_id,
-            request_body.title,
-        )
-    else:
-        conversation = agent_loop.open_conversation(
-            actor.organization_id,
-            actor.actor_id,
-            request_body.title,
-            request_body.career_space_id,
-        )
+    conversation = agent_loop.open_conversation(
+        actor.organization_id,
+        actor.actor_id,
+        request_body.title,
+    )
     context = None
     if services is not None:
         try:
@@ -1286,20 +1264,6 @@ def get_conversation(
         actor.actor_id,
         conversation_id,
     )
-    memory_repository = getattr(read_services, "memory_repository", None)
-    usage_counts = (
-        memory_repository.count_turn_usages(
-            actor.organization_id,
-            actor.actor_id,
-            tuple(
-                message.turn_id
-                for message in messages
-                if message.role is MessageRole.ASSISTANT and message.turn_id is not None
-            ),
-        )
-        if memory_repository is not None
-        else {}
-    )
     count_successful_turns = getattr(
         read_services.conversation_repository,
         "count_successful_turns",
@@ -1337,10 +1301,7 @@ def get_conversation(
     return {
         "conversation": _conversation_payload(conversation),
         "messages": [
-            {
-                **_message_payload(item),
-                "memory_usage_count": usage_counts.get(item.turn_id, 0),
-            }
+            _message_payload(item)
             for item in messages
         ],
         "last_model_selection": _model_selection_payload(last_model_selection),
@@ -1447,21 +1408,18 @@ def rename_conversation(
 def delete_conversation(
     conversation_id: UUID,
     request: Request,
-    forget_derived_memories: bool = Query(default=False),
 ) -> dict[str, object]:
     """永久删除当前用户会话及其服务端关联历史。"""
 
     actor = get_request_actor()
     services = get_career_services(request)
-    deleted, forgotten = services.memory_repository.delete_conversation_with_memory_choice(
-        actor.organization_id,
+    deleted = services.conversation_repository.delete_conversation_permanently(
         actor.actor_id,
         conversation_id,
-        forget_derived_memories=forget_derived_memories,
     )
     if not deleted:
         raise HTTPException(status_code=404, detail="会话不存在或无访问权限")
-    return {"deleted": True, "forgotten_memory_count": forgotten}
+    return {"deleted": True}
 
 
 @router.post("/conversations/{conversation_id}/archive")
@@ -1832,6 +1790,8 @@ def list_interview_collection_platforms(
                 "can_run_keyword_search": policy.can_run_keyword_search,
                 "connector_kind": policy.connector_kind.value,
                 "policy_decision": policy.policy_decision,
+                "ready": policy.ready,
+                "unavailable_reason": policy.unavailable_reason,
             }
             for policy in services.interview_collection_service.list_platform_policies()
         ]
@@ -1941,6 +1901,43 @@ def create_xiaohongshu_browser_import(
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"job": _collection_job_payload(job)}
+
+
+@router.post(
+    "/interview-library/public-web-imports",
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def create_public_web_interview_import(
+    request_body: CreatePublicWebImportRequest,
+    background_tasks: BackgroundTasks,
+    request: Request,
+) -> dict[str, object]:
+    """创建全网公开网页搜索任务，并在后台完成去重、解析与入库。"""
+
+    actor = get_request_actor()
+    services = get_career_services(request)
+    if not services.interview_collection_service.public_web_ready():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="未配置全网公开信息收集服务，请先设置 FIRECRAWL_API_KEY。",
+        )
+    try:
+        job = services.interview_collection_service.create_public_web_import_job(
+            actor.organization_id,
+            keyword=request_body.keyword,
+            requested_limit=request_body.requested_limit,
+        )
+    except CollectionOperationError as exc:
+        raise HTTPException(status_code=422, detail=exc.message) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    background_tasks.add_task(
+        services.interview_collection_service.run_public_web_import,
+        actor.organization_id,
+        job.id,
+    )
     return {"job": _collection_job_payload(job)}
 
 
@@ -2187,7 +2184,11 @@ def get_interview_experience(
     )
     if experience is None:
         raise HTTPException(status_code=404, detail="面经不存在或无访问权限")
-    return _interview_experience_payload(experience)
+    sources = services.interview_library_repository.list_experience_sources(
+        actor.organization_id,
+        experience_id,
+    )
+    return _interview_experience_payload(experience, sources=sources)
 
 
 @router.post(
@@ -3467,7 +3468,7 @@ def _collection_candidate_payload(candidate) -> dict[str, object]:
     }
 
 
-def _interview_experience_payload(experience) -> dict[str, object]:
+def _interview_experience_payload(experience, *, sources=()) -> dict[str, object]:
     """将面经领域记录转换为稳定的前端 JSON，不返回检索向量。"""
 
     return {
@@ -3496,6 +3497,19 @@ def _interview_experience_payload(experience) -> dict[str, object]:
         ),
         "created_at": experience.created_at.isoformat(),
         "updated_at": experience.updated_at.isoformat(),
+        "sources": [
+            {
+                "id": str(source.id),
+                "canonical_url": source.canonical_url,
+                "source_url": source.source_url,
+                "source_platform": source.source_platform,
+                "is_primary": source.is_primary,
+                "discovery_keywords": list(source.discovery_keywords),
+                "first_seen_at": source.first_seen_at.isoformat(),
+                "last_seen_at": source.last_seen_at.isoformat(),
+            }
+            for source in sources
+        ],
     }
 
 
@@ -3622,7 +3636,6 @@ def _conversation_payload(conversation) -> dict[str, object]:
         "id": str(conversation.id),
         "title": conversation.title,
         "status": conversation.status,
-        "career_space_id": str(conversation.career_space_id) if conversation.career_space_id else None,
         "created_at": conversation.created_at.isoformat(),
         "updated_at": conversation.updated_at.isoformat(),
         "archived_at": conversation.archived_at.isoformat() if conversation.archived_at else None,

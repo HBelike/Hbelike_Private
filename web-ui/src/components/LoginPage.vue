@@ -23,12 +23,20 @@ const errorMessage = ref('')
 const successMessage = ref('')
 const requiresCliBootstrap = computed(() => requiresBootstrap.value && cliBootstrapOnly.value)
 
+const careerCapabilities = [
+  { label: '简历分析', number: '01', icon: 'resume' },
+  { label: '真实岗位获取', number: '02', icon: 'job' },
+  { label: '岗位匹配度分析', number: '03', icon: 'match' },
+  { label: '智能一键打招呼', number: '04', icon: 'greeting' },
+  { label: '实时面试助手', number: '05', icon: 'interview' }
+]
+
 const panelTitle = computed(() => {
   if (requiresCliBootstrap.value) return '请先在服务器初始化管理员'
   if (requiresBootstrap.value) return '创建管理员账户'
   if (mode.value === 'register') return verificationStage.value ? '验证邮箱并创建账户' : '创建平台账户'
   if (mode.value === 'reset') return verificationStage.value ? '设置新密码' : '找回登录密码'
-  return '登录职业工作台'
+  return '登录求职助手'
 })
 
 const panelDescription = computed(() => {
@@ -36,9 +44,7 @@ const panelDescription = computed(() => {
   if (requiresBootstrap.value) return '首个账户将获得管理员权限。使用邮箱完成验证后，即可配置成员、角色与平台能力。'
   if (mode.value === 'register') return '注册后默认获得基础访问权限。高级管理功能需由管理员单独授权。'
   if (mode.value === 'reset') return '验证码仅发送到已验证邮箱，用于确认本次密码重置操作。'
-  return loginMethod.value === 'code'
-    ? '输入已注册邮箱，使用一次性验证码安全登录。'
-    : '输入注册邮箱和密码，继续访问你的职业工作台。'
+  return '继续你的求职进度。'
 })
 
 const primaryLabel = computed(() => {
@@ -406,30 +412,57 @@ function readableError(error, fallback) {
 
 <template>
   <main class="login-page">
-    <section class="login-orbit-panel" aria-label="平台介绍">
-      <div class="login-orbit-grid" aria-hidden="true"></div>
-      <div class="login-orbit-rings" aria-hidden="true"><i></i><i></i><i></i></div>
-      <div class="login-orbit-core" aria-hidden="true"><span>AI</span></div>
+    <section class="login-career-panel" aria-label="求职助手能力介绍">
+      <div class="login-career-grid" aria-hidden="true"></div>
 
-      <div class="login-brand"><div class="login-brand-mark">AI</div><span>职业智能工作台</span></div>
-      <div class="login-intro">
-        <p class="login-kicker">CAREER ORBIT SYSTEM</p>
-        <h1>让职业信息<br><em>形成可追踪的轨道</em></h1>
-        <p>面经沉淀、岗位解析、求职对话与内容生产，在一个可部署、可管理的平台内协同运行。</p>
+      <div class="login-career-brand">
+        <div class="login-brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none"><path d="M12 3v4m0 10v4M3 12h4m10 0h4m-4.2-4.8 2-2m-13.6 13.6 2-2m0-9.6-2-2m13.6 13.6-2-2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="m9.2 12 1.8 1.8 4-4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </div>
+        <span>求职助手</span>
       </div>
-      <div class="login-capabilities"><span>面经知识库</span><span>职业 Agent</span><span>内容工作流</span></div>
+
+      <div class="login-career-stage">
+        <div class="login-career-copy">
+          <p class="login-career-label">求职 Agent 为你持续推进</p>
+          <h1>从一份简历，<br>到拿下<em>更合适的机会</em></h1>
+          <p>求职 Agent 自动读懂简历、持续获取真实岗位、解释匹配度，并协助沟通与面试。</p>
+        </div>
+
+        <div class="login-agent-rail" aria-label="求职 Agent 执行流程">
+          <div class="login-agent-track" aria-hidden="true">
+            <span class="login-agent-signal"></span>
+            <span class="login-agent-orbit"></span>
+          </div>
+          <ol class="login-agent-stations">
+            <li v-for="item in careerCapabilities" :key="item.label" class="login-agent-station">
+              <span class="login-agent-node" aria-hidden="true">
+                <svg v-if="item.icon === 'resume'" viewBox="0 0 24 24" fill="none"><path d="M7 3h7l4 4v14H7zM14 3v5h5M10 12h5m-5 4h3" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                <svg v-else-if="item.icon === 'job'" viewBox="0 0 24 24" fill="none"><path d="M4 8h16v11H4zM9 8V5h6v3m-11 4c5 2 11 2 16 0" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                <svg v-else-if="item.icon === 'match'" viewBox="0 0 24 24" fill="none"><path d="M8 4H5a1 1 0 0 0-1 1v3m12-4h3a1 1 0 0 1 1 1v3M8 20H5a1 1 0 0 1-1-1v-3m12 4h3a1 1 0 0 0 1-1v-3m-11-4 2 2 4-4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                <svg v-else-if="item.icon === 'greeting'" viewBox="0 0 24 24" fill="none"><path d="M4 5h16v12H9l-5 4zM8 9h8m-8 4h5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                <svg v-else viewBox="0 0 24 24" fill="none"><path d="M4 13h2l2-6 3 11 3-12 2 7h4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              </span>
+              <span class="login-agent-number">{{ item.number }}</span>
+              <strong>{{ item.label }}</strong>
+            </li>
+          </ol>
+        </div>
+      </div>
     </section>
 
     <section class="login-form-panel">
       <div class="login-form-wrap">
-        <div class="login-mobile-brand" aria-label="职业智能工作台">
-          <div class="login-brand-mark">AI</div>
-          <span>职业智能工作台</span>
+        <div class="login-mobile-brand" aria-label="求职助手">
+          <div class="login-brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none"><path d="M12 3v4m0 10v4M3 12h4m10 0h4m-4.2-4.8 2-2m-13.6 13.6 2-2m0-9.6-2-2m13.6 13.6-2-2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="m9.2 12 1.8 1.8 4-4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </div>
+          <span>求职助手</span>
         </div>
 
         <div class="login-form-heading" :class="{ 'is-code-stage': isCodeStage }">
           <h2>{{ panelTitle }}</h2>
-          <p v-if="mode !== 'login' || requiresBootstrap">{{ panelDescription }}</p>
+          <p>{{ panelDescription }}</p>
         </div>
 
         <div v-if="loading" class="login-loading" role="status">

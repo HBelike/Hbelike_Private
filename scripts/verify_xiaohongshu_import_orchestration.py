@@ -218,6 +218,9 @@ class FakeRepository:
         merge_metadata: bool = True,
         extracted_markdown: str | None = None,
         content_hash: str | None = None,
+        error_code: str | None = None,
+        error_message: str | None = None,
+        clear_errors: bool = False,
         **_ignored: object,
     ) -> InterviewCollectionCandidateRecord:
         assert organization_id == ORGANIZATION_ID
@@ -234,6 +237,18 @@ class FakeRepository:
                 else current.extracted_markdown
             ),
             content_hash=content_hash if content_hash is not None else current.content_hash,
+            error_code=(
+                None
+                if clear_errors
+                else error_code if error_code is not None else current.error_code
+            ),
+            error_message=(
+                None
+                if clear_errors
+                else error_message
+                if error_message is not None
+                else current.error_message
+            ),
             metadata_json=metadata,
             updated_at=datetime.now(UTC),
         )

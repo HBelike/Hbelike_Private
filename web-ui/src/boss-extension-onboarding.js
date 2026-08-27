@@ -1,4 +1,4 @@
-export const BOSS_EXTENSION_VERSION = '0.2.7'
+export const BOSS_EXTENSION_VERSION = '0.2.9'
 export const BOSS_EXTENSION_DOWNLOAD_URL = `/downloads/find-job-boss-helper-v${BOSS_EXTENSION_VERSION}.zip`
 export const BOSS_EXTENSION_GUIDE_URL = '/boss-extension-guide.html'
 export const BOSS_EXTENSION_REQUIRED_CAPABILITIES = Object.freeze([

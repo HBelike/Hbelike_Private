@@ -46,15 +46,10 @@ class CareerAgentLoop:
         organization_id: UUID,
         actor_id: UUID,
         title: str,
-        career_space_id: UUID | None = None,
     ) -> ConversationRecord:
         """创建新会话；将来登录完成后由身份上下文提供组织与用户标识。"""
 
-        if career_space_id is None:
-            return self._repository.create_conversation(organization_id, actor_id, title)
-        return self._repository.create_conversation(
-            organization_id, actor_id, title, career_space_id
-        )
+        return self._repository.create_conversation(organization_id, actor_id, title)
 
     def resume_conversation(
         self,

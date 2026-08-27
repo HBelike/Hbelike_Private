@@ -16,17 +16,44 @@ function track(kind) {
   }
 }
 
-test('browser audio capture only accepts desktop Chrome capabilities', () => {
+test('browser audio capture accepts desktop Chrome, Edge and Firefox capabilities', () => {
   const mediaDevices = { getDisplayMedia() {}, getUserMedia() {} }
-  assert.equal(detectBrowserInterviewSupport({
-    userAgent: 'Mozilla/5.0 Firefox/140', mediaDevices, AudioContextImpl: class {}, WebSocketImpl: class {}
-  }).supported, false)
   assert.equal(detectBrowserInterviewSupport({
     userAgent: 'Mozilla/5.0 Windows NT 10.0 Chrome/140.0 Safari/537.36',
     mediaDevices,
     AudioContextImpl: class {},
     WebSocketImpl: class {}
   }).supported, true)
+  assert.equal(detectBrowserInterviewSupport({
+    userAgent: 'Mozilla/5.0 Windows NT 10.0 Chrome/140.0 Safari/537.36 Edg/140.0',
+    mediaDevices,
+    AudioContextImpl: class {},
+    WebSocketImpl: class {}
+  }).supported, true)
+  assert.equal(detectBrowserInterviewSupport({
+    userAgent: 'Mozilla/5.0 Windows NT 10.0 Firefox/140.0',
+    mediaDevices,
+    AudioContextImpl: class {},
+    WebSocketImpl: class {}
+  }).supported, true)
+  assert.equal(detectBrowserInterviewSupport({
+    userAgent: 'Mozilla/5.0 Windows NT 10.0 Chrome/140.0 Safari/537.36 OPR/120.0',
+    mediaDevices,
+    AudioContextImpl: class {},
+    WebSocketImpl: class {}
+  }).supported, false)
+  assert.equal(detectBrowserInterviewSupport({
+    userAgent: 'Mozilla/5.0 Macintosh Intel Mac OS X 10_15_7 Version/18.6 Safari/605.1.15',
+    mediaDevices,
+    AudioContextImpl: class {},
+    WebSocketImpl: class {}
+  }).supported, false)
+  assert.equal(detectBrowserInterviewSupport({
+    userAgent: 'Mozilla/5.0 Linux Android 16 Mobile Chrome/140.0 Safari/537.36',
+    mediaDevices,
+    AudioContextImpl: class {},
+    WebSocketImpl: class {}
+  }).supported, false)
 })
 
 test('browser capability detection does not invoke the AudioContext prototype getter', () => {

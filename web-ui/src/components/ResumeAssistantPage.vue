@@ -16,6 +16,8 @@ const successMessage = ref('')
 const mode = ref('home')
 const detailRecord = ref(null)
 const rightPane = ref('suggestions')
+const workspacePane = ref('assistant')
+const historyPane = ref('optimized')
 const resumePreviewUrl = ref('')
 
 const filters = ref({ jobTitle: '', startDate: '', endDate: '' })
@@ -102,6 +104,7 @@ function resetWorkspace() {
   selectedSuggestionIds.value = []
   optimizedMarkdown.value = ''
   rightPane.value = 'suggestions'
+  workspacePane.value = 'assistant'
   const fileInput = document.querySelector('#resume-file-input')
   if (fileInput) fileInput.value = ''
   const screenshotInput = document.querySelector('#resume-job-screenshots')
@@ -232,6 +235,7 @@ async function saveToHistory() {
     form.append('model_profile_id', analysis.value.model_profile_id)
     const record = await requestJson('/api/career/resume-optimizations', { method: 'POST', body: form })
     detailRecord.value = record
+    historyPane.value = 'optimized'
     mode.value = 'detail'
     window.history.replaceState({}, '', `/resume-assistant/${record.id}`)
     successMessage.value = '已保存到简历优化历史。'
@@ -247,6 +251,7 @@ async function openRecord(recordId, { replace = false } = {}) {
   loading.value = true
   try {
     detailRecord.value = await requestJson(`/api/career/resume-optimizations/${recordId}`)
+    historyPane.value = 'optimized'
     mode.value = 'detail'
     const method = replace ? 'replaceState' : 'pushState'
     window.history[method]({}, '', `/resume-assistant/${recordId}`)
@@ -315,7 +320,10 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <section class="resume-assistant">
+  <section
+    class="resume-assistant"
+    :class="[`show-workspace-${workspacePane}`, `show-history-${historyPane}`]"
+  >
     <div v-if="errorMessage" class="resume-alert error">{{ errorMessage }}</div>
     <div v-if="successMessage" class="resume-alert success">{{ successMessage }}</div>
 
@@ -421,8 +429,27 @@ onBeforeUnmount(() => {
         </div>
       </section>
 
+      <div v-if="analysis" class="resume-pane-switcher" role="tablist" aria-label="简历工作区">
+        <button
+          type="button"
+          role="tab"
+          aria-controls="resume-document-pane"
+          :aria-selected="workspacePane === 'document'"
+          :class="{ active: workspacePane === 'document' }"
+          @click="workspacePane = 'document'"
+        >原始简历</button>
+        <button
+          type="button"
+          role="tab"
+          aria-controls="resume-assistant-pane"
+          :aria-selected="workspacePane === 'assistant'"
+          :class="{ active: workspacePane === 'assistant' }"
+          @click="workspacePane = 'assistant'"
+        >优化助手</button>
+      </div>
+
       <section v-if="analysis" class="resume-work-canvas">
-        <article class="document-pane">
+        <article id="resume-document-pane" class="document-pane" role="tabpanel">
           <header>
             <div><span>原始简历</span><strong>{{ resumeFile?.name }}</strong></div>
           </header>
@@ -436,15 +463,15 @@ onBeforeUnmount(() => {
           </div>
         </article>
 
-        <article class="assistant-pane">
+        <article id="resume-assistant-pane" class="assistant-pane" role="tabpanel">
           <header>
             <div>
               <span>简历优化助手</span>
               <strong>{{ analysis.job_title }}</strong>
             </div>
-            <div v-if="optimizedMarkdown" class="pane-tabs">
-              <button type="button" :class="{ active: rightPane === 'suggestions' }" @click="rightPane = 'suggestions'">修改意见</button>
-              <button type="button" :class="{ active: rightPane === 'optimized' }" @click="rightPane = 'optimized'">优化简历</button>
+            <div v-if="optimizedMarkdown" class="pane-tabs" role="tablist" aria-label="优化内容">
+              <button type="button" role="tab" :aria-selected="rightPane === 'suggestions'" :class="{ active: rightPane === 'suggestions' }" @click="rightPane = 'suggestions'">修改意见</button>
+              <button type="button" role="tab" :aria-selected="rightPane === 'optimized'" :class="{ active: rightPane === 'optimized' }" @click="rightPane = 'optimized'">优化简历</button>
             </div>
           </header>
 
@@ -500,8 +527,26 @@ onBeforeUnmount(() => {
           <p>{{ detailRecord.creator_name }} · {{ formatDate(detailRecord.created_at) }} · {{ detailRecord.model_display_name }}</p>
         </div>
       </header>
+      <div class="resume-pane-switcher" role="tablist" aria-label="历史简历版本">
+        <button
+          type="button"
+          role="tab"
+          aria-controls="history-original-pane"
+          :aria-selected="historyPane === 'original'"
+          :class="{ active: historyPane === 'original' }"
+          @click="historyPane = 'original'"
+        >原始简历</button>
+        <button
+          type="button"
+          role="tab"
+          aria-controls="history-optimized-pane"
+          :aria-selected="historyPane === 'optimized'"
+          :class="{ active: historyPane === 'optimized' }"
+          @click="historyPane = 'optimized'"
+        >优化后简历</button>
+      </div>
       <section class="history-document-grid">
-        <article class="document-pane">
+        <article id="history-original-pane" class="document-pane history-original-pane" role="tabpanel">
           <header>
             <div><span>原始简历</span><strong>{{ detailRecord.source_filename }}</strong></div>
             <div class="document-actions">
@@ -511,7 +556,7 @@ onBeforeUnmount(() => {
           </header>
           <iframe class="pdf-preview" :src="openRecordDownload('original-preview')"></iframe>
         </article>
-        <article class="document-pane optimized-pane">
+        <article id="history-optimized-pane" class="document-pane optimized-pane history-optimized-pane" role="tabpanel">
           <header>
             <div><span>优化后简历</span><strong>导出文件</strong></div>
             <div class="document-actions">
@@ -527,7 +572,7 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.resume-assistant { min-height: 0; color: #1e2c21; }
+.resume-assistant { min-width: 0; min-height: 0; container: resume-assistant / inline-size; color: #1e2c21; }
 .resume-alert { margin: 0 0 14px; padding: 12px 16px; border-radius: 10px; font-size: 14px; }
 .resume-alert.error { color: #a13d37; background: #fff0ee; border: 1px solid #efcbc7; }
 .resume-alert.success { color: #4f711d; background: #f1f8df; border: 1px solid #d8e8b5; }
@@ -542,7 +587,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .primary-button:hover:not(:disabled) { background: #769b28; }
 .secondary-button, .back-button { color: #536548; background: #fff; border: 1px solid #dbe4d3; }
 .compact { min-height: 42px; }
-.resume-search { display: grid; grid-template-columns: minmax(320px, 1.6fr) minmax(180px, .7fr) minmax(180px, .7fr) auto; align-items: end; gap: 14px; padding: 18px; background: #fff; border: 1px solid #e1e8dc; border-radius: 14px; }
+.resume-search { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); align-items: end; gap: 14px; padding: 18px; background: #fff; border: 1px solid #e1e8dc; border-radius: 14px; }
 .resume-search label, .task-input-panel label { display: grid; gap: 7px; color: #42523f; font-size: 12px; font-weight: 700; }
 .resume-search input, .task-input-panel input, .task-input-panel select, .task-input-panel textarea { width: 100%; box-sizing: border-box; border: 1px solid #dce5d5; border-radius: 9px; background: #fbfcf9; color: #243324; outline: none; }
 .resume-search input, .task-input-panel input, .task-input-panel select { min-height: 42px; padding: 0 13px; }
@@ -552,7 +597,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .record-summary { display: flex; justify-content: space-between; align-items: baseline; margin: 24px 0 12px; }
 .record-summary strong { font-size: 19px; }
 .record-summary span { color: #8a9785; font-size: 13px; }
-.resume-card-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; }
+.resume-card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
 .resume-history-card { min-height: 190px; padding: 22px; text-align: left; background: #fff; border: 1px solid #dfe7d8; border-radius: 14px; color: #203020; transition: transform .18s ease, border-color .18s ease, box-shadow .18s ease; }
 .resume-history-card:hover { transform: translateY(-2px); border-color: #a7c36a; box-shadow: 0 12px 30px rgba(57, 81, 41, .08); }
 .resume-history-card > strong { display: block; min-height: 58px; font-size: 18px; line-height: 1.55; }
@@ -564,7 +609,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .empty-state strong { color: #40513c; font-size: 17px; }
 .pagination { display: flex; justify-content: center; align-items: center; gap: 14px; margin: 24px 0; }
 .pagination button { border: 1px solid #dbe4d3; border-radius: 8px; background: #fff; padding: 8px 14px; }
-.task-input-panel { display: grid; grid-template-columns: 1.1fr .9fr; gap: 16px 18px; padding: 20px; margin-bottom: 18px; background: #fff; border: 1px solid #dfe7d8; border-radius: 14px; }
+.task-input-panel { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px 18px; padding: 20px; margin-bottom: 18px; background: #fff; border: 1px solid #dfe7d8; border-radius: 14px; }
 .job-copy-field { grid-column: 1 / 2; }
 .screenshot-field { grid-column: 2 / 3; align-content: start; }
 .extra-prompt-field { grid-column: 1 / -1; }
@@ -572,7 +617,10 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .input-actions { grid-column: 1 / -1; display: flex; justify-content: flex-end; }
 .canvas-heading { justify-content: flex-start; }
 .canvas-heading > div { flex: 1; }
-.resume-work-canvas, .history-document-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); height: min(720px, calc(100vh - 310px)); min-height: 520px; gap: 16px; }
+.resume-pane-switcher { display:none; grid-template-columns:repeat(2,minmax(0,1fr)); gap:4px; margin:0 0 12px; border:1px solid #dfe7d8; border-radius:11px; background:#f1f4ed; padding:4px; }
+.resume-pane-switcher button { min-height:40px; border:0; border-radius:8px; background:transparent; color:#65745f; font-weight:750; }
+.resume-pane-switcher button.active { background:#fff; color:#425d19; box-shadow:0 2px 7px rgba(40,58,30,.1); }
+.resume-work-canvas, .history-document-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); height: clamp(520px, calc(100dvh - 310px), 720px); min-height: 0; gap: 16px; }
 .document-pane, .assistant-pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; background: #fff; border: 1px solid #dfe7d8; border-radius: 14px; }
 .document-pane > header, .assistant-pane > header { min-height: 66px; padding: 14px 16px; display: flex; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid #e7ece3; }
 .document-pane header div:first-child, .assistant-pane header > div:first-child { display: grid; gap: 3px; }
@@ -600,6 +648,103 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .optimized-preview { flex: 1; min-height: 0; padding: 22px; overflow: auto; background: #fcfdfa; }
 .optimized-preview pre { margin: 0; white-space: pre-wrap; word-break: break-word; font: 14px/1.8 ui-monospace, SFMono-Regular, Consolas, monospace; color: #334031; }
 .detail-heading { margin-bottom: 18px; }
-.history-document-grid { height: calc(100vh - 185px); }
+.history-document-grid { height: clamp(520px, calc(100dvh - 185px), 860px); }
 .document-actions { display: flex !important; grid-auto-flow: column; gap: 12px !important; }
+
+@container resume-assistant (max-width:1100px) {
+  .resume-search {
+    grid-template-columns:repeat(2,minmax(0,1fr));
+  }
+
+  .search-actions {
+    grid-column:1 / -1;
+    justify-content:flex-end;
+  }
+
+  .resume-work-canvas,
+  .history-document-grid {
+    grid-template-columns:minmax(0,.9fr) minmax(0,1.1fr);
+  }
+}
+
+@container resume-assistant (max-width:900px) {
+  .resume-page-heading,
+  .canvas-heading {
+    align-items:flex-start;
+    flex-direction:column;
+    gap:12px;
+  }
+
+  .resume-page-heading .primary-button,
+  .canvas-heading .back-button {
+    width:100%;
+  }
+
+  .resume-search,
+  .task-input-panel {
+    grid-template-columns:minmax(0,1fr);
+    padding:14px;
+  }
+
+  .resume-search > *,
+  .task-input-panel > *,
+  .job-copy-field,
+  .screenshot-field,
+  .extra-prompt-field,
+  .input-actions,
+  .search-actions {
+    min-width:0;
+    grid-column:1;
+  }
+
+  .search-actions,
+  .input-actions {
+    align-items:stretch;
+    flex-direction:column;
+  }
+
+  .search-actions button,
+  .input-actions button {
+    width:100%;
+  }
+
+  .resume-pane-switcher {
+    display:grid;
+  }
+
+  .resume-work-canvas,
+  .history-document-grid {
+    height:clamp(420px,calc(100dvh - 160px),720px);
+    grid-template-columns:minmax(0,1fr);
+    grid-template-rows:minmax(0,1fr);
+  }
+
+  .resume-work-canvas > .document-pane,
+  .resume-work-canvas > .assistant-pane,
+  .history-document-grid > .document-pane {
+    min-width:0;
+    grid-row:1;
+    grid-column:1;
+    display:none;
+  }
+
+  .show-workspace-document .resume-work-canvas > .document-pane,
+  .show-workspace-assistant .resume-work-canvas > .assistant-pane,
+  .show-history-original .history-document-grid > .history-original-pane,
+  .show-history-optimized .history-document-grid > .history-optimized-pane {
+    display:flex;
+  }
+
+  .document-pane > header,
+  .assistant-pane > header {
+    align-items:flex-start;
+    flex-direction:column;
+  }
+
+  .document-actions {
+    display:flex !important;
+    flex-wrap:wrap;
+    grid-auto-flow:row;
+  }
+}
 </style>

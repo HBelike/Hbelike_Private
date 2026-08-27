@@ -1,14 +1,14 @@
-# Chrome 浏览器面试大师
+# 浏览器面试大师
 
 ## 设计目标
 
-该模块把“面试大师”作为现有求职助手中的浏览器工具提供，不依赖 Electron、浏览器插件或会议平台 API。用户在 Chrome 中点击求职助手顶部的“面试大师”，系统打开一个固定命名的站内窗口；用户在 Chrome 强制显示的授权窗口中选择“整个屏幕”并开启“共享系统音频”后，页面统一捕获电脑最终播放的声音，实时转写面试官问题，并把问题直接交给现有回答模型流式生成统一中文的解题思路与参考回答。浏览器内会议也可直接选择对应标签页并共享标签页音频。
+该模块把“面试大师”作为现有求职助手中的浏览器工具提供，不依赖 Electron、浏览器插件或会议平台 API。用户在桌面版 Chrome、Edge 或 Firefox 中点击求职助手顶部的“面试大师”，系统打开一个固定命名的站内窗口；用户在浏览器强制显示的授权窗口中选择带声音的共享来源后，页面捕获电脑或标签页播放的声音，实时转写面试官问题，并把问题直接交给现有回答模型流式生成统一中文的解题思路与参考回答。
 
 默认只采集用户授权的电脑系统音频并固定识别为面试官，不区分腾讯会议、飞书、QQ、微信或其他播放来源。应试者麦克风是可选展示通道，不参与问题回答上下文。模块不采集摄像头、不读取简历、岗位或面经资料、不保存原始音频，也不实现隐藏采集、自动替用户发言或绕过浏览器授权。
 
 ## 技术取舍
 
-- 只支持桌面版 Chrome。系统音频使用标准 `getDisplayMedia({ audio: true, systemAudio: "include" })`，因此必须由用户手势触发并在 Chrome 原生选择器中选择“整个屏幕”、开启“共享系统音频”。网页不能绕过或代替这个授权步骤；这是浏览器安全边界，不是会议平台绑定。浏览器内会议仍可选择对应标签页。
+- 支持桌面版 Chrome、Edge 和 Firefox，继续拒绝 Safari、Opera 与移动端。采集使用标准 `getDisplayMedia({ audio: true, systemAudio: "include" })`，必须由用户手势触发；Chrome、Edge 可优先选择“整个屏幕”并开启系统音频，Firefox 使用其授权窗口实际提供的音频来源。页面取得流后还会验证 audio track，避免仅凭 UA 误报可用。网页不能绕过或代替授权步骤。
 - 不开发插件。入口与实时界面均属于现有 Vue SPA，路由为 `/career/interview-master`；采用固定命名浏览器窗口，重复点击优先聚焦同一窗口，弹窗被拦截时降级为普通新标签页。
 - `AudioWorklet` 将音轨转为 24 kHz 单声道 PCM16，并按 100 ms 合并发送，避免 10 ms 小帧造成过多 WebSocket 消息。
 - 浏览器通过同源 `wss://<domain>/api/career/live-interviews/{id}/stream` 连接 FastAPI。音频只从浏览器发往服务端，DashScope API Key 和回答模型凭据始终保留在服务端。
@@ -42,7 +42,7 @@
 - ASR：服务端环境变量 `DASHSCOPE_API_KEY`；默认模型 `qwen-audio-3.0-asr-flash-streaming`。
 - Caddy：`Permissions-Policy: camera=(), microphone=(self), geolocation=()`，只允许同源页面请求可选麦克风，继续禁止摄像头和定位。
 - Nginx 与 Vite：`/api/career/` 支持 WebSocket Upgrade，同时保留现有 SSE 行为。
-- 浏览器限制：生产环境必须使用 HTTPS；Chrome 不允许页面静默选择分享源。Windows 桌面 Chrome 优先引导“整个屏幕 + 共享系统音频”，把不同通话软件的输出统一视为电脑音频；若浏览器或系统不提供该开关，只能改用带声音的浏览器标签页，或回到原生 loopback 方案。
+- 浏览器限制：生产环境必须使用 HTTPS；浏览器不允许页面静默选择分享源。Windows 桌面 Chrome、Edge 优先引导“整个屏幕 + 共享系统音频”，Firefox 按原生授权窗口提供的音频来源选择；若浏览器或系统没有返回音频轨，只能改用带声音的其他共享来源、切换 Chrome/Edge，或回到原生 loopback 方案。
 
 ## 验证结果
 
@@ -56,10 +56,11 @@
 - 公网 WSS 已到达 FastAPI，并按设计拒绝未登录连接；生产 API 容器确认 ASR Key 已注入，未输出 Key 内容。
 - 准备页读取模型配置时展示浏览器检查、模型读取、完成准备三段进度和百分比；请求未完成前平滑推进但最多停在 92%，只有真实返回成功后才显示 100%。相关前端完整测试现为 `53 passed`，生产构建通过。
 - 2026-08-24 本地 8% 卡死问题已修复：Chrome 的 `audioWorklet` 是 `AudioContext` 实例 getter，旧检测从 prototype 读取会抛出 `Illegal invocation`，导致 `onMounted` 在配置请求前中断。检测现只验证 `AudioContext` 构造器，并保证即使能力检测异常也继续加载配置、显示可操作错误。本地 Vite 代理配置接口返回 200，ASR 为 ready，真实 Qwen 会话收到仅面试官通道的 `session.ready`；前端完整测试 `54 passed`，生产构建通过。本次仅本地验证，未部署生产。
-- 2026-08-24 电脑声音采集已从“标签页限定”修正为“系统音频优先”：请求显式使用 `displaySurface: "monitor"`、`monitorTypeSurfaces: "include"` 与 `systemAudio: "include"`，并允许切换共享表面。该配置只影响 Chrome 授权器的推荐与可用选项，不能跳过每次用户授权。本地 Vite 已提供新参数，旧的 `systemAudio: "exclude"` 不再存在；前端完整测试 `54 passed`，生产构建通过，未推送或部署生产。
+- 2026-08-24 电脑声音采集已从“标签页限定”修正为“系统音频优先”：请求显式使用 `displaySurface: "monitor"`、`monitorTypeSurfaces: "include"` 与 `systemAudio: "include"`，并允许切换共享表面。该配置只影响浏览器授权器的推荐与可用选项，不能跳过每次用户授权。本地 Vite 已提供新参数，旧的 `systemAudio: "exclude"` 不再存在；前端完整测试 `54 passed`，生产构建通过，未推送或部署生产。
 - 2026-08-24 实时转写侧栏固定为视口内独立滚动区，提供可见的细滚动条并默认自动跟随最新消息；用户手动上翻时暂停跟随，新消息到达后显示“X 条新消息 ↓”，点击即可回到底部。右侧回答区继续独立滚动。前端完整测试 `55 passed`，生产构建通过，仅本地验证。
 - 2026-08-24 增加结束面试后的可选面经归档：结束动作立即清理媒体资源，弹窗显示后端完整题数与前 5 题，公司和职位手填；“本次不保存”直接关闭。归档服务聚合暂停/恢复产生的多个会话，只读取 `original_question`，同公司、职位、日期执行追加去重，保存后可直接打开对应面经。后端完整测试 `197 passed`，前端完整测试 `59 passed`，Vite 构建通过；本地真实 API/数据库验证了首次 1 题入库、第二次归并为 2 题、同一面经 ID、重复题不重复且正文不含答案。未部署生产。
 - 2026-08-24 已将系统音频优先、转写侧栏滚动和结束面试归档发布到生产代码提交 `ad9df71`。发布前后端 `197 passed`、前端 `59 passed`、Vite 构建和生产 Compose 展开通过；线上 API、Web、PostgreSQL 均健康，归档预览接口匿名请求返回 401，生产 JS 包包含“保存到面经库”和“本次不保存”。同时修复 `career-agent-worker` 过期租约 SQL 的 `EXISTS` 括号错误，发布后 Worker 为 `running`、重启次数为 0。
+- 2026-08-27 浏览器能力门禁扩展到桌面版 Chrome、Edge 和 Firefox：修正 Edge UA 被 `Edg/` 显式排除的问题，Firefox 通过浏览器族与标准 API 双重检测后进入授权流程；Safari、Opera 和移动端仍不放行。授权结果没有 audio track 时在创建付费 ASR 会话前终止，并提示更换带声音的共享来源或 Chrome/Edge。前端完整测试 `167 passed`、实时面试后端测试 `16 passed`、Vite 生产构建通过；仅本地验证，未部署生产。
 
 ## 尚未伪报通过的边界
 

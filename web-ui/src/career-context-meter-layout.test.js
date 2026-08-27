@@ -2,12 +2,16 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 
-test('上下文余量圆环位于模型选择器旁并提供无障碍状态', async () => {
+test('上下文余量圆环位于发送按钮左侧并提供无障碍状态', async () => {
   const page = await readFile(new URL('./components/CareerAssistantPage.vue', import.meta.url), 'utf8')
   const meter = await readFile(new URL('./components/CareerContextMeter.vue', import.meta.url), 'utf8')
-  const meterIndex = page.indexOf('<CareerContextMeter')
   const modelIndex = page.indexOf('<select class="model-select"')
-  assert.ok(meterIndex >= 0 && meterIndex < modelIndex)
+  const submitToolsIndex = page.indexOf('<div class="composer-submit-tools">')
+  const meterIndex = page.indexOf('<CareerContextMeter')
+  const sendIndex = page.indexOf('<button class="send-button"')
+  assert.ok(modelIndex >= 0 && modelIndex < submitToolsIndex)
+  assert.ok(submitToolsIndex >= 0 && submitToolsIndex < meterIndex)
+  assert.ok(meterIndex >= 0 && meterIndex < sendIndex)
   assert.match(meter, /role="status"/)
   assert.match(meter, /stroke-dasharray/)
   assert.match(meter, /正在整理上下文|正在估算上下文/)

@@ -132,19 +132,6 @@ select:focus-visible {
   padding: 4px 7px;
 }
 
-.login-theme-switcher {
-  position: fixed;
-  z-index: 80;
-  top: 22px;
-  right: 24px;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  color: var(--ui-text-muted);
-  font-size: 12px;
-  font-weight: 700;
-}
-
 /* 蓝白主题：先统一壳层，再收敛业务页面内部的视觉语言。 */
 html[data-ui-theme="blue"] body {
   color: var(--ui-text);
@@ -1819,41 +1806,29 @@ html[data-ui-theme="blue"] body .collection-waiting-card strong {
   color: var(--ui-text-secondary);
 }
 
-/* 登录页在蓝白主题下移除深色舞台与多余装饰。 */
+/* 登录页以求职轨道为唯一视觉记忆点，认证区继续保持克制。 */
 html[data-ui-theme="blue"] .login-page {
   background: var(--ui-surface);
 }
 
-html[data-ui-theme="blue"] .login-orbit-panel {
+html[data-ui-theme="blue"] .login-career-panel {
   border-right: 1px solid var(--ui-line);
-  background: var(--ui-sidebar);
+  background:
+    radial-gradient(circle at 84% 40%, rgba(0, 100, 221, 0.14), transparent 30%),
+    linear-gradient(145deg, #f7faff 0%, var(--ui-sidebar) 62%, #f9fbff 100%);
   color: var(--ui-text);
 }
 
-html[data-ui-theme="blue"] .login-orbit-grid {
-  display: none;
+html[data-ui-theme="blue"] .login-career-grid {
+  opacity: 0.52;
+  background-image:
+    linear-gradient(rgba(71, 117, 190, 0.07) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(71, 117, 190, 0.07) 1px, transparent 1px);
 }
 
-html[data-ui-theme="blue"] .login-orbit-rings {
-  opacity: 0.42;
-}
-
-html[data-ui-theme="blue"] .login-orbit-rings i,
-html[data-ui-theme="blue"] .login-orbit-rings i:nth-child(2),
-html[data-ui-theme="blue"] .login-orbit-rings i:nth-child(3) {
-  border-color: rgba(0, 100, 221, 0.2);
-}
-
-html[data-ui-theme="blue"] .login-orbit-core {
-  border-color: var(--ui-line-strong);
-  border-radius: 18px;
-  background: var(--ui-accent);
-  box-shadow: 0 0 0 14px rgba(0, 100, 221, 0.06);
-  color: #ffffff;
-}
-
-html[data-ui-theme="blue"] .login-brand,
-html[data-ui-theme="blue"] .login-intro h1,
+html[data-ui-theme="blue"] .login-career-brand,
+html[data-ui-theme="blue"] .login-mobile-brand,
+html[data-ui-theme="blue"] .login-career-copy h1,
 html[data-ui-theme="blue"] .login-form-heading h2 {
   color: var(--ui-text);
 }
@@ -1864,25 +1839,62 @@ html[data-ui-theme="blue"] .login-brand-mark {
   color: #ffffff;
 }
 
-html[data-ui-theme="blue"] .login-kicker,
-html[data-ui-theme="blue"] .login-intro h1 em,
+html[data-ui-theme="blue"] .login-career-label,
+html[data-ui-theme="blue"] .login-career-copy h1 em,
 html[data-ui-theme="blue"] .login-label-row button,
 html[data-ui-theme="blue"] .login-switches button {
   color: var(--ui-accent-ink);
 }
 
-html[data-ui-theme="blue"] .login-intro > p:last-child,
+html[data-ui-theme="blue"] .login-career-label::before {
+  background: var(--ui-accent);
+}
+
+html[data-ui-theme="blue"] .login-career-copy > p:last-child,
 html[data-ui-theme="blue"] .login-form-heading > p:last-child,
 html[data-ui-theme="blue"] .login-form label > span,
 html[data-ui-theme="blue"] .login-form label small {
   color: var(--ui-text-muted);
 }
 
-html[data-ui-theme="blue"] .login-capabilities span {
+html[data-ui-theme="blue"] .login-agent-track {
+  background: var(--ui-line-strong);
+}
+
+html[data-ui-theme="blue"] .login-agent-signal {
+  background: linear-gradient(90deg, var(--ui-accent), #5ba3ff);
+  box-shadow: 0 0 13px rgba(0, 100, 221, 0.3);
+}
+
+html[data-ui-theme="blue"] .login-agent-orbit {
+  border-color: var(--ui-surface);
+  background: var(--ui-accent);
+  box-shadow: 0 0 0 4px rgba(0, 100, 221, 0.12), 0 0 17px rgba(0, 100, 221, 0.46);
+}
+
+html[data-ui-theme="blue"] .login-agent-station {
+  color: var(--ui-text-secondary);
+}
+
+html[data-ui-theme="blue"] .login-agent-number {
+  color: var(--ui-text-muted);
+}
+
+html[data-ui-theme="blue"] .login-agent-station strong {
+  color: var(--ui-text-secondary);
+}
+
+html[data-ui-theme="blue"] .login-agent-node {
   border-color: var(--ui-line-strong);
-  border-radius: 8px;
   background: var(--ui-surface);
   color: var(--ui-text-secondary);
+}
+
+html[data-ui-theme="blue"] .login-agent-station:first-child .login-agent-node {
+  border-color: var(--ui-accent);
+  background: var(--ui-accent);
+  box-shadow: 0 8px 20px rgba(0, 100, 221, 0.22);
+  color: #ffffff;
 }
 
 html[data-ui-theme="blue"] .login-form-panel {
@@ -1933,12 +1945,6 @@ html[data-ui-theme="blue"] .login-cli-bootstrap {
 }
 
 @media (max-width: 900px) {
-  .login-theme-switcher {
-    top: 14px;
-    right: 14px;
-  }
-
-  .login-theme-switcher > span,
   .theme-switcher.compact .theme-option span {
     display: none;
   }

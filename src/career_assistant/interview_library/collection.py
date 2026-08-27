@@ -38,6 +38,13 @@ from src.career_assistant.interview_library.models import (
     InterviewSourceType,
 )
 from src.career_assistant.interview_library.repository import InterviewLibraryRepository
+from src.career_assistant.interview_library.public_web import (
+    FirecrawlClient,
+    PublicWebImageDownloader,
+)
+from src.career_assistant.interview_library.public_web_collection import (
+    PublicWebCollectionCoordinator,
+)
 from src.career_assistant.interview_library.service import (
     InterviewExperienceDraft,
     InterviewLibraryService,
@@ -103,6 +110,8 @@ class PlatformCollectionPolicy:
     can_run_keyword_search: bool
     connector_kind: CollectionConnectorKind
     policy_decision: str
+    ready: bool = True
+    unavailable_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -113,6 +122,52 @@ class ExtractedPublicArticle:
     canonical_url: str
     title: str | None
     markdown_content: str
+
+
+@dataclass(frozen=True)
+class XiaohongshuBrowserDiscovery:
+    """浏览器搜索页返回的无会话卡片信息。"""
+
+    note_id: str
+    title: str | None = None
+    author_name: str | None = None
+    liked_count: str | None = None
+
+
+@dataclass(frozen=True)
+class XiaohongshuBrowserNote:
+    """浏览器详情页提交给后端的文本与临时图片引用。"""
+
+    note_id: str
+    title: str | None
+    body_text: str
+    image_urls: tuple[str, ...]
+    published_at: str | None = None
+    author_name: str | None = None
+    tags: tuple[str, ...] = ()
+    body_source: str = "browser_page"
+    source_error_code: str | None = None
+    source_error_message: str | None = None
+
+    @property
+    def canonical_url(self) -> str:
+        return f"https://www.xiaohongshu.com/explore/{self.note_id}"
+
+    @property
+    def source_url(self) -> str:
+        # 浏览器使用的临时签名 URL 不能越过 Web UI 边界。
+        return self.canonical_url
+
+    @property
+    def markdown_content(self) -> str:
+        sections: list[str] = []
+        if self.title:
+            sections.append(f"# {self.title}")
+        if self.body_text:
+            sections.append(self.body_text)
+        if self.tags:
+            sections.append(" ".join(f"#{tag}" for tag in self.tags))
+        return "\n\n".join(sections).strip()
 
 
 class _ArticleTextParser(HTMLParser):
@@ -670,10 +725,10 @@ class InterviewCollectionService:
             key="xiaohongshu",
             label="小红书",
             can_run_keyword_search=True,
-            connector_kind=CollectionConnectorKind.URL_IMPORT,
+            connector_kind=CollectionConnectorKind.USER_AUTHORIZED_BROWSER,
             policy_decision=(
-                "根据关键词读取小红书公开搜索页中实际暴露的笔记；"
-                "不保存账号、Cookie，不执行登录、验证码绕过或私有接口调用。"
+                "通过用户已授权的浏览器页面读取关键词卡片和公开笔记；"
+                "不导出账号、Cookie 或临时访问参数，不绕过登录、验证码或访问限制。"
             ),
         ),
         "nowcoder": PlatformCollectionPolicy(
@@ -697,6 +752,13 @@ class InterviewCollectionService:
             connector_kind=CollectionConnectorKind.URL_IMPORT,
             policy_decision="只读取用户明确提交的公开 HTTPS 页面，不执行登录、验证码绕过或会话复用。",
         ),
+        "public_web": PlatformCollectionPolicy(
+            key="public_web",
+            label="全网公开网页",
+            can_run_keyword_search=True,
+            connector_kind=CollectionConnectorKind.PUBLIC_API,
+            policy_decision=PublicWebCollectionCoordinator.POLICY_DECISION,
+        ),
     }
 
     def __init__(
@@ -711,6 +773,8 @@ class InterviewCollectionService:
         attachment_parser: AttachmentParser | None = None,
         evidence_analyzer: InterviewEvidenceAnalyzer | None = None,
         xiaohongshu_source_adapter: Any | None = None,
+        firecrawl_client: FirecrawlClient | None = None,
+        public_image_downloader: PublicWebImageDownloader | None = None,
     ) -> None:
         self._repository = repository
         self._library_service = library_service
@@ -720,6 +784,25 @@ class InterviewCollectionService:
         self._evidence_analyzer = evidence_analyzer or InterviewEvidenceAnalyzer(
             model_gateway,
             model_connection_client,
+        )
+        self._firecrawl_client = firecrawl_client
+        self._public_image_downloader = (
+            public_image_downloader
+            if public_image_downloader is not None
+            else PublicWebImageDownloader() if firecrawl_client is not None else None
+        )
+        self._public_web_coordinator = (
+            PublicWebCollectionCoordinator(
+                repository,
+                library_service,
+                firecrawl_client,
+                self._evidence_analyzer,
+                temporary_attachment_store=temporary_attachment_store,
+                attachment_parser=attachment_parser,
+                image_downloader=self._public_image_downloader,
+            )
+            if firecrawl_client is not None
+            else None
         )
         # ``xiaohongshu_collection`` 为复用既有 CollectionOperationError 会反向导入
         # 本模块；因此必须在类已初始化的运行路径内局部导入，避免模块加载时循环导入。
@@ -737,11 +820,358 @@ class InterviewCollectionService:
         close = getattr(self._xiaohongshu_source_adapter, "close", None)
         if callable(close):
             close()
+        if self._firecrawl_client is not None:
+            self._firecrawl_client.close()
+        if self._public_image_downloader is not None:
+            self._public_image_downloader.close()
 
     def list_platform_policies(self) -> list[PlatformCollectionPolicy]:
         """返回可展示的采集平台能力，不暴露内部密钥或会话引用。"""
 
-        return list(self._POLICIES.values())
+        policies = list(self._POLICIES.values())
+        return [
+            PlatformCollectionPolicy(
+                key=policy.key,
+                label=policy.label,
+                can_run_keyword_search=policy.can_run_keyword_search,
+                connector_kind=policy.connector_kind,
+                policy_decision=policy.policy_decision,
+                ready=self.public_web_ready() if policy.key == "public_web" else True,
+                unavailable_reason=(
+                    None
+                    if policy.key != "public_web" or self.public_web_ready()
+                    else "未配置全网公开信息收集服务，请先设置 FIRECRAWL_API_KEY。"
+                ),
+            )
+            for policy in policies
+        ]
+
+    def public_web_ready(self) -> bool:
+        """返回全网公开信息收集是否已配置。"""
+
+        return self._public_web_coordinator is not None
+
+    def create_public_web_import_job(
+        self,
+        organization_id: UUID,
+        *,
+        keyword: str,
+        requested_limit: int,
+    ) -> InterviewCollectionJobRecord:
+        """创建 Firecrawl 全网公开面经搜索任务。"""
+
+        if self._public_web_coordinator is None:
+            raise CollectionOperationError(
+                "firecrawl_not_configured",
+                "未配置全网公开信息收集服务，请先设置 FIRECRAWL_API_KEY。",
+            )
+        return self._public_web_coordinator.create_job(
+            organization_id,
+            keyword=keyword,
+            requested_limit=requested_limit,
+        )
+
+    def run_public_web_import(self, organization_id: UUID, job_id: UUID) -> None:
+        """在后台执行全网公开面经搜索、去重、解析和自动入库。"""
+
+        if self._public_web_coordinator is None:
+            return
+        self._public_web_coordinator.run(organization_id, job_id)
+
+    def create_xiaohongshu_browser_collection_job(
+        self,
+        organization_id: UUID,
+        *,
+        keyword: str,
+        requested_limit: int,
+    ) -> InterviewCollectionJobRecord:
+        """创建等待当前 Chrome 登录态执行的小红书关键词任务。"""
+
+        normalized_keyword = " ".join(keyword.split())
+        if not normalized_keyword:
+            raise ValueError("请输入小红书搜索关键词。")
+        if not 5 <= requested_limit <= 50:
+            raise ValueError("小红书单次信息收集数量必须在 5 到 50 之间")
+        return self._repository.create_collection_job(
+            organization_id=organization_id,
+            platform_key="xiaohongshu",
+            keyword=normalized_keyword,
+            requested_limit=requested_limit,
+            connector_kind=CollectionConnectorKind.USER_AUTHORIZED_BROWSER,
+            policy_decision=self._POLICIES["xiaohongshu"].policy_decision,
+            metadata_json={
+                "source_kind": "xiaohongshu_browser_keyword",
+                "search_keyword": normalized_keyword,
+                "include_images": True,
+                "auto_import": True,
+                "phase": "connect",
+                "progress_percent": 0,
+                "progress_message": "任务已创建，正在等待浏览器助手连接小红书。",
+                "summary": self._new_xiaohongshu_summary(),
+            },
+        )
+
+    def register_xiaohongshu_browser_discoveries(
+        self,
+        organization_id: UUID,
+        job_id: UUID,
+        discoveries: tuple[XiaohongshuBrowserDiscovery, ...],
+    ) -> list[InterviewCollectionCandidateRecord]:
+        """登记不含 token 和图片的搜索卡片，并识别跨关键词重复来源。"""
+
+        job = self._require_xiaohongshu_browser_job(organization_id, job_id)
+        if job.status in {CollectionJobStatus.SUCCEEDED, CollectionJobStatus.FAILED, CollectionJobStatus.CANCELLED}:
+            raise ValueError("该信息收集任务已经结束，不能继续登记卡片。")
+        limited = discoveries[: job.requested_limit]
+        for discovery in limited:
+            note_id = self._normalize_xiaohongshu_note_id(discovery.note_id)
+            canonical_url = self._xiaohongshu_canonical_url(note_id)
+            existing_candidate = self._repository.get_collection_candidate_by_canonical_url(
+                organization_id,
+                job.id,
+                canonical_url,
+            )
+            if existing_candidate is not None:
+                continue
+            existing_experience = self._repository.get_experience_by_source_url(
+                organization_id,
+                canonical_url,
+            )
+            metadata: dict[str, object] = {
+                "source_kind": "xiaohongshu_browser_note",
+                "note_id": note_id,
+                "author_name": (discovery.author_name or "")[:120],
+                "liked_count": (discovery.liked_count or "")[:40],
+                "processing_state": "waiting",
+            }
+            status = CollectionCandidateStatus.DISCOVERED
+            if existing_experience is not None:
+                status = CollectionCandidateStatus.IMPORTED
+                metadata.update({
+                    "duplicate": True,
+                    "processing_state": "duplicate",
+                    "imported_experience_id": str(existing_experience.id),
+                })
+            self._repository.create_collection_candidate(
+                organization_id,
+                collection_job_id=job.id,
+                source_url=canonical_url,
+                canonical_url=canonical_url,
+                source_platform="小红书",
+                title=discovery.title,
+                snippet=discovery.title,
+                status=status,
+                metadata_json=metadata,
+            )
+
+        candidates = self._repository.list_collection_candidates(organization_id, job.id)
+        summary = self._summary_from_metadata(job.metadata_json)
+        summary["discovered_count"] = len(candidates)
+        duplicate_count = sum(
+            1 for candidate in candidates if candidate.metadata_json.get("duplicate") is True
+        )
+        summary["processed_count"] = max(summary["processed_count"], duplicate_count)
+        self._update_xiaohongshu_job(
+            organization_id,
+            job.id,
+            phase="fetch",
+            progress_percent=10,
+            progress_message=f"已读取 {len(candidates)} 张卡片，正在逐篇解析笔记。",
+            summary=summary,
+        )
+        return candidates
+
+    def queue_xiaohongshu_browser_note(
+        self,
+        organization_id: UUID,
+        job_id: UUID,
+        note: XiaohongshuBrowserNote,
+    ) -> InterviewCollectionCandidateRecord:
+        """校验并标记一篇浏览器笔记等待后台 OCR，不保存图片地址。"""
+
+        job = self._require_xiaohongshu_browser_job(organization_id, job_id)
+        if job.status in {CollectionJobStatus.SUCCEEDED, CollectionJobStatus.FAILED, CollectionJobStatus.CANCELLED}:
+            raise ValueError("该信息收集任务已经结束，不能继续提交笔记。")
+        note_id = self._normalize_xiaohongshu_note_id(note.note_id)
+        candidate = self._repository.get_collection_candidate_by_canonical_url(
+            organization_id,
+            job.id,
+            self._xiaohongshu_canonical_url(note_id),
+        )
+        if candidate is None:
+            raise LookupError("该笔记不在当前搜索卡片中，请重新执行关键词搜索。")
+        if candidate.status is not CollectionCandidateStatus.DISCOVERED:
+            return candidate
+        return self._repository.update_collection_candidate(
+            organization_id,
+            candidate.id,
+            title=note.title,
+            status=CollectionCandidateStatus.DISCOVERED,
+            clear_errors=True,
+            metadata_json={
+                "processing_state": "queued",
+                "author_name": (note.author_name or "")[:120],
+                "browser_tag_count": len(note.tags),
+                # 图片 URL 仅保留在 BackgroundTasks 的内存参数中。
+                "declared_image_count": len(note.image_urls),
+            },
+        )
+
+    def process_xiaohongshu_browser_note(
+        self,
+        organization_id: UUID,
+        job_id: UUID,
+        note: XiaohongshuBrowserNote,
+    ) -> None:
+        """后台处理一篇浏览器笔记，复用公开 URL 导入的 OCR 与分析链路。"""
+
+        job = self._require_xiaohongshu_browser_job(organization_id, job_id)
+        candidate = self._repository.get_collection_candidate_by_canonical_url(
+            organization_id,
+            job.id,
+            note.canonical_url,
+        )
+        if candidate is None or candidate.status is not CollectionCandidateStatus.DISCOVERED:
+            return
+        self._repository.update_collection_candidate(
+            organization_id,
+            candidate.id,
+            metadata_json={"processing_state": "running"},
+        )
+        summary_before = self._summary_from_metadata(job.metadata_json)
+        self._update_xiaohongshu_job(
+            organization_id,
+            job.id,
+            phase="ocr",
+            progress_percent=min(
+                92,
+                10 + int(84 * summary_before["processed_count"] / max(job.requested_limit, 1)),
+            ),
+            progress_message=f"正在解析笔记并识别配图文字：{note.title or note.note_id}",
+            summary=summary_before,
+        )
+        if note.source_error_code:
+            result = self._repository.update_collection_candidate(
+                organization_id,
+                candidate.id,
+                status=CollectionCandidateStatus.BLOCKED,
+                error_code=note.source_error_code[:80],
+                error_message=(note.source_error_message or "该笔记当前无法在 Web 端读取。")[:1000],
+                metadata_json={
+                    "processing_state": "skipped",
+                    "source_restricted": True,
+                },
+            )
+        else:
+            try:
+                result = self._process_xiaohongshu_note(
+                    organization_id,
+                    collection_job_id=job.id,
+                    note=note,
+                    include_images=True,
+                    auto_import=True,
+                    candidate_id=candidate.id,
+                )
+            except Exception as exc:
+                LOGGER.exception("浏览器小红书笔记处理失败：job=%s note=%s", job.id, note.note_id)
+                result = self._repository.update_collection_candidate(
+                    organization_id,
+                    candidate.id,
+                    status=CollectionCandidateStatus.FAILED,
+                    error_code="note_processing_failed",
+                    error_message="该笔记的正文、图片识别或结构化处理未完成，可稍后重新收集。",
+                    metadata_json={
+                        "processing_state": "failed",
+                        "error_class": exc.__class__.__name__,
+                    },
+                )
+
+        refreshed_job = self._require_xiaohongshu_browser_job(organization_id, job.id)
+        summary = self._summary_from_metadata(refreshed_job.metadata_json)
+        summary["processed_count"] += 1
+        analysis = self._candidate_analysis(result)
+        if result.status is CollectionCandidateStatus.IMPORTED:
+            summary["imported_count"] += 1
+            summary["valid_count"] += 1
+        elif result.status in {CollectionCandidateStatus.FAILED, CollectionCandidateStatus.BLOCKED}:
+            summary["failed_count"] += 1
+        elif analysis.get("is_valid_interview") is True:
+            summary["valid_count"] += 1
+        elif analysis.get("is_valid_interview") is False:
+            summary["rejected_count"] += 1
+        else:
+            summary["incomplete_count"] += 1
+        progress = 10 + int(84 * summary["processed_count"] / max(job.requested_limit, 1))
+        self._update_xiaohongshu_job(
+            organization_id,
+            job.id,
+            phase="import",
+            progress_percent=min(progress, 94),
+            progress_message=(
+                f"已处理 {summary['processed_count']}/{summary['discovered_count']} 条笔记，"
+                "正在更新面经库。"
+            ),
+            summary=summary,
+        )
+
+    def pause_xiaohongshu_browser_job(
+        self,
+        organization_id: UUID,
+        job_id: UUID,
+        *,
+        error_code: str,
+        error_message: str,
+        cancelled: bool = False,
+    ) -> InterviewCollectionJobRecord:
+        """在需要用户处理登录/验证或主动停止时保留当前批次。"""
+
+        job = self._require_xiaohongshu_browser_job(organization_id, job_id)
+        if job.status in {CollectionJobStatus.SUCCEEDED, CollectionJobStatus.FAILED, CollectionJobStatus.CANCELLED}:
+            return job
+        return self._repository.update_collection_job_status(
+            organization_id,
+            job.id,
+            status=(CollectionJobStatus.CANCELLED if cancelled else CollectionJobStatus.NEEDS_USER_INTERACTION),
+            error_code=(error_code or "browser_interaction_required")[:80],
+            error_message=(error_message or "请检查小红书页面后继续。")[:1000],
+            metadata_json={
+                "phase": "paused",
+                "progress_message": (error_message or "任务已暂停。")[:500],
+            },
+        )
+
+    def complete_xiaohongshu_browser_job(
+        self,
+        organization_id: UUID,
+        job_id: UUID,
+    ) -> InterviewCollectionJobRecord:
+        """在所有已发现候选均离开处理中状态后完成浏览器任务。"""
+
+        job = self._require_xiaohongshu_browser_job(organization_id, job_id)
+        candidates = self._repository.list_collection_candidates(organization_id, job.id)
+        pending = [
+            candidate for candidate in candidates
+            if candidate.status is CollectionCandidateStatus.DISCOVERED
+        ]
+        if pending:
+            raise ValueError(f"仍有 {len(pending)} 条笔记尚未处理完成。")
+        summary = self._summary_from_metadata(job.metadata_json)
+        return self._repository.update_collection_job_status(
+            organization_id,
+            job.id,
+            status=CollectionJobStatus.SUCCEEDED,
+            error_code=None,
+            error_message=None,
+            metadata_json={
+                "phase": "import",
+                "progress_percent": 100,
+                "progress_message": (
+                    f"收集完成：发现 {summary['discovered_count']} 条，"
+                    f"有效 {summary['valid_count']} 条，新入库 {summary['imported_count']} 条。"
+                ),
+                "summary": summary,
+            },
+        )
 
     def create_xiaohongshu_import_job(
         self,
@@ -1027,6 +1457,7 @@ class InterviewCollectionService:
         note: Any,
         include_images: bool,
         auto_import: bool,
+        candidate_id: UUID | None = None,
     ) -> InterviewCollectionCandidateRecord:
         """处理一篇已读取的笔记，并在必要时把有效面经自动写入现有面经库。"""
 
@@ -1063,26 +1494,43 @@ class InterviewCollectionService:
             else CollectionCandidateStatus.EMPTY
         )
         content_hash = sha256(normalized_markdown.encode("utf-8")).hexdigest()
-        candidate = self._repository.create_collection_candidate(
-            organization_id,
-            collection_job_id=collection_job_id,
-            source_url=note.source_url,
-            canonical_url=note.canonical_url,
-            source_platform="小红书",
-            title=note.title,
-            snippet=(analysis.summary_text or self._candidate_snippet(markdown_content)),
-            published_at=self._parse_xiaohongshu_published_at(note.published_at),
-            extracted_markdown=normalized_markdown,
-            content_hash=content_hash,
-            status=candidate_status,
-            metadata_json={
-                "source_kind": "xiaohongshu_note",
-                "note_id": note.note_id,
-                "author_name": note.author_name,
-                "images": image_metadata,
-                "analysis": analysis.as_metadata(),
-            },
-        )
+        candidate_metadata = {
+            "source_kind": "xiaohongshu_note",
+            "note_id": note.note_id,
+            "author_name": note.author_name,
+            "tags": list(getattr(note, "tags", ()) or ()),
+            "processing_state": "completed",
+            "images": image_metadata,
+            "analysis": analysis.as_metadata(),
+        }
+        if candidate_id is None:
+            candidate = self._repository.create_collection_candidate(
+                organization_id,
+                collection_job_id=collection_job_id,
+                source_url=note.source_url,
+                canonical_url=note.canonical_url,
+                source_platform="小红书",
+                title=note.title,
+                snippet=(analysis.summary_text or self._candidate_snippet(markdown_content)),
+                published_at=self._parse_xiaohongshu_published_at(note.published_at),
+                extracted_markdown=normalized_markdown,
+                content_hash=content_hash,
+                status=candidate_status,
+                metadata_json=candidate_metadata,
+            )
+        else:
+            candidate = self._repository.update_collection_candidate(
+                organization_id,
+                candidate_id,
+                title=note.title,
+                snippet=(analysis.summary_text or self._candidate_snippet(markdown_content)),
+                published_at=self._parse_xiaohongshu_published_at(note.published_at),
+                extracted_markdown=normalized_markdown,
+                content_hash=content_hash,
+                status=candidate_status,
+                clear_errors=True,
+                metadata_json=candidate_metadata,
+            )
         if not auto_import or not self._can_auto_import(analysis, image_metadata):
             return candidate
 
@@ -1276,7 +1724,7 @@ class InterviewCollectionService:
         has_ocr_evidence = ocr_success_count > 0 and (
             ocr_characters >= MIN_OCR_EVIDENCE_CHARACTERS or ocr_questions > 0
         )
-        if body_source in {"initial_state", "structured", "unknown"}:
+        if body_source in {"initial_state", "structured", "browser_page", "unknown"}:
             has_body_evidence = body_characters > 0
         elif body_source == "visible_dom":
             has_body_evidence = (
@@ -1512,6 +1960,32 @@ class InterviewCollectionService:
         if port not in {None, 443}:
             raise CollectionOperationError("invalid_url", "仅支持标准 HTTPS 端口 443。")
 
+    def _require_xiaohongshu_browser_job(
+        self,
+        organization_id: UUID,
+        job_id: UUID,
+    ) -> InterviewCollectionJobRecord:
+        job = self._repository.get_collection_job(organization_id, job_id)
+        if job is None:
+            raise LookupError("信息收集任务不存在或无访问权限")
+        if (
+            job.platform_key != "xiaohongshu"
+            or job.connector_kind is not CollectionConnectorKind.USER_AUTHORIZED_BROWSER
+        ):
+            raise ValueError("该任务不是小红书浏览器信息收集任务。")
+        return job
+
+    @staticmethod
+    def _normalize_xiaohongshu_note_id(value: str) -> str:
+        normalized = str(value or "").strip()
+        if not re.fullmatch(r"[0-9a-zA-Z]{24}", normalized):
+            raise ValueError("小红书笔记标识不正确。")
+        return normalized
+
+    @classmethod
+    def _xiaohongshu_canonical_url(cls, note_id: str) -> str:
+        return f"https://www.xiaohongshu.com/explore/{cls._normalize_xiaohongshu_note_id(note_id)}"
+
     @staticmethod
     def _new_xiaohongshu_summary() -> dict[str, int]:
         return {
@@ -1626,6 +2100,7 @@ class InterviewCollectionService:
         if not normalized_keyword:
             raise ValueError("请输入检索关键词。")
         if policy.key == "xiaohongshu":
+            # 兼容既有公开关键词入口；新的“信息收集”按钮使用专用浏览器任务接口。
             return self.create_xiaohongshu_keyword_import_job(
                 organization_id,
                 keyword=normalized_keyword,
@@ -1857,6 +2332,12 @@ class InterviewCollectionService:
                 },
             },
         )
+        if self._public_web_coordinator is not None:
+            self._public_web_coordinator.attach_candidate_sources(
+                organization_id,
+                candidate,
+                experience.id,
+            )
         return experience
 
     @classmethod

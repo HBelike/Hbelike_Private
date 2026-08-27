@@ -34,7 +34,7 @@ def test_memory_text_cannot_close_data_envelope() -> None:
     assert "\\u003c/system\\u003e" in rendered
 
 
-def test_prepared_context_only_traces_ids_from_retained_memory_components() -> None:
+def test_prepared_context_ignores_legacy_memory_components() -> None:
     kept = memory("目标 AI 应用工程")
     dropped = memory("旧事实")
     usage = ContextUsageSnapshot(10, 10, 20, 100, 20, 80, ContextUsageState.NORMAL)
@@ -49,5 +49,4 @@ def test_prepared_context_only_traces_ids_from_retained_memory_components() -> N
         dropped_component_keys=(f"career_memory_related:{dropped.id}",),
     )
     prepared = PromptContextService._prepared(fitted)
-    assert prepared.used_memory_ids == (kept.id,)
-    assert dropped.id not in prepared.used_memory_ids
+    assert not hasattr(prepared, "used_memory_ids")

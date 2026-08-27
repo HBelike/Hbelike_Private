@@ -107,7 +107,7 @@ def upgrade() -> None:
             first_seen_at, last_seen_at, created_at, updated_at
         )
         SELECT md5(experience.organization_id::text || ':' || experience.id::text ||
-                   ':interview-source')::uuid,
+                   '-interview-source')::uuid,
                experience.organization_id,
                experience.id,
                trim(experience.source_url),

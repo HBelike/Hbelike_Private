@@ -56,6 +56,7 @@ const submittedQuery = ref('')
 const jobs = ref([])
 const selectedJobId = ref('')
 const selectedJob = ref(null)
+const compactView = ref('list')
 const page = ref(1)
 const hasMore = ref(false)
 const hasSearched = ref(false)
@@ -301,6 +302,7 @@ function resetJobResults() {
   jobs.value = []
   selectedJobId.value = ''
   selectedJob.value = null
+  compactView.value = 'list'
   page.value = 1
   hasMore.value = false
   hasSearched.value = false
@@ -398,7 +400,7 @@ async function submitSearch() {
     selectedJobId.value = ''
     selectedJob.value = null
     if (jobs.value.length) {
-      void selectJob(jobs.value[0])
+      void selectJob(jobs.value[0], { showDetail: false })
       prefetchCurrentJobs(jobs.value, sequence)
     }
   } catch (error) {
@@ -414,8 +416,9 @@ async function submitSearch() {
   }
 }
 
-async function selectJob(job) {
+async function selectJob(job, { showDetail = true } = {}) {
   const sequence = ++detailSequence
+  if (showDetail) compactView.value = 'detail'
   publishSelection(null)
   selectedJobId.value = job.id
   const cached = detailLoader.peek(job)
@@ -445,6 +448,10 @@ async function selectJob(job) {
   } finally {
     if (sequence === detailSequence) detailLoading.value = false
   }
+}
+
+function returnToJobList() {
+  compactView.value = 'list'
 }
 
 async function loadMore() {
@@ -550,7 +557,10 @@ onBeforeUnmount(() => {
       {{ multiSelectionError }}
     </p>
 
-    <div class="job-browser" :class="{ 'is-searching': searching }">
+    <div
+      class="job-browser"
+      :class="{ 'is-searching': searching, 'show-compact-detail': compactView === 'detail' }"
+    >
       <aside class="job-results" aria-label="岗位搜索结果">
         <header class="result-heading">
           <div>
@@ -626,6 +636,12 @@ onBeforeUnmount(() => {
       </aside>
 
       <article v-if="selectedJob" class="job-detail" :class="{ refreshing: detailLoading }" aria-live="polite">
+        <button
+          type="button"
+          class="detail-back-button"
+          aria-label="返回岗位列表"
+          @click="returnToJobList"
+        >返回岗位列表</button>
         <div v-if="detailLoading" class="detail-refreshing">
           <span class="button-loader" aria-hidden="true"></span>
           正在获取最新详情
@@ -737,6 +753,8 @@ onBeforeUnmount(() => {
   --job-red: #f05b52;
   display: flex;
   min-height: 0;
+  min-width: 0;
+  container: job-search / inline-size;
   flex: 1;
   flex-direction: column;
   gap: 12px;
@@ -826,6 +844,7 @@ onBeforeUnmount(() => {
 .result-end { margin: 4px 0 18px; color: var(--job-muted); font-size: 10px; text-align: center; }
 
 .job-detail { position: relative; min-width: 0; overflow: hidden; background: var(--job-paper); transition: opacity .18s ease; }
+.detail-back-button { display:none; min-height:40px; border:1px solid var(--job-line); border-radius:9px; background:var(--job-paper); color:var(--job-blue-ink); padding:7px 11px; font-size:12px; font-weight:800; }
 .detail-hero-actions { display: flex; flex: none; align-items: center; gap: 12px; }
 .detail-refreshing { position: absolute; z-index: 5; top: 14px; right: 20px; display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--job-line); border-radius: 999px; background: var(--job-paper); color: var(--job-blue-ink); padding: 6px 10px; font-size: 10px; font-weight: 750; box-shadow: 0 8px 22px rgba(20, 33, 61, .08); }
 .detail-hero { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 24px; border-bottom: 1px solid var(--job-line); padding: 22px 28px 18px; }
@@ -868,5 +887,140 @@ onBeforeUnmount(() => {
 @keyframes job-spin { to { transform: rotate(360deg); } }
 @keyframes search-pulse { from { filter: saturate(.8); opacity: .58; } to { filter: saturate(1.2); opacity: 1; } }
 @keyframes status-pulse { from { opacity: .35; } to { opacity: 1; } }
+
+@container job-search (max-width:1000px) {
+  .search-rail {
+    grid-template-columns:auto minmax(0,1fr) auto;
+    gap:10px;
+  }
+
+  .search-input-shell {
+    grid-column:2 / 4;
+  }
+
+  .search-rail > :deep(.job-city-picker) {
+    grid-row:2;
+    grid-column:2;
+    justify-self:start;
+  }
+
+  .search-rail > button {
+    grid-row:2;
+    grid-column:3;
+  }
+
+  .job-browser {
+    grid-template-columns:320px minmax(0,1fr);
+  }
+
+  .detail-hero,
+  .company-strip,
+  .detail-scroll {
+    padding-right:20px;
+    padding-left:20px;
+  }
+}
+
+@container job-search (max-width:760px) {
+  .job-workspace-header {
+    grid-template-columns:minmax(0,1fr);
+    gap:10px;
+  }
+
+  .workspace-header-actions {
+    flex-wrap:wrap;
+  }
+
+  .search-rail {
+    grid-template-columns:minmax(0,1fr);
+    padding:12px;
+  }
+
+  .search-rail > label,
+  .search-input-shell,
+  .search-rail > :deep(.job-city-picker),
+  .search-rail > button {
+    grid-row:auto;
+    grid-column:1;
+    width:100%;
+  }
+
+  .job-browser {
+    min-height:520px;
+    grid-template-columns:minmax(0,1fr);
+    grid-template-rows:minmax(0,1fr);
+  }
+
+  .job-results,
+  .job-detail,
+  .detail-empty {
+    min-width:0;
+    grid-row:1;
+    grid-column:1;
+  }
+
+  .job-detail {
+    display:none;
+  }
+
+  .job-browser.show-compact-detail .job-results {
+    display:none;
+  }
+
+  .job-browser.show-compact-detail .job-detail {
+    display:block;
+  }
+
+  .detail-back-button {
+    display:inline-flex;
+    align-items:center;
+    margin:12px 14px 0;
+  }
+
+  .detail-refreshing {
+    top:14px;
+    right:14px;
+  }
+
+  .detail-hero {
+    grid-template-columns:minmax(0,1fr);
+    gap:12px;
+    padding:16px 16px 14px;
+  }
+
+  .title-line {
+    align-items:flex-start;
+    flex-direction:column;
+    gap:7px;
+  }
+
+  .title-line h3 {
+    overflow-wrap:anywhere;
+  }
+
+  .freshness {
+    align-items:start;
+  }
+
+  .company-strip {
+    grid-template-columns:36px minmax(0,1fr);
+    padding:12px 16px;
+  }
+
+  .company-logo {
+    width:36px;
+    height:36px;
+  }
+
+  .recruiter-online {
+    grid-column:2;
+  }
+
+  .detail-scroll {
+    height:calc(100% - 238px);
+    padding:16px 16px 32px;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) { .button-loader,.search-rail.searching .live-track i,.connection-badge.is-checking i { animation: none; } .job-card,.search-input-shell,.live-track i { transition: none; } }
 </style>

@@ -1,5 +1,22 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { jobLibraryBridge } from '../job-library-bridge.js'
+import {
+  createXiaohongshuDiscoveryPayload,
+  createXiaohongshuNotePayload,
+  hasXiaohongshuCollectionCapability,
+  isXiaohongshuAccountBlockingError,
+  normalizeXiaohongshuCollectionLimit,
+  selectXiaohongshuCardsToProcess,
+  XIAOHONGSHU_COLLECTION_JOB_STORAGE_KEY
+} from '../xiaohongshu-collection.js'
+import {
+  normalizePublicWebCollectionLimit,
+  normalizePublicWebSummary,
+  publicWebAvailability,
+  publicWebProgress,
+  PUBLIC_WEB_COLLECTION_STAGES
+} from '../public-web-collection.js'
 
 const treeItems = ref([])
 const treeLoading = ref(false)
@@ -37,22 +54,29 @@ const collectionError = ref('')
 const collectionNotice = ref('')
 const collectionJob = ref(null)
 const collectionCandidates = ref([])
+const browserCollectionRunning = ref(false)
+const browserCollectionCards = ref([])
 const candidateDrafts = ref({})
 const collectionDraft = ref(createCollectionDraft())
 let queryTimer = null
 let collectionPollTimer = null
+let browserCollectionStopRequested = false
 
 const textDraft = ref(createTextDraft())
 const fileDraft = ref(createFileDraft())
 
 const emptyState = computed(() => !detailLoading.value && !selectedExperience.value)
 const selectedTags = computed(() => selectedExperience.value?.tags ?? [])
+const selectedSources = computed(() => selectedExperience.value?.sources ?? [])
 const renderedMarkdownBlocks = computed(() => parseMarkdownBlocks(selectedExperience.value?.markdown_content ?? ''))
 const importFileCount = computed(() => importFiles.value.length)
 const fileStrategyDescription = computed(() => fileImportStrategy.value === 'merge'
   ? `将 ${importFileCount.value || '所选'} 份材料归并为一份完整面经，适合同一场或同一岗位的多页资料。`
   : `将每份材料独立入库为一份面经，适合同一次导入多个不同岗位或公司的资料。`)
 const collectionMetadata = computed(() => collectionJob.value?.metadata ?? {})
+const publicWebSummary = computed(() => normalizePublicWebSummary(collectionMetadata.value.summary))
+const publicWebCollectionProgress = computed(() => publicWebProgress(collectionMetadata.value, collectionJob.value?.status))
+const publicWebAvailabilityState = computed(() => publicWebAvailability(collectionPlatforms.value))
 const collectionAnalysisSummary = computed(() => {
   const metadata = collectionMetadata.value
   const declared = metadata.summary ?? metadata.statistics ?? metadata.stats ?? {}
@@ -250,7 +274,7 @@ function createCollectionDraft() {
   return {
     platformKey: 'xiaohongshu',
     keyword: '',
-    requestedLimit: 10,
+    requestedLimit: 20,
     sourceUrl: '',
     includeImages: true,
     autoImport: false,
@@ -320,11 +344,15 @@ function candidateIncompleteReason(candidate) {
 }
 
 function candidateStatusText(candidate) {
+  const processingState = String(candidate?.metadata?.processing_state ?? '').toLowerCase()
+  if (processingState === 'duplicate') return '重复跳过'
   if (candidateImportedExperienceId(candidate)) return '已入库'
   if (candidateAnalysisStatus(candidate) === 'insufficient_source') return '采集不完整'
   const validity = candidateValidity(candidate)
   if (validity === true) return '有效面经'
   if (validity === false) return '已过滤'
+  if (processingState === 'queued') return '等待解析'
+  if (processingState === 'running') return '正在解析'
   const labels = {
     discovered: '待读取',
     fetched: '待甄别',
@@ -428,11 +456,6 @@ function parseTags(value) {
     .filter(Boolean)
 }
 
-function formatDate(value) {
-  if (!value) return '日期待补充'
-  return value
-}
-
 function formatUpdatedAt(value) {
   if (!value) return ''
   const date = new Date(value)
@@ -443,6 +466,10 @@ function formatUpdatedAt(value) {
     hour: '2-digit',
     minute: '2-digit'
   }).format(date)
+}
+
+function experienceSavedAt(experience) {
+  return experience?.updated_at || experience?.created_at || ''
 }
 
 function statusText(value) {
@@ -753,7 +780,7 @@ async function refreshCollectionJob(jobId, { scheduleNext = true } = {}) {
     syncCandidateDrafts(collectionCandidates.value)
     if (isCollectionTerminal(job.status)) {
       stopCollectionPolling()
-      const summary = collectionAnalysisSummary.value
+      const summary = job.platform_key === 'public_web' ? publicWebSummary.value : collectionAnalysisSummary.value
       collectionNotice.value = job.status === 'succeeded' || job.status === 'completed'
         ? `采集完成：发现 ${summary.discovered} 条，识别有效面经 ${summary.valid} 条，已写入 ${summary.imported} 条。`
         : (job.error_message || '采集任务未完成，请查看失败条目的原因后重试。')
@@ -809,31 +836,159 @@ function closeCollection() {
 async function submitKeywordCollection() {
   const draft = collectionDraft.value
   if (!draft.keyword.trim()) {
-    collectionError.value = '请输入小红书搜索关键词。'
+    collectionError.value = '请输入公开网页搜索关键词。'
+    return
+  }
+  if (!publicWebAvailabilityState.value.ready) {
+    collectionError.value = publicWebAvailabilityState.value.reason
     return
   }
   collectionSubmitting.value = true
   collectionError.value = ''
   collectionNotice.value = ''
+  collectionJob.value = null
+  collectionCandidates.value = []
+  candidateDrafts.value = {}
+  stopCollectionPolling()
   try {
-    const payload = await requestJson('/api/career/interview-library/collection-jobs', {
+    const payload = await requestJson('/api/career/interview-library/public-web-imports', {
       method: 'POST',
       body: JSON.stringify({
-        platform_key: draft.platformKey,
         keyword: draft.keyword.trim(),
-        requested_limit: Number(draft.requestedLimit) || 10
+        requested_limit: normalizePublicWebCollectionLimit(draft.requestedLimit)
       })
     })
-    collectionJob.value = payload.job ?? payload
+    const job = payload.job ?? payload
+    if (!job?.id) throw new Error('公开网页收集服务未返回任务编号，请稍后重试。')
+    collectionJob.value = job
     collectionCandidates.value = payload.candidates ?? []
     syncCandidateDrafts(collectionCandidates.value)
-    collectionNotice.value = '公开搜索任务已启动：系统会读取搜索页实际暴露的笔记，再依次解析正文、图片文字并整理为可人工确认的候选正文。'
-    if (!isCollectionTerminal(collectionJob.value.status)) startCollectionPolling(collectionJob.value.id)
+    collectionNotice.value = '任务已启动：正在搜索公开网页，已处理过的地址和重复正文会自动跳过。'
+    startCollectionPolling(job.id)
   } catch (error) {
-    collectionError.value = error instanceof Error ? error.message : '创建检索任务失败。'
+    collectionError.value = error instanceof Error ? error.message : '创建信息收集任务失败。'
   } finally {
     collectionSubmitting.value = false
   }
+}
+
+function browserCollectionDelay(milliseconds) {
+  return new Promise((resolve) => window.setTimeout(resolve, milliseconds))
+}
+
+async function waitForBrowserCandidate(jobId, noteId, timeoutMs = 180000) {
+  const startedAt = Date.now()
+  while (!browserCollectionStopRequested && Date.now() - startedAt < timeoutMs) {
+    const payload = await requestJson(`/api/career/interview-library/collection-jobs/${encodeURIComponent(jobId)}`)
+    collectionJob.value = payload.job ?? payload
+    collectionCandidates.value = payload.candidates ?? []
+    syncCandidateDrafts(collectionCandidates.value)
+    const candidate = collectionCandidates.value.find((item) => item?.metadata?.note_id === noteId)
+    if (candidate && candidate.status !== 'discovered') return candidate
+    await browserCollectionDelay(1200)
+  }
+  if (browserCollectionStopRequested) return null
+  throw new Error('这篇笔记解析时间过长，任务已暂停，可稍后继续。')
+}
+
+async function pauseXiaohongshuBrowserCollection(error, { cancelled = false } = {}) {
+  const jobId = collectionJob.value?.id
+  if (!jobId) return
+  const code = error?.code || (cancelled ? 'user_stopped' : 'browser_collection_paused')
+  const message = error instanceof Error ? error.message : String(error?.message || (cancelled ? '用户已停止信息收集。' : '信息收集已暂停。'))
+  try {
+    const payload = await requestJson(`/api/career/interview-library/collection-jobs/${encodeURIComponent(jobId)}/pause`, {
+      method: 'POST',
+      body: JSON.stringify({ error_code: code, error_message: message, cancelled })
+    })
+    collectionJob.value = payload.job ?? payload
+  } catch {
+    // 保留原始浏览器错误，暂停状态写入失败不覆盖用户真正需要处理的问题。
+  }
+  if (cancelled) window.localStorage.removeItem(XIAOHONGSHU_COLLECTION_JOB_STORAGE_KEY)
+}
+
+async function runXiaohongshuBrowserCollection(job) {
+  if (!job?.id || browserCollectionRunning.value) return
+  browserCollectionRunning.value = true
+  browserCollectionStopRequested = false
+  collectionError.value = ''
+  try {
+    const connection = await jobLibraryBridge.ping()
+    if (!hasXiaohongshuCollectionCapability(connection)) {
+      throw new Error('当前浏览器助手版本不支持小红书信息收集，请更新助手后重试。')
+    }
+    const search = await jobLibraryBridge.searchXiaohongshuNotes(
+      job.keyword || collectionDraft.value.keyword,
+      normalizeXiaohongshuCollectionLimit(job.requested_limit || collectionDraft.value.requestedLimit)
+    )
+    browserCollectionCards.value = search.cards ?? []
+    const discoveryPayload = createXiaohongshuDiscoveryPayload(browserCollectionCards.value)
+    if (!discoveryPayload.items.length) throw new Error('没有读取到可处理的小红书笔记卡片。')
+    const discovered = await requestJson(
+      `/api/career/interview-library/collection-jobs/${encodeURIComponent(job.id)}/xiaohongshu-discoveries`,
+      { method: 'POST', body: JSON.stringify(discoveryPayload) }
+    )
+    collectionCandidates.value = discovered.candidates ?? []
+    syncCandidateDrafts(collectionCandidates.value)
+    const cards = selectXiaohongshuCardsToProcess(browserCollectionCards.value, collectionCandidates.value)
+
+    for (let index = 0; index < cards.length; index += 1) {
+      if (browserCollectionStopRequested) break
+      const card = cards[index]
+      collectionNotice.value = `正在解析第 ${index + 1}/${cards.length} 篇：${card.title || '小红书笔记'}`
+      let detail
+      try {
+        detail = await jobLibraryBridge.getXiaohongshuNote(card)
+      } catch (error) {
+        if (isXiaohongshuAccountBlockingError(error)) throw error
+        detail = {
+          noteId: card.noteId,
+          title: card.title,
+          authorName: card.authorName,
+          bodyText: '',
+          imageUrls: [],
+          tags: [],
+          sourceErrorCode: error?.code || 'note_read_failed',
+          sourceErrorMessage: error instanceof Error ? error.message : '该笔记未能读取。'
+        }
+      }
+      await requestJson(
+        `/api/career/interview-library/collection-jobs/${encodeURIComponent(job.id)}/xiaohongshu-notes`,
+        { method: 'POST', body: JSON.stringify(createXiaohongshuNotePayload(detail)) }
+      )
+      await waitForBrowserCandidate(job.id, card.noteId)
+    }
+
+    if (browserCollectionStopRequested) return
+    const completed = await requestJson(
+      `/api/career/interview-library/collection-jobs/${encodeURIComponent(job.id)}/complete`,
+      { method: 'POST' }
+    )
+    collectionJob.value = completed.job ?? completed
+    window.localStorage.removeItem(XIAOHONGSHU_COLLECTION_JOB_STORAGE_KEY)
+    await refreshCollectionJob(job.id, { scheduleNext: false })
+    await loadTree({ preserveSelection: false })
+    const summary = collectionAnalysisSummary.value
+    collectionNotice.value = `信息收集完成：发现 ${summary.discovered} 条，有效 ${summary.valid} 条，新入库 ${summary.imported} 条。`
+  } catch (error) {
+    await pauseXiaohongshuBrowserCollection(error)
+    collectionError.value = error instanceof Error ? error.message : '信息收集已暂停，请检查小红书页面后继续。'
+  } finally {
+    browserCollectionRunning.value = false
+  }
+}
+
+async function resumeKeywordCollection() {
+  if (!collectionJob.value) return
+  await runXiaohongshuBrowserCollection(collectionJob.value)
+}
+
+async function stopKeywordCollection() {
+  browserCollectionStopRequested = true
+  await pauseXiaohongshuBrowserCollection(new Error('用户已停止信息收集。'), { cancelled: true })
+  browserCollectionRunning.value = false
+  collectionNotice.value = '本次信息收集已停止；已完成的候选和面经不会删除。'
 }
 
 async function submitXiaohongshuCollection() {
@@ -1102,7 +1257,7 @@ async function saveParsedFileImport() {
 async function finishImport(payload, { importedCount = 1 } = {}) {
   importNotice.value = importedCount > 1
     ? `已分别入库 ${importedCount} 份面经，并建立检索索引。`
-    : `已入库并建立 ${payload.status === 'indexed' ? '检索索引' : '解析记录'}：${payload.job_name}`
+    : `已入库并建立 ${payload.status === 'indexed' ? '检索索引' : '解析记录'}：${payload.role_name}`
   await loadTree({ preserveSelection: false })
   selectedExperience.value = payload
   selectedExperienceId.value = payload.id
@@ -1122,6 +1277,22 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   if (queryTimer) window.clearTimeout(queryTimer)
   stopCollectionPolling()
+  if (browserCollectionRunning.value && collectionJob.value?.id) {
+    browserCollectionStopRequested = true
+    void window.fetch(
+      `/api/career/interview-library/collection-jobs/${encodeURIComponent(collectionJob.value.id)}/pause`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          error_code: 'browser_page_closed',
+          error_message: '面经库页面已关闭，未读取的笔记将在下次打开后继续。',
+          cancelled: false
+        }),
+        keepalive: true
+      }
+    )
+  }
 })
 </script>
 
@@ -1137,6 +1308,7 @@ onBeforeUnmount(() => {
       </div>
       <div class="library-actions">
         <button type="button" class="quiet-action collection-action" @click="openCollection('xiaohongshu')"><span aria-hidden="true">⌁</span>小红书URL读取</button>
+        <button type="button" class="quiet-action information-collection-action" @click="openCollection('keyword')"><span aria-hidden="true">⌕</span>公开信息收集</button>
         <button type="button" class="primary-action upload-action" @click="openImport('file')"><span aria-hidden="true">↑</span>上传面经</button>
       </div>
     </header>
@@ -1153,7 +1325,7 @@ onBeforeUnmount(() => {
 
         <label class="tree-search">
           <span>⌕</span>
-          <input v-model="query" type="search" placeholder="搜索公司、岗位或日期" @input="queueTreeSearch" />
+          <input v-model="query" type="search" placeholder="搜索公司或岗位" @input="queueTreeSearch" />
         </label>
 
         <p v-if="treeError" class="inline-error">{{ treeError }}</p>
@@ -1180,8 +1352,8 @@ onBeforeUnmount(() => {
               >
                 <span class="leaf-line"></span>
                 <span class="leaf-copy">
-                  <strong>{{ experience.label }}</strong>
-                  <small>{{ experience.role_name }} · {{ formatDate(experience.interview_date) }}</small>
+                  <strong>{{ experience.role_name }}</strong>
+                  <small>更新于 {{ formatUpdatedAt(experienceSavedAt(experience)) }}</small>
                 </span>
                 <i :title="statusText(experience.status)" :class="`status-dot status-${experience.status}`"></i>
               </button>
@@ -1215,10 +1387,9 @@ onBeforeUnmount(() => {
           <header class="experience-header">
             <div>
               <p class="section-label">{{ selectedExperience.company_name }}</p>
-              <h3>{{ selectedExperience.job_name }}</h3>
+              <h3>{{ selectedExperience.role_name }}</h3>
               <div class="experience-meta">
-                <span>{{ selectedExperience.role_name }}</span>
-                <span>{{ formatDate(selectedExperience.interview_date) }}</span>
+                <span>更新于 {{ formatUpdatedAt(experienceSavedAt(selectedExperience)) }}</span>
                 <span>{{ sourceText(selectedExperience.source_type) }}</span>
                 <a v-if="selectedExperience.source_url" :href="selectedExperience.source_url" target="_blank" rel="noreferrer">查看来源 ↗</a>
               </div>
@@ -1237,11 +1408,27 @@ onBeforeUnmount(() => {
 
           <section class="experience-context-strip">
             <span>来源 · {{ selectedExperience.source_platform || sourceText(selectedExperience.source_type) }}</span>
-            <span v-if="selectedExperience.updated_at">更新 · {{ formatUpdatedAt(selectedExperience.updated_at) }}</span>
             <div class="tag-list">
               <span v-for="tag in selectedTags" :key="tag"># {{ tag }}</span>
             </div>
           </section>
+
+          <details v-if="selectedSources.length" class="experience-source-ledger">
+            <summary>来源记录 <span>{{ selectedSources.length }} 个公开地址</span></summary>
+            <div class="experience-source-list">
+              <a
+                v-for="source in selectedSources"
+                :key="source.id"
+                :href="source.source_url"
+                target="_blank"
+                rel="noreferrer"
+              >
+                <strong>{{ source.source_platform }}{{ source.is_primary ? ' · 主来源' : ' · 同正文来源' }}</strong>
+                <span>{{ source.canonical_url }}</span>
+                <small v-if="source.discovery_keywords?.length">检索词：{{ source.discovery_keywords.join('、') }}</small>
+              </a>
+            </div>
+          </details>
 
           <div v-if="editMode" class="editor-layout">
             <section class="editor-identity-panel" aria-label="面经归属信息">
@@ -1401,9 +1588,9 @@ onBeforeUnmount(() => {
         <section class="collection-dialog" role="dialog" aria-modal="true" aria-labelledby="collectionTitle">
           <header class="collection-dialog-header">
             <div>
-              <p class="library-kicker">INTERVIEW SOURCE IMPORT</p>
-              <h2 id="collectionTitle">导入小红书公开面经资料</h2>
-              <p>粘贴小红书笔记、收藏、主页或搜索链接。系统会尝试读取服务端实际可访问的公开笔记，完成正文与图片文字解析，再由 Agent 整理为可编辑候选；只有你确认保存后才会写入面经库。</p>
+              <h2 id="collectionTitle">{{ collectionMode === 'keyword' ? '全网公开信息收集' : '导入公开面经资料' }}</h2>
+              <p v-if="collectionMode === 'keyword'">输入检索词后，系统会从无需登录的公开网页发现面经，逐页提取正文并自动去重。图片只用于临时 OCR，不保存图片；有效内容自动写入面经库。</p>
+              <p v-else>粘贴公开笔记或网页链接，系统会读取可访问的正文与图片文字并整理为可编辑候选；确认保存后写入面经库。</p>
             </div>
             <button type="button" class="close-button" :disabled="collectionSubmitting" aria-label="关闭" @click="closeCollection">×</button>
           </header>
@@ -1411,7 +1598,7 @@ onBeforeUnmount(() => {
           <nav class="import-tabs collection-tabs" aria-label="采集方式">
             <button type="button" :class="{ active: collectionMode === 'xiaohongshu' }" @click="collectionMode = 'xiaohongshu'">小红书链接导入</button>
             <button type="button" :class="{ active: collectionMode === 'url' }" @click="collectionMode = 'url'">单篇公开链接</button>
-            <button type="button" :class="{ active: collectionMode === 'keyword' }" @click="collectionMode = 'keyword'">关键词采集</button>
+            <button type="button" :class="{ active: collectionMode === 'keyword' }" @click="collectionMode = 'keyword'">全网公开信息收集</button>
           </nav>
 
           <p v-if="collectionError" class="dialog-error">{{ collectionError }}</p>
@@ -1545,109 +1732,86 @@ onBeforeUnmount(() => {
             </footer>
           </form>
 
-          <form v-else-if="collectionMode === 'keyword'" class="collection-form xiaohongshu-import-form" @submit.prevent="submitKeywordCollection">
-            <section class="collection-section xiaohongshu-source-section">
+          <form v-else-if="collectionMode === 'keyword'" class="collection-form public-web-collection-form" @submit.prevent="submitKeywordCollection">
+            <section class="collection-section public-web-source-section">
               <div class="collection-section-heading">
                 <div>
-                  <h3>搜索小红书公开笔记</h3>
-                  <p>系统会将关键词转换为公开搜索页，只读取服务端实际可访问且页面已经暴露的笔记。每条材料会由 Agent 整理为候选正文，等待你核对并手动保存。</p>
+                  <h3>从公开网页建立面经候选池</h3>
+                  <p>系统只检索无需登录即可访问的 HTTPS 页面，不携带浏览器登录态。相同地址和相同正文都会跨任务去重，已入库内容只追加新的来源记录。</p>
                 </div>
-                <span class="collection-loading">小红书</span>
+                <span class="collection-loading">默认 20 条</span>
               </div>
+              <p v-if="collectionPlatforms.length && !publicWebAvailabilityState.ready" class="public-web-unavailable">{{ publicWebAvailabilityState.reason }}</p>
             </section>
 
-            <label class="collection-field">检索关键词
-              <input v-model="collectionDraft.keyword" required maxlength="120" placeholder="例如：东方财富 AI 应用开发 面经" />
-            </label>
-            <label class="collection-field compact-field">最多分析笔记数
-              <input v-model.number="collectionDraft.requestedLimit" type="number" min="1" max="50" inputmode="numeric" />
-            </label>
+            <div class="public-web-query-row">
+              <label class="collection-field">检索关键词
+                <input v-model="collectionDraft.keyword" required maxlength="120" :disabled="collectionSubmitting || (collectionJob && !isCollectionTerminal(collectionJob.status))" placeholder="例如：agent开发面经" />
+              </label>
+              <label class="collection-field compact-field">最多分析数量
+                <input v-model.number="collectionDraft.requestedLimit" type="number" min="5" max="50" inputmode="numeric" :disabled="collectionSubmitting || (collectionJob && !isCollectionTerminal(collectionJob.status))" />
+                <small>可设置 5–50 条；数量表示目标有效面经数，搜索阶段会预留无效和重复结果。</small>
+              </label>
+            </div>
 
-            <section v-if="collectionJob" class="collection-job-card xiaohongshu-job-card" :class="`job-${collectionJob.status}`">
+            <section v-if="collectionJob" class="collection-job-card public-web-job-card" :class="`job-${collectionJob.status}`">
               <div class="collection-job-heading">
-                <div>
-                  <span>任务状态</span>
-                  <strong>{{ collectionJobStatusText(collectionJob.status) }}</strong>
-                </div>
-                <em>{{ Math.round(collectionProgress.percent) }}%</em>
+                <div><span>任务状态</span><strong>{{ collectionJobStatusText(collectionJob.status) }}</strong></div>
+                <em>{{ Math.round(publicWebCollectionProgress.percent) }}%</em>
               </div>
-              <div class="collection-stage-track" aria-label="采集阶段">
-                <span v-for="(stage, index) in ['发现链接', '读取正文', 'OCR 图片', 'Agent 整理', '人工确认入库']" :key="stage" :class="{ active: collectionProgress.currentIndex >= index, current: collectionProgress.currentIndex === index && !isCollectionTerminal(collectionJob.status) }">
-                  <i>{{ index + 1 }}</i>
-                  {{ stage }}
+              <div class="collection-stage-track" aria-label="全网公开信息收集阶段">
+                <span v-for="(stage, index) in PUBLIC_WEB_COLLECTION_STAGES" :key="stage" :class="{ active: publicWebCollectionProgress.currentIndex >= index, current: publicWebCollectionProgress.currentIndex === index && !isCollectionTerminal(collectionJob.status) }">
+                  <i>{{ index + 1 }}</i>{{ stage }}
                 </span>
               </div>
-              <div class="collection-progress-line" aria-hidden="true"><i :style="{ width: `${collectionProgress.percent}%` }"></i></div>
-              <p>{{ collectionProgress.detail || collectionJob.error_message || '任务正在后台执行，完成后会自动刷新候选与入库结果。' }}</p>
+              <div class="collection-progress-line" aria-hidden="true"><i :style="{ width: `${publicWebCollectionProgress.percent}%` }"></i></div>
+              <p>{{ publicWebCollectionProgress.detail || collectionJob.error_message || '任务正在后台处理；关闭窗口不会中断任务。' }}</p>
             </section>
 
-            <section v-if="collectionJob" class="collection-summary-grid" aria-label="采集结果统计">
-              <div><span>发现链接</span><strong>{{ collectionAnalysisSummary.discovered }}</strong></div>
-              <div><span>有效面经</span><strong>{{ collectionAnalysisSummary.valid }}</strong></div>
-              <div><span>已写入</span><strong>{{ collectionAnalysisSummary.imported }}</strong></div>
-              <div><span>采集不完整</span><strong>{{ collectionAnalysisSummary.incomplete }}</strong></div>
-              <div><span>已过滤 / 失败</span><strong>{{ collectionAnalysisSummary.rejected + collectionAnalysisSummary.failed }}</strong></div>
+            <section v-if="collectionJob" class="collection-summary-grid public-web-summary-grid" aria-label="公开网页采集结果统计">
+              <div><span>发现地址</span><strong>{{ publicWebSummary.discovered }}</strong></div>
+              <div><span>已知地址</span><strong>{{ publicWebSummary.knownUrl }}</strong></div>
+              <div><span>已提取正文</span><strong>{{ publicWebSummary.scraped }}</strong></div>
+              <div><span>重复正文</span><strong>{{ publicWebSummary.duplicate }}</strong></div>
+              <div><span>有效面经</span><strong>{{ publicWebSummary.valid }}</strong></div>
+              <div><span>新入库</span><strong>{{ publicWebSummary.imported }}</strong></div>
+              <div><span>已过滤</span><strong>{{ publicWebSummary.filtered }}</strong></div>
+              <div><span>失败</span><strong>{{ publicWebSummary.failed }}</strong></div>
             </section>
 
-            <section v-if="collectionCandidates.length" class="candidate-list xiaohongshu-candidate-list">
+            <section v-if="collectionCandidates.length" class="candidate-list public-web-candidate-list">
               <header class="candidate-list-header">
-                <div><p class="section-label">COLLECTION RESULTS</p><h3>采集结果</h3></div>
-                <span>{{ collectionCandidates.length }} 条候选</span>
+                <div><p class="section-label">处理明细</p><h3>公开网页候选</h3></div>
+                <span>{{ collectionCandidates.length }} 个地址</span>
               </header>
-              <article v-for="candidate in collectionCandidates" :key="candidate.id" class="candidate-card xiaohongshu-candidate-card">
+              <article v-for="candidate in collectionCandidates" :key="candidate.id" class="candidate-card public-web-candidate-card">
                 <header>
                   <div>
-                    <p class="section-label">{{ candidate.source_platform || '小红书' }}</p>
-                    <h3>{{ candidate.title || '未命名笔记' }}</h3>
-                    <a v-if="candidate.source_url" :href="candidate.source_url" target="_blank" rel="noreferrer">打开来源 ↗</a>
+                    <p class="section-label">{{ candidate.source_platform || '公开网页' }}</p>
+                    <h3>{{ candidate.title || '未命名公开页面' }}</h3>
+                    <a v-if="candidate.source_url" :href="candidate.source_url" target="_blank" rel="noreferrer">查看已记录来源 ↗</a>
                   </div>
-                  <span class="candidate-status" :class="{ 'is-imported': candidateImportedExperienceId(candidate), 'is-valid': candidateValidity(candidate) === true, 'is-invalid': candidateValidity(candidate) === false, 'is-incomplete': candidateAnalysisStatus(candidate) === 'insufficient_source', 'is-failed': ['failed', 'blocked', 'empty'].includes(candidate.status) }">{{ candidateStatusText(candidate) }}</span>
+                  <span class="candidate-status" :class="{ 'is-imported': candidateImportedExperienceId(candidate), 'is-valid': candidateValidity(candidate) === true, 'is-invalid': candidateValidity(candidate) === false, 'is-failed': candidate.status === 'failed' }">{{ candidateStatusText(candidate) }}</span>
                 </header>
-                <p v-if="candidate.excerpt || candidate.snippet" class="candidate-excerpt">{{ candidate.excerpt || candidate.snippet }}</p>
+                <p v-if="candidate.snippet" class="candidate-excerpt">{{ candidate.snippet }}</p>
                 <div v-if="candidateCompany(candidate) || candidateRole(candidate) || candidateConfidence(candidate)" class="candidate-analysis-meta">
                   <span v-if="candidateCompany(candidate)">公司：{{ candidateCompany(candidate) }}</span>
                   <span v-if="candidateRole(candidate)">岗位：{{ candidateRole(candidate) }}</span>
                   <span v-if="candidateConfidence(candidate)">置信度：{{ candidateConfidence(candidate) }}</span>
                 </div>
-                <p class="candidate-evidence">{{ candidateEvidenceText(candidate) }}</p>
-                <p v-if="candidateIncompleteReason(candidate)" class="candidate-incomplete-reason">{{ candidateIncompleteReason(candidate) }}</p>
-                <p v-if="candidateReason(candidate)" class="candidate-reason">{{ candidateReason(candidate) }}</p>
-                <section v-if="canManuallySaveCandidate(candidate) && candidateDraft(candidate)" class="candidate-review">
-                  <header class="candidate-review-heading">
-                    <div>
-                      <p class="section-label">HUMAN REVIEW</p>
-                      <strong>核对正文后保存到面经库</strong>
-                    </div>
-                    <em>{{ candidateValidity(candidate) === true ? 'Agent 已提取' : '需人工核验' }}</em>
-                  </header>
-                  <p v-if="candidateValidity(candidate) !== true" class="candidate-review-hint">系统未确认这是一条完整面经；请核对正文来源与内容，确认后仍可手动保存。</p>
-                  <label class="candidate-body-field">面经正文
-                    <textarea v-model="candidateDrafts[candidate.id].markdownContent" spellcheck="false" :aria-label="`编辑 ${candidate.title || '候选面经'} 正文`"></textarea>
-                  </label>
-                  <div class="form-grid candidate-import-meta">
-                    <label>公司名称<input v-model="candidateDrafts[candidate.id].companyName" placeholder="待归档公司" /></label>
-                    <label>面试岗位<input v-model="candidateDrafts[candidate.id].roleName" placeholder="未识别岗位" /></label>
-                  </div>
-                  <details class="candidate-extra-fields">
-                    <summary>补充信息（可选）</summary>
-                    <div class="form-grid">
-                      <label>面试日期<input v-model="candidateDrafts[candidate.id].interviewDate" type="date" /></label>
-                      <label>标签<input v-model="candidateDrafts[candidate.id].tags" placeholder="一面，Java，系统设计" /></label>
-                    </div>
-                    <label>摘要<input v-model="candidateDrafts[candidate.id].summary" placeholder="说明这份面经的价值" /></label>
-                  </details>
-                  <footer>
-                    <button type="button" class="primary-action" :disabled="collectionSubmitting" @click="importCollectionCandidate(candidate)">{{ collectionSubmitting ? '正在保存…' : '保存到面经库' }}</button>
-                  </footer>
-                </section>
-                <details v-else-if="candidate.markdown_content" class="candidate-markdown"><summary>查看已保存的面经正文</summary><pre>{{ candidate.markdown_content }}</pre></details>
+                <p v-if="candidate.error_message" class="candidate-reason">{{ candidate.error_message }}</p>
+                <details v-if="candidate.markdown_content" class="candidate-markdown"><summary>查看解析后的文本</summary><pre>{{ candidate.markdown_content }}</pre></details>
               </article>
             </section>
 
+            <section v-else-if="collectionJob && !isCollectionTerminal(collectionJob.status)" class="collection-waiting-card">
+              <span class="thinking-orbit"></span><strong>正在建立公开网页候选池</strong><p>候选地址、去重结果与入库状态会在这里自动出现。</p>
+            </section>
+
             <footer>
-              <button type="button" class="quiet-action" :disabled="collectionSubmitting" @click="closeCollection">取消</button>
-              <button v-if="!collectionJob || isCollectionTerminal(collectionJob.status)" class="primary-action" :disabled="collectionSubmitting">
-                {{ collectionSubmitting ? '正在创建任务…' : '开始采集并分析' }}
+              <button type="button" class="quiet-action" :disabled="collectionSubmitting" @click="closeCollection">{{ collectionJob && !isCollectionTerminal(collectionJob.status) ? '关闭并后台继续' : '取消' }}</button>
+              <button v-if="!collectionJob || isCollectionTerminal(collectionJob.status)" class="primary-action" :disabled="collectionSubmitting || !publicWebAvailabilityState.ready">
+                {{ collectionSubmitting ? '正在创建任务…' : '开始公开信息收集' }}
               </button>
             </footer>
           </form>
@@ -1721,6 +1885,8 @@ onBeforeUnmount(() => {
 .library-actions button > span { font-size: 15px; line-height: 1; }
 .library-actions .quiet-action { background: #f8faf5; }
 .library-actions .primary-action { box-shadow: none; }
+.danger-action { min-height: 42px; border: 1px solid #efb0a8; border-radius: 10px; background: #fff5f3; color: #b53a2d; padding: 10px 16px; font: inherit; font-weight: 800; cursor: pointer; }
+.danger-action:hover { background: #ffeae6; }
 .primary-action,.quiet-action,.tree-refresh,.close-button { border: 1px solid #dfe8d2; border-radius: 10px; cursor: pointer; font: inherit; font-weight: 750; transition: transform .16s ease, box-shadow .16s ease, background .16s ease; }
 .primary-action { border-color: #8eae37; background: #91b236; color: white; box-shadow: 0 8px 16px rgba(112, 139, 37, .18); padding: 10px 15px; }
 .quiet-action { background: #fff; color: #5d713b; padding: 9px 13px; }
@@ -1953,5 +2119,80 @@ button:disabled { cursor: wait; opacity: .62; }
     width: 100%;
     min-height: 44px;
   }
+}
+
+.experience-source-ledger {
+  margin: 12px 24px 0;
+  border: 1px solid #dce6d3;
+  border-radius: 12px;
+  background: #fbfcf9;
+}
+
+.experience-source-ledger > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: pointer;
+  padding: 11px 13px;
+  color: #4c6045;
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.experience-source-ledger > summary span {
+  color: #899784;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.experience-source-list {
+  display: grid;
+  gap: 1px;
+  border-top: 1px solid #e8eee3;
+  background: #e8eee3;
+}
+
+.experience-source-list a {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  background: #fff;
+  padding: 11px 13px;
+  color: #5d713b;
+  text-decoration: none;
+}
+
+.experience-source-list a:hover { background: #f7faF2; }
+.experience-source-list strong { color: #40533c; font-size: 12px; }
+.experience-source-list span { overflow: hidden; color: #72806e; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.experience-source-list small { color: #91a087; font-size: 10px; }
+
+.public-web-collection-form { gap: 14px; }
+.public-web-source-section {
+  position: relative;
+  overflow: hidden;
+  border-color: #cfe0bd;
+  background: linear-gradient(135deg, #f8fcf2, #eef6e6);
+}
+.public-web-source-section::before {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 5px;
+  background: repeating-linear-gradient(180deg, #729a35 0 9px, #b8d083 9px 15px);
+  content: '';
+}
+.public-web-unavailable { margin: 10px 0 0; border-radius: 9px; background: #fff1ef; color: #a84f4f; padding: 9px 11px; font-size: 12px; }
+.public-web-query-row { display: grid; grid-template-columns: minmax(0, 1fr) 230px; gap: 12px; }
+.public-web-query-row .compact-field { max-width: none; }
+.public-web-query-row small { color: #81907b; font-size: 11px; font-weight: 600; line-height: 1.5; }
+.public-web-job-card { position: sticky; z-index: 2; top: 0; gap: 12px; border-color: #cedfb9; background: rgba(248, 252, 242, .98); box-shadow: 0 10px 22px rgba(76, 104, 44, .08); }
+.public-web-summary-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.public-web-summary-grid > div { border-left: 3px solid #a9c673; }
+.public-web-candidate-card { gap: 11px; }
+
+@media (max-width: 700px) {
+  .public-web-query-row { grid-template-columns: 1fr; }
+  .public-web-summary-grid { grid-template-columns: 1fr 1fr; }
+  .experience-source-ledger { margin-right: 16px; margin-left: 16px; }
 }
 </style>

@@ -235,6 +235,25 @@ def test_environment_asr_prefers_dashscope_and_hides_key() -> None:
     assert "secret-value" not in str(config)
 
 
+def test_setup_options_describe_all_supported_desktop_browsers() -> None:
+    app = FastAPI()
+    app.include_router(live_web.router)
+    services = SimpleNamespace(
+        model_gateway=SimpleNamespace(list_availability=lambda _organization_id: []),
+    )
+
+    with (
+        patch.object(live_web, "get_live_read_services", return_value=services),
+        TestClient(app) as client,
+    ):
+        response = client.get("/api/career/live-interviews/setup-options")
+
+    assert response.status_code == 200
+    assert response.json()["audio_policy"]["platform"] == (
+        "桌面版 Chrome、Edge、Firefox 或 Windows 10/11 Electron"
+    )
+
+
 def test_browser_live_interview_proxy_and_permissions_are_enabled() -> None:
     caddyfile = (PROJECT_ROOT / "docker" / "caddy" / "Caddyfile").read_text(encoding="utf-8")
     nginx_config = (PROJECT_ROOT / "docker" / "nginx" / "default.conf").read_text(encoding="utf-8")

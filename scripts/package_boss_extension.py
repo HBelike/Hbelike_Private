@@ -16,6 +16,8 @@ PACKAGE_FILES = (
     "service-worker.js",
     "boss-data.js",
     "boss-greeting.js",
+    "xiaohongshu-data.js",
+    "xiaohongshu-page.js",
 )
 
 

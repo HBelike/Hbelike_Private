@@ -23,6 +23,8 @@ def test_downloadable_extension_matches_manifest_and_has_flat_root() -> None:
             "service-worker.js",
             "boss-data.js",
             "boss-greeting.js",
+            "xiaohongshu-data.js",
+            "xiaohongshu-page.js",
         }.issubset(names)
         packaged_manifest = json.loads(package.read("manifest.json").decode("utf-8"))
     assert packaged_manifest["version"] == manifest["version"]

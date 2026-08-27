@@ -44,7 +44,6 @@ class CareerConversationRepository:
         organization_id: UUID,
         actor_id: UUID,
         title: str,
-        career_space_id: UUID | None = None,
     ) -> ConversationRecord:
         """创建属于指定用户的空会话，并返回数据库生成时间。"""
 
@@ -52,40 +51,6 @@ class CareerConversationRepository:
         conversation_id = uuid4()
 
         with self._database.transaction() as connection:
-            if career_space_id is None:
-                space_row = connection.execute(
-                    text(
-                        """
-                        INSERT INTO career_assistant.career_spaces
-                          (id, organization_id, actor_id, name, normalized_name, is_default)
-                        VALUES (:id, :organization_id, :actor_id,
-                                '默认求职方向', '默认求职方向', TRUE)
-                        ON CONFLICT (organization_id, actor_id, normalized_name) DO UPDATE
-                        SET updated_at = career_assistant.career_spaces.updated_at
-                        RETURNING id
-                        """,
-                    ),
-                    {"id": uuid4(), "organization_id": organization_id, "actor_id": actor_id},
-                ).mappings().one()
-                career_space_id = space_row["id"]
-            else:
-                space_row = connection.execute(
-                    text(
-                        """
-                        SELECT id FROM career_assistant.career_spaces
-                        WHERE id = :career_space_id
-                          AND organization_id = :organization_id
-                          AND actor_id = :actor_id
-                        """,
-                    ),
-                    {
-                        "career_space_id": career_space_id,
-                        "organization_id": organization_id,
-                        "actor_id": actor_id,
-                    },
-                ).mappings().one_or_none()
-                if space_row is None:
-                    raise LookupError("职业空间不存在或无访问权限")
             row = connection.execute(
                 text(
                     """
@@ -102,7 +67,7 @@ class CareerConversationRepository:
                     "organization_id": organization_id,
                     "actor_id": actor_id,
                     "title": normalized_title,
-                    "career_space_id": career_space_id,
+                    "career_space_id": None,
                 },
             ).mappings().one()
 
