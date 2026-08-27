@@ -42,6 +42,7 @@ pipeline-scheduler（唯一副本）
 4. 私有仓库使用只读 Deploy Key 拉取；服务器不使用个人 GitHub Token。真实 `.env.production` 在服务器本地创建，权限为 `600`。
 5. `application_data` Docker 命名卷必须保留：未显式设置 `CAREER_CREDENTIAL_MASTER_KEY` 时，API 会在此卷自动创建并复用模型凭据主密钥。
 6. 微信公众平台的 API IP 白名单加入该服务器的固定出口 IP；当前项目仅主动调用微信接口，不需要配置公众号入站消息回调。
+7. 需要启用面经库“全网公开信息收集”时，在服务器 `.env.production` 配置 `FIRECRAWL_API_KEY`；Hosted Firecrawl 使用默认 `FIRECRAWL_API_URL=https://api.firecrawl.dev`。
 
 ## 首次部署
 
@@ -103,3 +104,14 @@ docker compose --env-file .env.production -f docker-compose.production.yml exec 
 - **公网验收**：`/api/health`、首页、职位库和浏览器助手教程均返回 `200`；匿名面经树与招呼语生成接口均返回 `401`。线上主 JS/CSS 已确认包含逐岗触发文案、面经公司/岗位编辑、上传入口和 Skill/面经高亮样式。
 - **扩展验收**：`find-job-boss-helper-v0.2.7.zip` 返回 `200`，线上与本地文件均为 `15249` 字节，SHA-256 均为 `59E3DDE5133F172621EEBB3A3DE811CA63E784F793F5EE4D1CDCD1C6B81C9172`。
 - **外部调用边界**：本次未主动调用付费模型、未触发微信草稿、Seedance 或 TTS 任务，也未使用真人 BOSS 账号发送招呼语。
+
+## 2026-08-27 全量生产部署记录
+
+- **发布目标**：发布求职助手上下文治理与用户记忆停用、PC 响应式首道门禁、全网公开面经采集、小红书浏览器采集、登录首页和面经库交互更新，以及浏览器助手 `0.2.9`。
+- **发布版本**：业务代码提交 `e7ff69b`；生产仓库从 `e3a169f` 快进更新。本机 `.agents/skills`、个人 `data/`、临时测试文件、Playwright 产物、重复 pnpm 锁文件和旧版扩展 `0.2.8` 未进入发布。
+- **发布前验证**：Python `368 passed`，WebUI `184 passed`，浏览器扩展 `28 passed`，Playwright Chromium/Firefox 响应式验收 `7 passed`；Vite production build、部署设置、Compose 配置、扩展语法、公开面经与小红书编排合约均通过。
+- **部署调用链**：生产 Compose 配置展开通过 → `git pull --ff-only origin main` → `docker compose ... up -d --build` → `skill-seed` 与 `career-migrate` 退出码均为 `0` → API、Worker、Scheduler、Web 全量重建完成。
+- **数据库与运行状态**：Alembic 从 `20260825_21` 连续迁移到 `20260827_26 (head)`；API、Web、PostgreSQL 均为 healthy，Worker、Scheduler、Caddy、Docling、Gotenberg 正常运行；Scheduler 已注册下一次周五 08:00 生产与 09:00 草稿任务。
+- **Firecrawl**：生产 `.env.production` 已以不回显方式注入 `FIRECRAWL_API_KEY`，API 容器读取成功；本地与生产容器各执行一次最小 `/search` + `/scrape` smoke test，均返回 `public_web_firecrawl_smoke_ok`，未写业务数据库。
+- **公网验收**：健康接口、首页、求职助手、面经库、职位库、扩展教程和 `0.2.9` ZIP 均返回 `200`；匿名记忆与公开面经任务接口均返回 `401`。线上扩展为 `21948` 字节，SHA-256 为 `060FDB174E668B0E15B461DB176FF77871EC71A4760FCE4F6424B15904528D0F`，与本地一致。
+- **外部调用边界**：除上述两次 Firecrawl 最小验证外，未调用聊天模型、未触发微信草稿、Seedance、TTS 或真人 BOSS 招呼语发送。
