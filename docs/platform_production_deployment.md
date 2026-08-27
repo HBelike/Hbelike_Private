@@ -126,3 +126,14 @@ docker compose --env-file .env.production -f docker-compose.production.yml exec 
 - **Skill 持久卷**：`skill-seed` 按既有规则跳过 57 个已存在 Skill；哈希确认 `github-project-blog` 持久副本与上一版种子完全一致且没有线上编辑后，仅将该文件更新到本次种子，更新后两者 SHA-256 均为 `EE675749BF08783A1EE51E29FC25A81E4C7610CE3256EDD92B7B122425DF8997`。
 - **公网验收**：健康接口与首页、求职助手、面经库、职位库、工作台均返回 `200`；匿名会话和面经树接口均返回 `401`。线上主资源 `/assets/index-BG2ekzHc.js` 已确认包含“显示 API Key”“文章原文”“图片生成”。
 - **生产开关与外部调用边界**：API 的 `VIDEO_SUBMIT_ENABLED`、`AUDIO_ENABLED`、`CAREER_ALLOW_PAID_PROFILES`、`PLATFORM_AUTH_REQUIRED`、`CAREER_REDACTION_ENABLED` 以及 Scheduler 的音视频开关均保持 `true`；本次未主动调用聊天模型、Firecrawl、微信草稿、Seedance、TTS 或真人 BOSS 发送动作。
+
+## 2026-08-28 全量生产部署记录
+
+- **发布目标**：发布技术文章确定性图稿规格、HTML 模板与 Gotenberg 截图链路，面经创建者归属、管理员维护与删除能力，旧默认求职历史归属修复，登录后认证路由刷新修复，Provider 实际模型标识留存，以及求职对话自动滚动、公开面经采集上限和审核台生成方案展示更新。
+- **发布版本**：业务代码提交 `60253cd`，同时包含确定性图稿设计与实施文档提交 `d4789e0`、`e024079`；生产仓库从 `38534fe` 快进更新。个人 `data/`、本机新增插件目录、临时 `src/test.py` 和旧版扩展 `0.2.8` 未进入发布。
+- **发布前验证**：Python 全量 `517 passed`，WebUI 全量 `205 passed`，浏览器扩展全量 `28 passed`；Vite production build、求职助手部署设置、Alembic 单一 head、受控源码编译、补丁凭据扫描与生产 Compose 配置均通过。
+- **部署调用链**：推送 GitHub `main` → 生产 `git pull --ff-only origin main` → `docker compose --env-file .env.production -f docker-compose.production.yml up -d --build` → `skill-seed` 与 `career-migrate` 退出码均为 `0` → API、Worker、Scheduler 与 Web 全量重建完成。
+- **数据库与运行状态**：Alembic 从 `20260827_27` 连续迁移到 `20260828_30 (head)`；旧默认 Actor 的求职会话剩余 `0` 条，固定管理员仍为唯一有效管理员；两张面经表的创建者字段与模型用量表的 Provider 模型字段均已落库。API、Web、PostgreSQL 均为 healthy，Worker、Scheduler、Caddy、Docling、Gotenberg 正常运行，启动后日志未出现 `ERROR`、`Traceback` 或 `Exception`。
+- **确定性图稿与 Skill 持久卷**：API 镜像内字体文件和确定性渲染模块加载通过，媒体生产 readiness 无 blocker。`github-project-blog` 与 `grill-me` 的线上持久副本均与上一版种子哈希一致，确认没有线上编辑后才同步到新种子；同步后 API 与 Scheduler 读取哈希一致。
+- **公网验收**：健康接口返回 `career_runtime_revision=2026-08-28-interview-admin-permissions-v2`；首页、求职助手、面经库和审核台均返回 `200`，匿名面经树、删除面经与创建公开采集任务均返回 `401`。线上主资源 `/assets/index-M0V9WIBS.js` 已确认包含图片总结方案、实际调用模型、面经删除、维护权限与默认 10 条采集文案。
+- **生产开关与外部调用边界**：API 的 `VIDEO_SUBMIT_ENABLED`、`AUDIO_ENABLED`、`CAREER_ALLOW_PAID_PROFILES`、`PLATFORM_AUTH_REQUIRED`、`CAREER_REDACTION_ENABLED` 以及 Scheduler 的音视频开关均保持 `true`；本次只执行无付费请求的 readiness 检查，未主动调用聊天模型、Firecrawl、微信草稿、Seedream、TTS 或真人 BOSS 发送动作。
