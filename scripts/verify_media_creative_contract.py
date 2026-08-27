@@ -104,7 +104,13 @@ def main() -> None:
     ]
     assert all(120 <= len(prompt) <= config.image_prompt_max_length for prompt in image_prompts), "最终 Ark 图片 Prompt 长度异常"
     assert all("http://" not in prompt and "https://" not in prompt for prompt in image_prompts)
-    assert all("白底" in prompt and "正交折线" in prompt and "禁标题" in prompt for prompt in image_prompts)
+    assert all(
+        "无标题的16:9工程架构信息图" in prompt
+        and "每个模块只出现一次" in prompt
+        and "箭头仅限" in prompt
+        and "连线不写文字" in prompt
+        for prompt in image_prompts
+    )
     assert len(set(image_prompts)) == len(image_prompts), "五个项目不应编译为相同 Prompt"
 
     image_task = object.__new__(ImageTask)

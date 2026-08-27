@@ -187,6 +187,8 @@ class MediaPreviewService:
         if not isinstance(image_prompts, list):
             return []
 
+        deterministic_assets: dict[tuple[str, int], MediaAssetRecord] = {}
+        unindexed_deterministic_assets: dict[str, list[MediaAssetRecord]] = {}
         seedream_assets: dict[str, MediaAssetRecord] = {}
         fallback_assets: dict[str, MediaAssetRecord] = {}
         # 后创建的资产优先。刷新图片时旧图会被标记为 replaced，因此这里也
@@ -202,6 +204,22 @@ class MediaPreviewService:
             if not repository_full_name:
                 continue
 
+            if self._is_deterministic_rendered_asset(asset=asset, metadata=metadata):
+                prompt_index = metadata.get("prompt_index")
+                if (
+                    isinstance(prompt_index, int)
+                    and not isinstance(prompt_index, bool)
+                    and prompt_index > 0
+                ):
+                    deterministic_assets.setdefault(
+                        (repository_full_name, prompt_index), asset
+                    )
+                else:
+                    unindexed_deterministic_assets.setdefault(
+                        repository_full_name, []
+                    ).append(asset)
+                continue
+
             if self._is_seedream_designed_asset(asset=asset, metadata=metadata):
                 seedream_assets.setdefault(repository_full_name, asset)
                 continue
@@ -209,7 +227,7 @@ class MediaPreviewService:
             fallback_assets.setdefault(repository_full_name, asset)
 
         preview_prompts: list[dict[str, Any]] = []
-        for raw_item in image_prompts:
+        for prompt_index, raw_item in enumerate(image_prompts, start=1):
             if not isinstance(raw_item, dict):
                 continue
 
@@ -218,6 +236,13 @@ class MediaPreviewService:
             repository_key = self._repository_key(repository_full_name)
             original_prompt = str(item.get("prompt", "")).strip()
             raw_prompt = str(item.get("raw_prompt", "")).strip() or original_prompt
+            deterministic_asset = deterministic_assets.get((repository_key, prompt_index))
+            if deterministic_asset is None:
+                unindexed_assets = unindexed_deterministic_assets.get(
+                    repository_key, []
+                )
+                if len(unindexed_assets) == 1:
+                    deterministic_asset = unindexed_assets[0]
             seedream_asset = seedream_assets.get(repository_key)
             fallback_asset = fallback_assets.get(repository_key)
 
@@ -228,7 +253,32 @@ class MediaPreviewService:
             item["video_brief"] = item.get("video_brief")
             item["asset_id"] = item.get("asset_id")
 
-            if seedream_asset is not None:
+            if deterministic_asset is not None:
+                metadata = self._metadata_dict(deterministic_asset.metadata)
+                visual_spec = self._metadata_dict(metadata.get("visual_spec"))
+                effective_prompt = (
+                    str(metadata.get("prompt", "")).strip()
+                    or str(visual_spec.get("purpose", "")).strip()
+                    or original_prompt
+                )
+                item["prompt"] = effective_prompt
+                item["effective_prompt"] = effective_prompt
+                item["prompt_stage"] = "deterministic_rendered"
+                item["prompt_designed_by"] = "ArticleVisualTemplateService"
+                item["visual_spec"] = visual_spec
+                item["figure_role"] = str(
+                    metadata.get("figure_role") or visual_spec.get("figure_role") or ""
+                ).strip()
+                item["template_version"] = metadata.get("template_version")
+                item["renderer_version"] = metadata.get("renderer_version")
+                item["render_key"] = metadata.get("render_key")
+                item["validation_result"] = self._metadata_dict(
+                    metadata.get("validation_result")
+                )
+                item["asset_id"] = deterministic_asset.id
+                item["asset_provider"] = deterministic_asset.provider
+                item["asset_status"] = deterministic_asset.status
+            elif seedream_asset is not None:
                 metadata = self._metadata_dict(seedream_asset.metadata)
                 effective_prompt = str(metadata.get("prompt", "")).strip()
                 # marker 已由 _is_seedream_designed_asset 校验；此处仍保留回退，
@@ -285,6 +335,16 @@ class MediaPreviewService:
             and bool(prompt)
             and "seedream" in provider
         )
+
+    @staticmethod
+    def _is_deterministic_rendered_asset(
+        asset: MediaAssetRecord, metadata: dict[str, Any]
+    ) -> bool:
+        """识别已通过确定性模板渲染的图片资产。"""
+
+        provider = str(asset.provider or "").strip().casefold()
+        render_key = str(metadata.get("render_key", "")).strip()
+        return provider == "gotenberg_html" and bool(render_key)
 
     def _fallback_prompt_stage(
         self,

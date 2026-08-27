@@ -57,10 +57,11 @@ class CompletionRequestOptions:
 
 @dataclass(frozen=True)
 class CompletionUsage:
-    """Provider 返回的真实 Token 用量；缺失时保留 None。"""
+    """Provider 返回的真实 Token 用量与模型标识；缺失时保留 None。"""
 
     input_tokens: int | None
     output_tokens: int | None
+    provider_reported_model_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -476,7 +477,12 @@ class OpenAICompatibleChatClient:
         try:
             payload = response.json()
             if usage_callback is not None:
-                usage_callback(self._completion_usage(payload.get("usage")))
+                usage_callback(
+                    self._completion_usage(
+                        payload.get("usage"),
+                        provider_reported_model_id=payload.get("model"),
+                    ),
+                )
             choice = payload["choices"][0]
             message = choice["message"]
             content = message["content"]
@@ -550,7 +556,12 @@ class OpenAICompatibleChatClient:
         try:
             payload = response.json()
             if usage_callback is not None:
-                usage_callback(self._completion_usage(payload.get("usage")))
+                usage_callback(
+                    self._completion_usage(
+                        payload.get("usage"),
+                        provider_reported_model_id=payload.get("model"),
+                    ),
+                )
             message = payload["choices"][0]["message"]
         except (IndexError, KeyError, TypeError, ValueError) as exc:
             raise ModelInvocationError("模型 Tool Calling 返回格式异常") from exc
@@ -620,7 +631,12 @@ class OpenAICompatibleChatClient:
                     try:
                         payload = json.loads(data)
                         if payload.get("usage") is not None and usage_callback is not None:
-                            usage_callback(self._completion_usage(payload.get("usage")))
+                            usage_callback(
+                                self._completion_usage(
+                                    payload.get("usage"),
+                                    provider_reported_model_id=payload.get("model"),
+                                ),
+                            )
                         choices = payload.get("choices") or []
                         if not choices:
                             continue
@@ -727,9 +743,19 @@ class OpenAICompatibleChatClient:
         return payload
 
     @staticmethod
-    def _completion_usage(raw: object) -> CompletionUsage:
+    def _completion_usage(
+        raw: object,
+        *,
+        provider_reported_model_id: object = None,
+    ) -> CompletionUsage:
+        reported_model_id = (
+            provider_reported_model_id.strip()[:200]
+            if isinstance(provider_reported_model_id, str)
+            and provider_reported_model_id.strip()
+            else None
+        )
         if not isinstance(raw, dict):
-            return CompletionUsage(None, None)
+            return CompletionUsage(None, None, reported_model_id)
 
         def token_value(name: str) -> int | None:
             value = raw.get(name)
@@ -738,6 +764,7 @@ class OpenAICompatibleChatClient:
         return CompletionUsage(
             token_value("prompt_tokens"),
             token_value("completion_tokens"),
+            reported_model_id,
         )
 
     @staticmethod

@@ -17,6 +17,7 @@ from src.repositories.content_approval_repository import ContentApprovalReposito
 from src.repositories.generated_content_repository import GeneratedContentInput, GeneratedContentRepository
 from src.repositories.weekly_ranking_repository import WeeklyRankingRecord, WeeklyRankingRepository
 from src.services.article_skill_prompt_loader import ArticleSkillPromptLoader
+from src.services.article_visual_planning_service import ArticleVisualPlanningService
 from src.services.media_creative_brief_service import MediaCreativeBriefService
 from src.services.skill_library_service import SkillLibraryService
 from src.tasks.base_task import BaseTask
@@ -333,7 +334,11 @@ class SummaryTask(BaseTask):
             )
             try:
                 parsed = parse_json_object_from_text(response.content)
-                return response, self._normalize_project_output(parsed, ranking), audit
+                return response, self._normalize_project_output(
+                    parsed,
+                    ranking,
+                    ranking_evidence,
+                ), audit
             except (JSONDecodeError, ValueError) as exc:
                 validation_error = str(exc)
                 if attempt_index == 2:
@@ -361,6 +366,30 @@ class SummaryTask(BaseTask):
             rankings=[ranking],
             ranking_evidence={ranking.full_name: ranking_evidence},
         )[0]
+        allowed_evidence_paths = self._allowed_visual_evidence_paths(
+            ranking,
+            ranking_evidence,
+        )
+        evidence_path_order = (
+            "weekly_ranking",
+            "repository.description",
+            "repository.topics",
+            "repository.license",
+            "README.md",
+        )
+        evidence_kind_by_path = {
+            "weekly_ranking": "weekly_ranking",
+            "repository.description": "repository_metadata",
+            "repository.topics": "repository_metadata",
+            "repository.license": "repository_metadata",
+            "README.md": "repository_file",
+        }
+        ordered_evidence_paths = [
+            path for path in evidence_path_order if path in allowed_evidence_paths
+        ]
+        evidence_kind_contract = "；".join(
+            f"{path}→{evidence_kind_by_path[path]}" for path in ordered_evidence_paths
+        )
         repair_section = (
             f"上次输出未通过合同：{validation_error}\n请只修复当前项目的合同错误。"
             if validation_error
@@ -374,7 +403,7 @@ class SummaryTask(BaseTask):
             f"\n\n{self._build_article_skill_section(article_skill_instructions)}"
         )
         user_prompt = f"""
-为下面一个项目生成独立教学章节和一份架构加数据流视觉简报。
+为下面一个项目生成独立教学章节和一份可确定性渲染的技术总结图规格。
 
 {self._build_regeneration_feedback_section(regeneration_feedback)}
 
@@ -388,14 +417,27 @@ overview_text: 一个自然段，原样写出本周新增 {ranking.star_growth} 
 technical_features_markdown: 解释项目定位、解决的问题、架构、模块与职责
 mechanism_breakdown_markdown: 解释入口到输出的数据流、证据明确的关键文件或函数、依赖和调用关系
 engineering_insights_markdown: 解释技术难点、设计取舍、坑点、使用边界和源码阅读顺序
-project_brief: 只含 summary_text 和 visual_brief。visual_brief 只含 diagram_type、teaching_goal、visual_thesis、nodes、relationships、reading_order、chinese_labels
+project_brief: 只含 summary_text 和 visual_spec
 
-visual_brief 要求：
-- diagram_type 只能是 structural_breakdown、linear_progression、circular_flow、hub_spoke、layered_system、comparison
-- nodes 为 3 到 4 个正文中真实出现的模块或步骤，每项只含 id、label、role；label 使用 2 到 6 个字，禁用“输入、核心、处理、输出、任务、计划、执行、反馈、结果”等占位词
-- relationships 为 2 到 4 条，每项只含 from、to、label；至少一条 label 为数据流，其余只能使用强耦合、弱耦合、同步调用、异步调用、事件推送
-- reading_order 完整引用 nodes 的 id；chinese_labels 只列节点短标签
-- 一张图同时表达模块架构和入口到输出的主数据流；没有证据时不得编造耦合或调用方式
+visual_spec 公共字段必须严格为：
+- version 固定为 article_visual_spec_v1；repository_full_name 原样等于 {ranking.full_name}
+- figure_role 只能是 summary_card、flow、architecture、comparison、timeline
+- purpose 不超过 80 字；headline 不超过 30 字；takeaways 为 1 到 3 条
+- evidence_refs 为 1 到 8 条，每项只含 kind、path、claim
+- 本项目允许的 evidence_refs.path：{"、".join(ordered_evidence_paths)}
+- evidence_refs 的 path→kind 必须严格对应：{evidence_kind_contract}
+- art_direction 固定为 {{"style":"notion","palette":"editorial_blue","density":"medium"}}
+
+按以下顺序选择 figure_role：证据不足时选择 summary_card；有明确连续步骤才选择 flow；有明确模块和依赖关系才选择 architecture；有两种方案及同维度差异才选择 comparison；有明确阶段或版本演进才选择 timeline。不得为了画图虚构模块、边、时间或比较项。
+
+figure_role 专属字段：
+- summary_card：positioning 不超过 180 字；capabilities 为 2 到 4 项，每项只含 label、description
+- flow：steps 为 3 到 5 项，每项只含 id、label、description；edges 必须且只能按 steps 相邻顺序连接，每项只含 from、to，可选 label
+- architecture：nodes 为 3 到 7 项，每项只含 id、label、description，可选 layer；edges 为 2 到 12 项；可选 layers 为 1 到 4 项，每项只含 id、label。若提供 layers，每个 node 都必须包含有效 layer，且每层至少被一个 node 使用
+- comparison：left 和 right 各只含 label、description；dimensions 为 2 到 4 项，每项只含 label、left、right
+- timeline：events 为 3 到 6 项，每项只含 id、time、label、description
+
+禁止输出 16:9、16.9、工程架构、架构信息图、技术信息图、流程图、对比图、示意图、无标题等图片格式或图型元文字，也不得输出占位内容。
 
 不得输出 URL、仓库地址、供应商图片 Prompt、视频、旁白或大段源码。不要使用赋能、解锁、颠覆、全面解析、聊天式开场、Unicode 长横线或连续的“不是 X，而是 Y”。
 
@@ -411,8 +453,9 @@ visual_brief 要求：
             self,
             parsed: dict[str, Any],
             ranking: WeeklyRankingRecord,
+            ranking_evidence: GitHubRepositoryEvidence,
     ) -> dict[str, Any]:
-        """校验一个项目的概述、三个教学分点和视觉简报。"""
+        """校验一个项目的概述、三个教学分点和证据绑定的视觉规格。"""
 
         if set(parsed) != self._project_output_fields:
             raise ValueError(
@@ -447,32 +490,52 @@ visual_brief 要求：
             normalized[field] = value
 
         raw_brief = parsed["project_brief"]
-        if not isinstance(raw_brief, dict) or set(raw_brief) != {"summary_text", "visual_brief"}:
+        if not isinstance(raw_brief, dict) or set(raw_brief) != {"summary_text", "visual_spec"}:
             raise ValueError(f"{ranking.full_name} 的 project_brief 字段不符合合同")
+        summary_text = self._normalize_generated_prose(str(raw_brief["summary_text"]))
+        if not summary_text:
+            raise ValueError(f"{ranking.full_name} 的 summary_text 不能为空")
+
+        allowed_evidence_paths = self._allowed_visual_evidence_paths(
+            ranking,
+            ranking_evidence,
+        )
+        planning_service = ArticleVisualPlanningService()
+        validated_spec = planning_service.plan(
+            raw_brief["visual_spec"],
+            ranking.full_name,
+            allowed_evidence_paths,
+        )
         brief_item = {
             "repository_full_name": ranking.full_name,
-            "summary_text": self._normalize_generated_prose(str(raw_brief["summary_text"])),
-            "visual_brief": raw_brief["visual_brief"],
+            "summary_text": summary_text,
+            "visual_spec": validated_spec.value,
         }
-        if not brief_item["summary_text"]:
-            raise ValueError(f"{ranking.full_name} 的 summary_text 不能为空")
         self._validate_project_briefs([brief_item], [ranking])
-        visual_brief = MediaCreativeBriefService().normalize_visual_brief(
-            raw_brief=brief_item["visual_brief"],
-            repository_full_name=ranking.full_name,
-            fallback_text=normalized["mechanism_breakdown_markdown"],
-            project_index=ranking.rank,
-        )
-        if len(visual_brief["nodes"]) < 3 or len(visual_brief["relationships"]) < 2:
-            raise ValueError(f"{ranking.full_name} 的 visual_brief 缺少架构节点或关系")
-        if not any(item["label"] == "数据流" for item in visual_brief["relationships"]):
-            raise ValueError(f"{ranking.full_name} 的 visual_brief 缺少主数据流")
         normalized["project_brief"] = {
             "repository_full_name": ranking.full_name,
-            "summary_text": brief_item["summary_text"],
-            "visual_brief": visual_brief,
+            "summary_text": summary_text,
+            "visual_spec": validated_spec.value,
         }
         return normalized
+
+    @staticmethod
+    def _allowed_visual_evidence_paths(
+            ranking: WeeklyRankingRecord,
+            ranking_evidence: GitHubRepositoryEvidence,
+    ) -> set[str]:
+        """只允许模型引用当前项目实际存在的证据字段。"""
+
+        allowed = {"weekly_ranking"}
+        if str(ranking.description or "").strip():
+            allowed.add("repository.description")
+        if any(str(topic).strip() for topic in ranking_evidence.topics):
+            allowed.add("repository.topics")
+        if str(ranking_evidence.license_name or "").strip():
+            allowed.add("repository.license")
+        if str(ranking_evidence.readme_excerpt or "").strip():
+            allowed.add("README.md")
+        return allowed
 
     def _generate_global_content(
             self,
@@ -687,6 +750,7 @@ stars 数量最多项目: {highest_star_repository.full_name}
 
         project_briefs = self._validate_project_briefs(raw_project_briefs, rankings)
         creative_brief_service = MediaCreativeBriefService()
+        planning_service = ArticleVisualPlanningService()
         content_briefs: list[dict[str, Any]] = []
         for index, ranking in enumerate(rankings, start=1):
             project_analysis = project_analyses[ranking.full_name]
@@ -695,15 +759,14 @@ stars 数量最多项目: {highest_star_repository.full_name}
                 str(raw_project_brief.get("summary_text", "")),
                 ranking.full_name,
             ) or self._build_project_summary_from_analysis(ranking, project_analysis)
-            visual_brief = creative_brief_service.normalize_visual_brief(
-                raw_brief=raw_project_brief.get("visual_brief"),
-                repository_full_name=ranking.full_name,
-                fallback_text=project_analysis,
-                project_index=index,
+            validated_spec = planning_service.plan(
+                raw_project_brief["visual_spec"],
+                ranking.full_name,
+                allowed_evidence_paths=None,
             )
-            if len(visual_brief["nodes"]) < 3 or len(visual_brief["relationships"]) < 2:
-                raise ValueError(f"{ranking.full_name} 的 visual_brief 缺少可执行模块或关系")
-            semantic_focus = str(visual_brief["visual_thesis"])
+            visual_spec = validated_spec.value
+            visual_brief = planning_service.to_video_visual_brief(validated_spec)
+            semantic_focus = str(visual_spec["purpose"])
             video_brief = creative_brief_service.normalize_video_brief(
                 raw_brief=None,
                 visual_brief=visual_brief,
@@ -720,7 +783,8 @@ stars 数量最多项目: {highest_star_repository.full_name}
                     "project_analysis_markdown": project_analysis,
                     "prompt": semantic_focus,
                     "raw_prompt": semantic_focus,
-                    "prompt_stage": "content_brief_v2",
+                    "prompt_stage": "article_visual_spec_v1",
+                    "visual_spec": visual_spec,
                     "visual_brief": visual_brief,
                     "video_brief": video_brief,
                 }
@@ -732,21 +796,11 @@ stars 数量最多项目: {highest_star_repository.full_name}
             raw_project_briefs: Any,
             rankings: list[WeeklyRankingRecord],
     ) -> dict[str, dict[str, Any]]:
-        """校验模型给出的内容相关视觉简报，拒绝通用占位架构图。"""
+        """校验项目简报与排名一一对应；视觉规格由独立 validator 负责。"""
 
         if not isinstance(raw_project_briefs, list) or len(raw_project_briefs) != len(rankings):
             raise ValueError(f"project_briefs 必须正好包含 {len(rankings)} 项")
 
-        banned_labels = {"输入", "核心", "核心层", "处理", "输出", "任务", "计划", "执行", "反馈", "结果"}
-        allowed_diagram_types = {
-            "structural_breakdown",
-            "linear_progression",
-            "circular_flow",
-            "hub_spoke",
-            "layered_system",
-            "comparison",
-        }
-        allowed_relationship_labels = {"强耦合", "弱耦合", "异步调用", "同步调用", "数据流", "事件推送"}
         normalized: dict[str, dict[str, Any]] = {}
         for ranking, raw_item in zip(rankings, raw_project_briefs, strict=True):
             if not isinstance(raw_item, dict):
@@ -756,44 +810,8 @@ stars 数量最多项目: {highest_star_repository.full_name}
                 raise ValueError(
                     f"project_briefs 项目顺序或名称错误：expected={ranking.full_name} actual={repository_full_name}"
                 )
-            visual_brief = raw_item.get("visual_brief")
-            if not isinstance(visual_brief, dict):
-                raise ValueError(f"{ranking.full_name} 缺少 visual_brief")
-            if str(visual_brief.get("diagram_type", "")) not in allowed_diagram_types:
-                raise ValueError(f"{ranking.full_name} 的 diagram_type 不受支持")
-            nodes = visual_brief.get("nodes")
-            relationships = visual_brief.get("relationships")
-            if not isinstance(nodes, list) or not 3 <= len(nodes) <= 4:
-                raise ValueError(f"{ranking.full_name} 的 nodes 必须包含 3 到 4 项")
-            if not isinstance(relationships, list) or not 2 <= len(relationships) <= 4:
-                raise ValueError(f"{ranking.full_name} 的 relationships 必须包含 2 到 4 项")
-            labels = {
-                str(node.get("label", "")).strip()
-                for node in nodes
-                if isinstance(node, dict)
-            }
-            if not labels or labels & banned_labels:
-                raise ValueError(f"{ranking.full_name} 的 nodes 使用了通用占位标签")
-            node_ids = {
-                str(node.get("id", "")).strip()
-                for node in nodes
-                if isinstance(node, dict) and str(node.get("id", "")).strip()
-            }
-            if len(node_ids) != len(nodes):
-                raise ValueError(f"{ranking.full_name} 的 nodes id 缺失或重复")
-            for relationship in relationships:
-                if not isinstance(relationship, dict):
-                    raise ValueError(f"{ranking.full_name} 的 relationship 必须是对象")
-                source = str(relationship.get("from", "")).strip()
-                target = str(relationship.get("to", "")).strip()
-                label = str(relationship.get("label", "")).strip()
-                if source not in node_ids or target not in node_ids or source == target:
-                    raise ValueError(f"{ranking.full_name} 的 relationship 引用了无效节点")
-                if label not in allowed_relationship_labels:
-                    raise ValueError(f"{ranking.full_name} 的 relationship label 不受支持")
-            reading_order = visual_brief.get("reading_order")
-            if not isinstance(reading_order, list) or set(map(str, reading_order)) != node_ids:
-                raise ValueError(f"{ranking.full_name} 的 reading_order 必须完整引用 nodes")
+            if not isinstance(raw_item.get("visual_spec"), dict):
+                raise ValueError(f"{ranking.full_name} 缺少 visual_spec")
             normalized[ranking.full_name] = raw_item
         return normalized
 

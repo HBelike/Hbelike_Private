@@ -18,7 +18,7 @@ test('保留小红书 URL 能力，但顶部信息收集入口改为公开网页
 })
 
 test('历史小红书浏览器编排仍保留五到五十条的服务契约', () => {
-  assert.match(component, /type="number" min="5" max="50"/)
+  assert.match(component, /normalizeXiaohongshuCollectionLimit\(job\.requested_limit/)
   assert.match(component, /XIAOHONGSHU_COLLECTION_JOB_STORAGE_KEY/)
   assert.match(component, /runXiaohongshuBrowserCollection/)
   assert.match(component, /pauseXiaohongshuBrowserCollection/)

@@ -7,10 +7,10 @@ export const PUBLIC_WEB_COLLECTION_STAGES = [
 ]
 
 export function normalizePublicWebCollectionLimit(value) {
-  if (value === '' || value === null || value === undefined) return 20
+  if (value === '' || value === null || value === undefined) return 10
   const parsed = Number(value)
-  if (!Number.isFinite(parsed)) return 20
-  return Math.max(5, Math.min(50, Math.round(parsed)))
+  if (!Number.isFinite(parsed)) return 10
+  return Math.max(5, Math.min(10, Math.round(parsed)))
 }
 
 function count(value) {

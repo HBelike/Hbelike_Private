@@ -855,6 +855,7 @@ class InterviewCollectionService:
         self,
         organization_id: UUID,
         *,
+        created_by_actor_id: UUID,
         keyword: str,
         requested_limit: int,
     ) -> InterviewCollectionJobRecord:
@@ -867,6 +868,7 @@ class InterviewCollectionService:
             )
         return self._public_web_coordinator.create_job(
             organization_id,
+            created_by_actor_id=created_by_actor_id,
             keyword=keyword,
             requested_limit=requested_limit,
         )
@@ -882,6 +884,7 @@ class InterviewCollectionService:
         self,
         organization_id: UUID,
         *,
+        created_by_actor_id: UUID,
         keyword: str,
         requested_limit: int,
     ) -> InterviewCollectionJobRecord:
@@ -894,6 +897,7 @@ class InterviewCollectionService:
             raise ValueError("小红书单次信息收集数量必须在 5 到 50 之间")
         return self._repository.create_collection_job(
             organization_id=organization_id,
+            created_by_actor_id=created_by_actor_id,
             platform_key="xiaohongshu",
             keyword=normalized_keyword,
             requested_limit=requested_limit,
@@ -1177,6 +1181,7 @@ class InterviewCollectionService:
         self,
         organization_id: UUID,
         *,
+        created_by_actor_id: UUID,
         source_url: str,
         requested_limit: int,
         include_images: bool,
@@ -1206,6 +1211,7 @@ class InterviewCollectionService:
         }
         return self._repository.create_collection_job(
             organization_id=organization_id,
+            created_by_actor_id=created_by_actor_id,
             platform_key="xiaohongshu",
             keyword=normalized_url,
             requested_limit=requested_limit,
@@ -1461,6 +1467,12 @@ class InterviewCollectionService:
     ) -> InterviewCollectionCandidateRecord:
         """处理一篇已读取的笔记，并在必要时把有效面经自动写入现有面经库。"""
 
+        collection_job = self._repository.get_collection_job(
+            organization_id,
+            collection_job_id,
+        )
+        if collection_job is None:
+            raise LookupError("采集任务不存在")
         markdown_content, image_metadata = self._build_xiaohongshu_markdown(
             note,
             include_images=include_images,
@@ -1554,6 +1566,7 @@ class InterviewCollectionService:
                     ),
                 ),
                 trigger_type=IngestionTriggerType.MANUAL_URL,
+                created_by_actor_id=collection_job.created_by_actor_id,
             )
         except (LookupError, RuntimeError, ValueError) as exc:
             LOGGER.warning(
@@ -2087,6 +2100,7 @@ class InterviewCollectionService:
         self,
         organization_id: UUID,
         *,
+        created_by_actor_id: UUID,
         platform_key: str,
         keyword: str,
         requested_limit: int,
@@ -2103,11 +2117,13 @@ class InterviewCollectionService:
             # 兼容既有公开关键词入口；新的“信息收集”按钮使用专用浏览器任务接口。
             return self.create_xiaohongshu_keyword_import_job(
                 organization_id,
+                created_by_actor_id=created_by_actor_id,
                 keyword=normalized_keyword,
                 requested_limit=requested_limit,
             )
         job = self._repository.create_collection_job(
             organization_id=organization_id,
+            created_by_actor_id=created_by_actor_id,
             platform_key=policy.key,
             keyword=normalized_keyword,
             requested_limit=requested_limit,
@@ -2128,6 +2144,7 @@ class InterviewCollectionService:
         self,
         organization_id: UUID,
         *,
+        created_by_actor_id: UUID,
         keyword: str,
         requested_limit: int,
     ) -> InterviewCollectionJobRecord:
@@ -2157,6 +2174,7 @@ class InterviewCollectionService:
         }
         return self._repository.create_collection_job(
             organization_id=organization_id,
+            created_by_actor_id=created_by_actor_id,
             platform_key=policy.key,
             keyword=normalized_keyword,
             requested_limit=requested_limit,
@@ -2169,6 +2187,7 @@ class InterviewCollectionService:
         self,
         organization_id: UUID,
         *,
+        created_by_actor_id: UUID,
         source_url: str,
     ) -> tuple[InterviewCollectionJobRecord, InterviewCollectionCandidateRecord]:
         """读取用户明确提交的公开文章，生成待选择候选项。"""
@@ -2186,6 +2205,7 @@ class InterviewCollectionService:
             },
             execute=lambda: self._collect_public_url(
                 organization_id,
+                created_by_actor_id=created_by_actor_id,
                 source_url=source_url,
             ),
             summarize=lambda result: {
@@ -2201,12 +2221,14 @@ class InterviewCollectionService:
         self,
         organization_id: UUID,
         *,
+        created_by_actor_id: UUID,
         source_url: str,
     ) -> tuple[InterviewCollectionJobRecord, InterviewCollectionCandidateRecord]:
         """执行一次公开页面读取与候选持久化；仅由观测包装入口调用。"""
 
         job = self._repository.create_collection_job(
             organization_id=organization_id,
+            created_by_actor_id=created_by_actor_id,
             platform_key="public_url",
             keyword=source_url,
             requested_limit=1,
@@ -2272,6 +2294,8 @@ class InterviewCollectionService:
         self,
         organization_id: UUID,
         *,
+        actor_id: UUID,
+        can_manage_all: bool = False,
         candidate_id: UUID,
         company_name: str,
         role_name: str,
@@ -2287,6 +2311,11 @@ class InterviewCollectionService:
         """
 
         candidate = self.select_candidate(organization_id, candidate_id)
+        job = self._repository.get_collection_job(organization_id, candidate.collection_job_id)
+        if job is None:
+            raise LookupError("采集任务不存在")
+        if not can_manage_all and job.created_by_actor_id != actor_id:
+            raise PermissionError("仅采集任务发起人或管理员可以保存该候选面经")
         reviewed_markdown = (markdown_content or "").strip()
         if reviewed_markdown:
             reviewed_hash = sha256(reviewed_markdown.encode("utf-8")).hexdigest()
@@ -2319,6 +2348,8 @@ class InterviewCollectionService:
                 tags=tags,
             ),
             trigger_type=IngestionTriggerType.MANUAL_URL,
+            created_by_actor_id=job.created_by_actor_id or actor_id,
+            can_manage_all=can_manage_all,
         )
         self._repository.set_collection_candidate_status(
             organization_id,

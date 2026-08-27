@@ -13,6 +13,16 @@ from src.config.config_manager import AppConfig
 from src.observability.langsmith_runtime import trace_llm_call
 
 
+MAX_REQUEST_ATTEMPTS = 5
+RETRY_BACKOFF_SECONDS = 0.8
+TRANSIENT_REQUEST_ERRORS = (
+    requests.exceptions.ConnectionError,
+    requests.exceptions.Timeout,
+    requests.exceptions.ChunkedEncodingError,
+)
+TRANSIENT_DOWNLOAD_ERRORS = (*TRANSIENT_REQUEST_ERRORS, OSError)
+
+
 class SeedreamApiError(RuntimeError):
     """Seedream 图片接口调用失败。"""
 
@@ -87,16 +97,48 @@ class SeedreamProvider:
     ) -> dict[str, Any]:
         """只执行 Seedream 模型 HTTP 请求；图片下载不属于 LLM Trace。"""
 
-        try:
-            response = requests.post(
-                endpoint,
-                headers=headers,
-                json=payload,
-                timeout=self.config.image_timeout_seconds,
-            )
-        except requests.RequestException as exc:
-            raise SeedreamApiError(f"Seedream 请求失败：{exc}") from exc
+        use_environment_proxy = True
+        response: requests.Response | None = None
+        last_error: requests.RequestException | None = None
 
+        for attempt in range(1, MAX_REQUEST_ATTEMPTS + 1):
+            try:
+                with requests.Session() as session:
+                    session.trust_env = use_environment_proxy
+                    response = session.post(
+                        endpoint,
+                        headers=headers,
+                        json=payload,
+                        timeout=self.config.image_timeout_seconds,
+                    )
+            except TRANSIENT_REQUEST_ERRORS as exc:
+                last_error = exc
+                if isinstance(exc, requests.exceptions.ProxyError):
+                    # 系统代理是可选网络路径；代理断开后改为直连，避免重复撞击故障代理。
+                    use_environment_proxy = False
+                if attempt < MAX_REQUEST_ATTEMPTS:
+                    self._sleep_before_retry(attempt)
+                    continue
+                raise SeedreamApiError(
+                    f"Seedream 请求失败，已尝试 {MAX_REQUEST_ATTEMPTS} 次：{exc}"
+                ) from exc
+            except requests.RequestException as exc:
+                raise SeedreamApiError(f"Seedream 请求失败：{exc}") from exc
+
+            if self._is_retryable_status(response.status_code):
+                if attempt < MAX_REQUEST_ATTEMPTS:
+                    self._sleep_before_retry(attempt)
+                    continue
+                raise SeedreamApiError(
+                    f"Seedream 返回错误状态码 {response.status_code}，"
+                    f"已尝试 {MAX_REQUEST_ATTEMPTS} 次：{response.text[:500]}"
+                )
+            break
+
+        if response is None:
+            raise SeedreamApiError(
+                f"Seedream 请求失败，已尝试 {MAX_REQUEST_ATTEMPTS} 次：{last_error}"
+            ) from last_error
         if response.status_code >= 400:
             raise SeedreamApiError(f"Seedream 返回错误状态码 {response.status_code}：{response.text[:500]}")
 
@@ -148,25 +190,36 @@ class SeedreamProvider:
     def _download_image(self, image_url: str, output_path: Path) -> None:
         """下载 Seedream 返回的签名图片 URL，并处理对象存储的瞬时 TLS 断连。"""
 
-        attempts = 3
         temporary_path = output_path.with_name(f"{output_path.name}.part")
-        last_error: requests.RequestException | OSError | None = None
+        last_error: Exception | None = None
+        use_environment_proxy = True
 
-        for attempt in range(1, attempts + 1):
+        for attempt in range(1, MAX_REQUEST_ATTEMPTS + 1):
             try:
                 # 不复用可能已被对象存储关闭的连接，避免半文件被误判为成功结果。
-                with requests.get(
-                    image_url,
-                    headers={"Connection": "close"},
-                    stream=True,
-                    timeout=(15, self.config.image_timeout_seconds),
-                ) as response:
-                    if response.status_code >= 400:
-                        raise SeedreamApiError(f"Seedream 图片下载返回错误状态码 {response.status_code}")
-                    with temporary_path.open("wb") as handle:
-                        for chunk in response.iter_content(chunk_size=1024 * 256):
-                            if chunk:
-                                handle.write(chunk)
+                with requests.Session() as session:
+                    session.trust_env = use_environment_proxy
+                    with session.get(
+                        image_url,
+                        headers={"Connection": "close"},
+                        stream=True,
+                        timeout=(15, self.config.image_timeout_seconds),
+                    ) as response:
+                        if self._is_retryable_status(response.status_code):
+                            last_error = SeedreamApiError(
+                                f"Seedream 图片下载返回错误状态码 {response.status_code}"
+                            )
+                            self._remove_partial_file(temporary_path)
+                            if attempt < MAX_REQUEST_ATTEMPTS:
+                                self._sleep_before_retry(attempt)
+                                continue
+                            break
+                        if response.status_code >= 400:
+                            raise SeedreamApiError(f"Seedream 图片下载返回错误状态码 {response.status_code}")
+                        with temporary_path.open("wb") as handle:
+                            for chunk in response.iter_content(chunk_size=1024 * 256):
+                                if chunk:
+                                    handle.write(chunk)
 
                 if not temporary_path.exists() or temporary_path.stat().st_size <= 0:
                     raise OSError("图片下载结果为空")
@@ -175,14 +228,33 @@ class SeedreamProvider:
             except SeedreamApiError:
                 self._remove_partial_file(temporary_path)
                 raise
-            except (requests.RequestException, OSError) as exc:
+            except TRANSIENT_DOWNLOAD_ERRORS as exc:
                 last_error = exc
+                if isinstance(exc, requests.exceptions.ProxyError):
+                    use_environment_proxy = False
                 self._remove_partial_file(temporary_path)
-                if attempt < attempts:
-                    time.sleep(0.8 * attempt)
+                if attempt < MAX_REQUEST_ATTEMPTS:
+                    self._sleep_before_retry(attempt)
+            except requests.RequestException as exc:
+                self._remove_partial_file(temporary_path)
+                raise SeedreamApiError(f"Seedream 图片下载失败：{exc.__class__.__name__}") from exc
 
         detail = self._download_failure_detail(last_error)
-        raise SeedreamApiError(f"Seedream 图片下载失败，已重试 {attempts} 次：{detail}") from last_error
+        raise SeedreamApiError(
+            f"Seedream 图片下载失败，已尝试 {MAX_REQUEST_ATTEMPTS} 次：{detail}"
+        ) from last_error
+
+    @staticmethod
+    def _is_retryable_status(status_code: int) -> bool:
+        """只重试限流和服务端故障；其他 4xx 由调用方立即修正。"""
+
+        return status_code == 429 or 500 <= status_code <= 599
+
+    @staticmethod
+    def _sleep_before_retry(attempt: int) -> None:
+        """按指数退避等待，最多等待 6.4 秒，避免连续冲击远端服务。"""
+
+        time.sleep(min(RETRY_BACKOFF_SECONDS * (2 ** (attempt - 1)), 6.4))
 
     @staticmethod
     def _remove_partial_file(path: Path) -> None:
@@ -194,7 +266,7 @@ class SeedreamProvider:
             pass
 
     @staticmethod
-    def _download_failure_detail(error: requests.RequestException | OSError | None) -> str:
+    def _download_failure_detail(error: Exception | None) -> str:
         """转换网络错误，不将对象存储的签名 URL 写入任务错误信息。"""
 
         if error is None:
@@ -205,4 +277,6 @@ class SeedreamProvider:
             return "下载超时，请稍后重试"
         if isinstance(error, requests.exceptions.ConnectionError):
             return "对象存储连接失败，请稍后重试"
+        if isinstance(error, SeedreamApiError):
+            return str(error)
         return error.__class__.__name__

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 
 from src.career_assistant.contracts import ModelCapability, SkillExecutionMode
@@ -72,6 +73,18 @@ class _LongSkillLibrary(_FakeSkillLibrary):
 
 
 class CareerSkillRuntimeTests(unittest.TestCase):
+    def test_grill_me_seed_contains_complete_round_based_workflow(self) -> None:
+        project_root = Path(__file__).resolve().parents[1]
+        markdown = (project_root / "deploy/skill-seeds/grill-me/SKILL.md").read_text(
+            encoding="utf-8",
+        )
+        instructions = CareerSkillRuntime._skill_body(markdown)
+
+        self.assertIn("Interview the user relentlessly", instructions)
+        self.assertIn("Then wait for the user's answers before the next round", instructions)
+        self.assertIn("Do not act on it until the user confirms", instructions)
+        self.assertNotIn("Run a `/grilling` session", instructions)
+
     def test_mentions_only_disclose_metadata(self) -> None:
         library = _FakeSkillLibrary(("resume-review", "interview-coach"))
         runtime = CareerSkillRuntime(library)  # type: ignore[arg-type]

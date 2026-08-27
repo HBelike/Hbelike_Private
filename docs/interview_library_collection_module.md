@@ -1,6 +1,6 @@
 # 面经库公共资料采集模块
 
-更新时间：2026-08-26
+更新时间：2026-08-28
 
 ## 目标
 
@@ -46,7 +46,7 @@
 
 - `POST /api/career/interview-library/parse-file`：临时解析上传文件并返回“公司、岗位、日期、标签、摘要、Markdown”的可编辑草稿；不写入数据库、不保存原文件。
 - `GET /api/career/interview-library/collection-platforms`：获取平台和连接器策略。
-- `POST /api/career/interview-library/public-web-imports`：创建 5–50 条全网公开网页任务；未配置 `FIRECRAWL_API_KEY` 时返回明确的 503 能力状态。
+- `POST /api/career/interview-library/public-web-imports`：创建 5–10 条全网公开网页任务；默认 10 条，搜索候选和实际 `/scrape` 调用均不超过本次配置，未配置 `FIRECRAWL_API_KEY` 时返回明确的 503 能力状态。
 - `POST /api/career/interview-library/xiaohongshu-browser-imports`：创建 5–50 条的小红书浏览器关键词任务。
 - `POST /api/career/interview-library/collection-jobs/{job_id}/xiaohongshu-discoveries`：登记搜索卡片，只接收 `note_id`、标题、作者和点赞展示值。
 - `POST /api/career/interview-library/collection-jobs/{job_id}/xiaohongshu-notes`：受理一篇浏览器详情并在 `BackgroundTasks` 中执行 OCR、分析和条件自动入库。
@@ -101,8 +101,8 @@ npm --prefix web-ui run build
 $env:PUBLIC_WEB_TEST_KEYWORD='agent开发面经'
 .\.venv\Scripts\python.exe scripts\verify_public_web_live.py --smoke-limit 1
 
-# 真实 50 条任务、来源记录与第二轮不重复抓取验收
-$env:PUBLIC_WEB_TEST_LIMIT='50'
+# 真实 10 条任务、来源记录与第二轮不重复抓取验收
+$env:PUBLIC_WEB_TEST_LIMIT='10'
 .\.venv\Scripts\python.exe scripts\verify_public_web_live.py
 ```
 
@@ -120,7 +120,7 @@ PC 公开信息收集
   → interview_experience_sources（主来源 + 来源别名）
 ```
 
-任务固定返回八项计数：发现地址、已知地址、实际解析、重复正文、有效面经、新入库、已过滤和失败。可重试失败依次延后 1、6、24 小时，第四次失败转为永久失败；同一规范地址在未到重试时间前不会再次抓取。图片仅在正文不足时进入既有临时 OCR，解析结束后清理。
+任务固定返回八项计数：发现地址、已知地址、实际解析、重复正文、有效面经、新入库、已过滤和失败。每个候选独立完成抓取、甄别和入库：一条有效面经通过分析后立即写入，不等待整批结束；其他页面失败不会回滚或阻塞已经成功的面经。可重试失败依次延后 1、6、24 小时，第四次失败转为永久失败；同一规范地址在未到重试时间前不会再次抓取。图片仅在正文不足时进入既有临时 OCR，解析结束后清理。
 
 模型连接暂不可用时，只对标题明确属于面经、公司与岗位齐全、置信度不低于 0.7 且至少包含两个编号问题的正文启用确定性兜底；其他内容继续保留为候选，不会冒充完整面经。若任务曾在“正文入库成功、来源写入失败”之间中断，后续再次命中该地址会自动补齐唯一主来源，再把同正文的其他地址登记为来源别名。
 
@@ -135,3 +135,10 @@ PC 公开信息收集
 
 1. 根据小红书页面结构变化维护卡片和详情 DOM 适配器，并保留真实浏览器 50 篇冒烟验证；验收以任务终态和数据库入库记录为准。
 2. 后续需要跨进程恢复时再引入持久化 worker；当前任务恢复依赖页面保存的任务编号。
+
+## 2026-08-28 采集归属与写权限
+
+- 所有公开网页、小红书浏览器、小红书 URL、平台关键词和公开 URL 任务创建时写入 `interview_collection_jobs.created_by_actor_id`。
+- 后台任务不依赖请求线程中的临时身份：自动入库时从持久化任务读取发起人，并写入 `interview_experiences.created_by_actor_id`；部分页面失败不会改变成功面经的归属。
+- 人工确认候选时，服务端同时校验当前用户是否为采集任务发起人；管理员可以代为确认，最终面经仍归原任务发起人。历史无发起人的任务只有管理员可以确认，确认后新面经归该管理员。
+- 前端不提交可伪造的创建者字段，所有归属都来自认证上下文或服务端持久化任务。

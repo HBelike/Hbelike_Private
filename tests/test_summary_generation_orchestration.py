@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -103,23 +104,36 @@ def _build_project_payload(item: WeeklyRankingRecord) -> dict[str, Any]:
             "summary_text": (
                 "该项目用职责分层组织证据、编排与校验，适合需要人工确认的代理流程。"
             ),
-            "visual_brief": {
-                "diagram_type": "linear_progression",
-                "teaching_goal": "解释模块架构和证据到交付物的主数据流",
-                "visual_thesis": "职责分层让代理流程可以检查和修正",
-                "nodes": [
-                    {"id": "evidence", "label": "证据卡", "role": "事实来源"},
-                    {"id": "orchestrator", "label": "编排器", "role": "组织步骤"},
-                    {"id": "gate", "label": "校验门", "role": "人工确认"},
-                    {"id": "artifact", "label": "交付物", "role": "保存结果"},
+            "visual_spec": {
+                "version": "article_visual_spec_v1",
+                "repository_full_name": item.full_name,
+                "figure_role": "flow",
+                "purpose": "解释证据如何经过编排和校验形成交付物",
+                "headline": "从证据到交付物",
+                "evidence_refs": [
+                    {
+                        "kind": "repository_file",
+                        "path": "README.md",
+                        "claim": "README 给出四个阶段的先后顺序",
+                    }
                 ],
-                "relationships": [
-                    {"from": "evidence", "to": "orchestrator", "label": "数据流"},
-                    {"from": "orchestrator", "to": "gate", "label": "同步调用"},
-                    {"from": "gate", "to": "artifact", "label": "事件推送"},
+                "steps": [
+                    {"id": "evidence", "label": "证据卡", "description": "准备事实来源"},
+                    {"id": "orchestrator", "label": "编排器", "description": "组织执行步骤"},
+                    {"id": "gate", "label": "校验门", "description": "完成质量确认"},
+                    {"id": "artifact", "label": "交付物", "description": "保存验收结果"},
                 ],
-                "reading_order": ["evidence", "orchestrator", "gate", "artifact"],
-                "chinese_labels": ["证据卡", "编排器", "校验门", "交付物"],
+                "edges": [
+                    {"from": "evidence", "to": "orchestrator"},
+                    {"from": "orchestrator", "to": "gate"},
+                    {"from": "gate", "to": "artifact"},
+                ],
+                "takeaways": ["职责分层让流程可检查"],
+                "art_direction": {
+                    "style": "notion",
+                    "palette": "editorial_blue",
+                    "density": "medium",
+                },
             },
         },
     }
@@ -185,6 +199,17 @@ def test_generation_calls_each_project_then_one_global_synthesis(project_count: 
     for index, call in enumerate(provider.calls[:-1]):
         prompt = call["messages"][-1].content
         assert rankings[index].full_name in prompt
+        assert "visual_spec" in prompt
+        assert "summary_card" in prompt
+        assert "证据不足时选择 summary_card" in prompt
+        assert "禁止输出 16:9" in prompt
+        assert "weekly_ranking→weekly_ranking" in prompt
+        assert "repository.description→repository_metadata" in prompt
+        assert "repository.topics→repository_metadata" in prompt
+        assert "repository.license→repository_metadata" in prompt
+        assert "README.md→repository_file" in prompt
+        assert "每个 node 都必须包含有效 layer" in prompt
+        assert "每层至少被一个 node 使用" in prompt
         assert all(
             other.full_name not in prompt
             for other_index, other in enumerate(rankings)
@@ -228,6 +253,66 @@ def test_generation_retries_only_the_failed_project() -> None:
         None,
     ]
     assert audit["provider_call_count"] == 5
+
+
+def test_generation_repairs_visual_spec_with_evidence_path_outside_repository_inputs() -> None:
+    rankings = _build_rankings(1)
+    invalid = _build_project_payload(rankings[0])
+    invalid["project_brief"]["visual_spec"]["evidence_refs"][0]["path"] = "docs/unknown.md"
+    provider = StubProvider(
+        [invalid, _build_project_payload(rankings[0]), _build_global_payload()]
+    )
+
+    _, normalized, audit = _generate(rankings, provider)
+
+    assert [call["trace_metadata"]["phase"] for call in provider.calls] == [
+        "project_generation",
+        "project_repair",
+        "global_synthesis",
+    ]
+    assert audit["provider_call_count"] == 3
+    assert normalized["image_prompts"][0]["visual_spec"]["evidence_refs"][0]["path"] == "README.md"
+
+
+@pytest.mark.parametrize(
+    ("path", "kind"),
+    [
+        ("repository.description", "repository_metadata"),
+        ("repository.topics", "repository_metadata"),
+        ("repository.license", "repository_metadata"),
+        ("README.md", "repository_file"),
+    ],
+)
+def test_empty_repository_evidence_cannot_be_referenced(path: str, kind: str) -> None:
+    ranking = replace(_build_rankings(1)[0], description="")
+    evidence = GitHubRepositoryEvidence(
+        full_name=ranking.full_name,
+        description="",
+        topics=(),
+        default_branch="main",
+        license_name="",
+        readme_excerpt="",
+        evidence_status="basic",
+    )
+    payload = _build_project_payload(ranking)
+    payload["project_brief"]["visual_spec"]["evidence_refs"] = [
+        {"kind": kind, "path": path, "claim": "空证据不应通过"}
+    ]
+
+    with pytest.raises(ValueError, match="证据路径不在允许范围内"):
+        _task()._normalize_project_output(payload, ranking, evidence)
+
+    prompt = _task()._build_project_messages(
+        ranking=ranking,
+        ranking_evidence=evidence,
+        article_skill_instructions="只依据证据写作。",
+        regeneration_feedback=None,
+        summary_instruction="",
+    )[-1].content
+    allowed_line = next(
+        line for line in prompt.splitlines() if line.startswith("- 本项目允许的 evidence_refs.path：")
+    )
+    assert allowed_line == "- 本项目允许的 evidence_refs.path：weekly_ranking"
 
 
 def test_generation_stops_before_global_synthesis_when_project_repair_fails() -> None:
@@ -282,7 +367,12 @@ def test_article_is_assembled_in_overview_and_three_section_order() -> None:
         section = article[section_start:next_start]
         assert section.index(str(item.star_growth)) < section.index("**技术特点**")
         assert section.index(str(item.current_stars)) < section.index("**技术特点**")
-        assert any(
-            relation["label"] == "数据流"
-            for relation in prompt["visual_brief"]["relationships"]
-        )
+        assert prompt["prompt_stage"] == "article_visual_spec_v1"
+        assert prompt["visual_spec"]["repository_full_name"] == item.full_name
+        assert prompt["visual_spec"]["figure_role"] == "flow"
+        assert prompt["visual_brief"]["reading_order"] == [
+            "evidence",
+            "orchestrator",
+            "gate",
+            "artifact",
+        ]

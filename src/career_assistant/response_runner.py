@@ -37,7 +37,11 @@ from src.career_assistant.persistence import (
     MessageRecord,
     MessageRole,
 )
-from src.career_assistant.prompt_context import PreparedPromptContext, PromptContextService
+from src.career_assistant.prompt_context import (
+    PreparedPromptContext,
+    PromptContextService,
+    runtime_model_identity,
+)
 from src.career_assistant.privacy import SensitiveDataRedactor
 from src.career_assistant.skill_tools import SkillToolRegistry
 
@@ -54,6 +58,8 @@ class CareerResponseResult:
     model_resolution: ModelResolution | None
     skill_executions: tuple[SkillExecutionTrace, ...] = ()
     context_usage: ContextUsageSnapshot | None = None
+    provider_reported_model_id: str | None = None
+    model_was_invoked: bool = False
 
 
 @dataclass
@@ -65,9 +71,12 @@ class ModelUsageAccumulator:
     seen: bool = False
     input_unknown: bool = False
     output_unknown: bool = False
+    provider_reported_model_id: str | None = None
 
     def observe(self, usage: CompletionUsage) -> None:
         self.seen = True
+        if usage.provider_reported_model_id:
+            self.provider_reported_model_id = usage.provider_reported_model_id
         if usage.input_tokens is None:
             self.input_unknown = True
         else:
@@ -81,6 +90,7 @@ class ModelUsageAccumulator:
         return CompletionUsage(
             None if not self.seen or self.input_unknown else self.input_tokens,
             None if not self.seen or self.output_unknown else self.output_tokens,
+            self.provider_reported_model_id,
         )
 
 
@@ -241,6 +251,8 @@ class CareerResponseRunner:
             resolution,
             skill_executions,
             prepared.context_usage,
+            usage_accumulator.provider_reported_model_id,
+            True,
         )
 
     def stream(
@@ -399,6 +411,8 @@ class CareerResponseRunner:
                 resolution,
                 skill_executions,
                 prepared.context_usage,
+                usage_accumulator.provider_reported_model_id,
+                True,
             ),
         )
 
@@ -555,7 +569,7 @@ class CareerResponseRunner:
     ) -> PreparedPromptContext:
         if self._prompt_context is not None:
             return self._prompt_context.prepare(active_turn, context, resolution)
-        messages = tuple(self._build_prompt(active_turn, context))
+        messages = tuple(self._build_prompt(active_turn, context, resolution))
         usage = ContextBudgetService().measure(
             (PromptComponent.pinned("legacy_prompt", messages),),
             resolution.profile.context_policy,
@@ -670,6 +684,7 @@ class CareerResponseRunner:
         self,
         active_turn: ActiveAgentTurn,
         context: ModelTurnContext,
+        resolution: ModelResolution | None = None,
     ) -> list[ChatMessage]:
         """构造通用求职对话 Prompt，并按需附带本轮简历与职位材料。"""
 
@@ -694,6 +709,14 @@ class CareerResponseRunner:
                 ),
             ),
         ]
+
+        if resolution is not None:
+            messages.append(
+                ChatMessage(
+                    role="system",
+                    content=runtime_model_identity(resolution),
+                ),
+            )
 
         if context.activated_skills:
             skill_sections = []

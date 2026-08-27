@@ -34,3 +34,9 @@
 - 生产 `pipeline-scheduler` 与 API 共用 `application_skills` 和 `application_data`：Scheduler 启动时刷新一次过期快照，周五内容任务开始时再次检查；七天内的新快照直接复用，不重复请求 GitHub。
 - 无法关联公开 GitHub 仓库的项目自建或本地 Skill 明确显示“本地 Skill”，不再显示“暂无 Star”圆环；这类 Skill 不伪造仓库和 Star 数据。
 - `scripts/refresh_skill_stars.py` 继续保留为独立手动诊断入口，使用同一服务方法和七天有效期规则。
+
+## 2026-08-28：grill-me 工作流修复
+
+- `grill-me` 改为自包含的分轮追问工作流，不再通过正文中的 `/grilling` 间接引用另一个 Skill；当前运行时只解析用户消息中的显式 `/skill-name`，不会递归激活 Skill 正文里的 Slash Command。
+- 每轮只询问当前已经具备前置条件的决策，并附推荐答案；模型必须等待用户回答后再展开下一轮，在用户确认形成共同理解前不得直接实施方案。
+- 项目种子与本机当前生效副本同步更新；未调整求职助手前端，也未新增 Skill 状态展示。

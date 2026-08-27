@@ -53,6 +53,7 @@ from src.career_assistant.interview_library.xiaohongshu_collection import (
 
 
 ORGANIZATION_ID = UUID("00000000-0000-0000-0000-000000000111")
+ACTOR_ID = UUID("00000000-0000-0000-0000-000000000112")
 
 
 class FakeRepository:
@@ -67,6 +68,7 @@ class FakeRepository:
         record = InterviewCollectionJobRecord(
             id=uuid4(),
             organization_id=kwargs["organization_id"],
+            created_by_actor_id=kwargs.get("created_by_actor_id"),
             platform_key=kwargs["platform_key"],
             keyword=kwargs["keyword"],
             requested_limit=kwargs["requested_limit"],
@@ -341,8 +343,8 @@ class FakeLibraryService:
     def __init__(self) -> None:
         self.drafts = []
 
-    def ingest(self, _organization_id: UUID, draft, *, trigger_type):  # type: ignore[no-untyped-def]
-        self.drafts.append((draft, trigger_type))
+    def ingest(self, _organization_id: UUID, draft, *, trigger_type, **ownership):  # type: ignore[no-untyped-def]
+        self.drafts.append((draft, trigger_type, ownership))
         return SimpleNamespace(id=uuid4())
 
 
@@ -432,6 +434,7 @@ def verify_mixed_result_job() -> None:
     service, repository, library_service, attachment_store = _service(adapter)
     job = service.create_xiaohongshu_import_job(
         ORGANIZATION_ID,
+        created_by_actor_id=ACTOR_ID,
         source_url="https://www.xiaohongshu.com/search_result?keyword=%E9%9D%A2%E7%BB%8F",
         requested_limit=3,
         include_images=True,
@@ -508,6 +511,7 @@ def verify_mixed_result_job() -> None:
     )
     experience = service.ingest_selected_candidate(
         ORGANIZATION_ID,
+        actor_id=ACTOR_ID,
         candidate_id=valid_candidate.id,
         company_name="东方财富",
         role_name="AI Agent 开发工程师",
@@ -517,7 +521,8 @@ def verify_mixed_result_job() -> None:
         markdown_content=confirmed_markdown,
     )
     assert len(library_service.drafts) == 1
-    saved_draft, _trigger_type = library_service.drafts[0]
+    saved_draft, _trigger_type, ownership = library_service.drafts[0]
+    assert ownership["created_by_actor_id"] == ACTOR_ID
     assert saved_draft.markdown_content == confirmed_markdown
     persisted_candidate = repository.candidates[valid_candidate.id]
     assert persisted_candidate.status is CollectionCandidateStatus.IMPORTED
@@ -534,6 +539,7 @@ def verify_entry_failure_is_terminal() -> None:
     service, repository, _library_service, _attachment_store = _service(adapter)
     job = service.create_xiaohongshu_import_job(
         ORGANIZATION_ID,
+        created_by_actor_id=ACTOR_ID,
         source_url="https://www.xiaohongshu.com/search_result?keyword=%E9%9D%A2%E7%BB%8F",
         requested_limit=3,
         include_images=False,
@@ -578,6 +584,7 @@ def verify_keyword_search_reuses_public_import_pipeline() -> None:
     service, repository, library_service, _attachment_store = _service(adapter)
     job = service.create_keyword_collection_job(
         ORGANIZATION_ID,
+        created_by_actor_id=ACTOR_ID,
         platform_key="xiaohongshu",
         keyword="  eastern fortune   ai interview  ",
         requested_limit=3,
@@ -638,6 +645,7 @@ def verify_incomplete_source_never_becomes_a_false_rejection() -> None:
     )
     job = service.create_xiaohongshu_import_job(
         ORGANIZATION_ID,
+        created_by_actor_id=ACTOR_ID,
         source_url=incomplete_note.source_url,
         requested_limit=1,
         include_images=True,

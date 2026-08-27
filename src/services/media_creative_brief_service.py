@@ -373,9 +373,7 @@ class MediaCreativeBriefService:
     def _short_label(self, value: Any) -> str:
         label = self._clean_text(value, "", max_length=12)
         label = self._unsafe_label_pattern.sub("", label)
-        if not label:
-            return ""
-        return label[:6]
+        return label
 
     def _relationship_label(self, value: Any) -> str:
         """把连线文字限制为教学图约定的六类耦合或数据关系。"""

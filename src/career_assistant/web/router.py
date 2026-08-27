@@ -169,6 +169,7 @@ class CareerRequestActor:
 
     organization_id: UUID
     actor_id: UUID
+    role: PlatformRole = PlatformRole.USER
 
 
 # API 的认证中间件会在每个已登录请求开始时写入真实平台用户。ContextVar 可以让既有
@@ -190,6 +191,7 @@ class CareerAssistantReadServices:
     job_assessment_repository: CareerJobAssessmentRepository
     model_profile_repository: CareerModelProfileRepository
     model_gateway: ModelGateway
+    model_usage_repository: CareerModelUsageRepository
 
 
 @dataclass
@@ -425,7 +427,7 @@ class CreatePublicWebImportRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     keyword: str = Field(min_length=1, max_length=120)
-    requested_limit: int = Field(default=20, ge=5, le=50)
+    requested_limit: int = Field(default=10, ge=5, le=10)
 
 
 class XiaohongshuBrowserDiscoveryRequest(BaseModel):
@@ -599,6 +601,7 @@ def get_request_actor() -> CareerRequestActor:
     return CareerRequestActor(
         organization_id=DEFAULT_ORGANIZATION_ID,
         actor_id=DEFAULT_ACTOR_ID,
+        role=PlatformRole.USER,
     )
 
 
@@ -671,7 +674,7 @@ def get_career_services(request: Request) -> CareerAssistantServices:
             )
             memory_worker_settings = load_career_memory_worker_settings()
             compaction_repository = CareerCompactionRepository(database)
-            model_usage_repository = CareerModelUsageRepository(database)
+            model_usage_repository = read_services.model_usage_repository
             conversation_memory_service = ConversationMemoryService(
                 conversation_repository,
                 compaction_repository,
@@ -867,6 +870,7 @@ def get_career_read_services(
             context_repository = CareerContextRepository(database)
             job_assessment_repository = CareerJobAssessmentRepository(database)
             model_profile_repository = CareerModelProfileRepository(database)
+            model_usage_repository = CareerModelUsageRepository(database)
             model_gateway = ModelGateway(
                 model_profile_repository,
                 load_model_gateway_settings(
@@ -888,6 +892,7 @@ def get_career_read_services(
             job_assessment_repository=job_assessment_repository,
             model_profile_repository=model_profile_repository,
             model_gateway=model_gateway,
+            model_usage_repository=model_usage_repository,
         )
         request.app.state.career_assistant_read_services = read_services
         return read_services
@@ -1256,6 +1261,17 @@ def get_conversation(
         actor.actor_id,
         conversation_id,
     )
+    assistant_turn_ids = [
+        message.turn_id
+        for message in messages
+        if message.role is MessageRole.ASSISTANT and message.turn_id is not None
+    ]
+    model_usage_repository = getattr(read_services, "model_usage_repository", None)
+    message_models = (
+        model_usage_repository.list_turn_metadata(assistant_turn_ids)
+        if assistant_turn_ids and model_usage_repository is not None
+        else {}
+    )
     last_model_selection = read_services.conversation_repository.get_last_model_selection(
         actor.actor_id,
         conversation_id,
@@ -1301,7 +1317,7 @@ def get_conversation(
     return {
         "conversation": _conversation_payload(conversation),
         "messages": [
-            _message_payload(item)
+            _message_payload(item, message_models.get(item.turn_id))
             for item in messages
         ],
         "last_model_selection": _model_selection_payload(last_model_selection),
@@ -1493,7 +1509,10 @@ async def submit_intake(
     return {
         "turn": _turn_payload(response_result.turn),
         "message": _message_payload(result.persisted_message),
-        "assistant_message": _message_payload(response_result.assistant_message),
+        "assistant_message": _message_payload(
+            response_result.assistant_message,
+            _response_model_metadata(response_result),
+        ),
         "completed_steps": [step.value for step in result.completed_steps],
         "job_source": _job_source_payload(result),
         "activated_skills": _activated_skill_payloads(inbound_message.activated_skills),
@@ -1657,7 +1676,10 @@ async def submit_intake_with_materials(
     return {
         "turn": _turn_payload(response_result.turn),
         "message": _message_payload(result.persisted_message),
-        "assistant_message": _message_payload(response_result.assistant_message),
+        "assistant_message": _message_payload(
+            response_result.assistant_message,
+            _response_model_metadata(response_result),
+        ),
         "completed_steps": [step.value for step in result.completed_steps],
         "job_source": _job_source_payload(result),
         "activated_skills": _activated_skill_payloads(inbound_message.activated_skills),
@@ -1814,6 +1836,7 @@ def create_interview_collection_job(
     try:
         job = services.interview_collection_service.create_keyword_collection_job(
             actor.organization_id,
+            created_by_actor_id=actor.actor_id,
             platform_key=request_body.platform_key,
             keyword=request_body.keyword,
             requested_limit=request_body.requested_limit,
@@ -1869,6 +1892,7 @@ def collect_interview_public_url(
     try:
         job, candidate = services.interview_collection_service.collect_public_url(
             actor.organization_id,
+            created_by_actor_id=actor.actor_id,
             source_url=request_body.source_url,
         )
     except CollectionOperationError as exc:
@@ -1896,6 +1920,7 @@ def create_xiaohongshu_browser_import(
     try:
         job = services.interview_collection_service.create_xiaohongshu_browser_collection_job(
             actor.organization_id,
+            created_by_actor_id=actor.actor_id,
             keyword=request_body.keyword,
             requested_limit=request_body.requested_limit,
         )
@@ -1925,6 +1950,7 @@ def create_public_web_interview_import(
     try:
         job = services.interview_collection_service.create_public_web_import_job(
             actor.organization_id,
+            created_by_actor_id=actor.actor_id,
             keyword=request_body.keyword,
             requested_limit=request_body.requested_limit,
         )
@@ -2080,6 +2106,7 @@ def create_xiaohongshu_interview_import(
     try:
         job = services.interview_collection_service.create_xiaohongshu_import_job(
             actor.organization_id,
+            created_by_actor_id=actor.actor_id,
             source_url=request_body.source_url,
             requested_limit=request_body.requested_limit,
             include_images=request_body.include_images,
@@ -2135,6 +2162,8 @@ def import_interview_collection_candidate(
     try:
         experience = services.interview_collection_service.ingest_selected_candidate(
             actor.organization_id,
+            actor_id=actor.actor_id,
+            can_manage_all=actor.role is PlatformRole.ADMIN,
             candidate_id=candidate_id,
             company_name=request_body.company_name,
             role_name=request_body.role_name,
@@ -2145,9 +2174,11 @@ def import_interview_collection_candidate(
         )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return _interview_experience_payload(experience)
+    return _interview_experience_payload(experience, actor=actor)
 
 
 @router.get("/interview-library/tree")
@@ -2157,13 +2188,9 @@ def list_interview_library_tree(
 ) -> dict[str, object]:
     """读取公司 → 岗位 → 面经日期的树形导航数据。"""
 
-    actor = get_request_actor()
     services = get_career_services(request)
     try:
-        items = services.interview_library_repository.list_tree(
-            actor.organization_id,
-            query=query,
-        )
+        items = services.interview_library_repository.list_tree(query=query)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {"items": items}
@@ -2178,17 +2205,11 @@ def get_interview_experience(
 
     actor = get_request_actor()
     services = get_career_services(request)
-    experience = services.interview_library_repository.get_experience(
-        actor.organization_id,
-        experience_id,
-    )
+    experience = services.interview_library_repository.get_public_experience(experience_id)
     if experience is None:
-        raise HTTPException(status_code=404, detail="面经不存在或无访问权限")
-    sources = services.interview_library_repository.list_experience_sources(
-        actor.organization_id,
-        experience_id,
-    )
-    return _interview_experience_payload(experience, sources=sources)
+        raise HTTPException(status_code=404, detail="面经不存在")
+    sources = services.interview_library_repository.list_public_experience_sources(experience_id)
+    return _interview_experience_payload(experience, sources=sources, actor=actor)
 
 
 @router.post(
@@ -2227,6 +2248,8 @@ def create_interview_experience(
                 if request_body.source_type is InterviewSourceType.PUBLIC_URL
                 else IngestionTriggerType.MANUAL_UPLOAD
             ),
+            created_by_actor_id=actor.actor_id,
+            can_manage_all=actor.role is PlatformRole.ADMIN,
         )
     except (LookupError, ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -2236,7 +2259,7 @@ def create_interview_experience(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="面经暂时无法保存，请稍后重试；已解析的内容仍保留在当前页面。",
         ) from exc
-    return _interview_experience_payload(experience)
+    return _interview_experience_payload(experience, actor=actor)
 
 
 @router.post(
@@ -2468,6 +2491,8 @@ async def import_interview_experience_file(
                 tags=effective_tags,
             ),
             trigger_type=IngestionTriggerType.MANUAL_UPLOAD,
+            created_by_actor_id=actor.actor_id,
+            can_manage_all=actor.role is PlatformRole.ADMIN,
         )
     except OSError as exc:
         raise _temporary_attachment_service_unavailable(exc) from exc
@@ -2475,7 +2500,7 @@ async def import_interview_experience_file(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     finally:
         services.temporary_attachment_store.cleanup(tuple(attachments))
-    return _interview_experience_payload(experience)
+    return _interview_experience_payload(experience, actor=actor)
 
 
 @router.put("/interview-library/experiences/{experience_id}")
@@ -2492,6 +2517,8 @@ def update_interview_experience(
         experience = services.interview_library_service.update_markdown(
             actor.organization_id,
             experience_id,
+            actor_id=actor.actor_id,
+            can_manage_all=actor.role is PlatformRole.ADMIN,
             company_name=request_body.company_name,
             role_name=request_body.role_name,
             markdown_content=request_body.markdown_content,
@@ -2500,9 +2527,34 @@ def update_interview_experience(
         )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return _interview_experience_payload(experience)
+    return _interview_experience_payload(experience, actor=actor)
+
+
+@router.delete("/interview-library/experiences/{experience_id}")
+def delete_interview_experience(
+    experience_id: UUID,
+    request: Request,
+) -> dict[str, bool]:
+    """永久删除一份面经；数据库外键同步清理 RAG 切片与来源记录。"""
+
+    actor = get_request_actor()
+    services = get_career_services(request)
+    try:
+        services.interview_library_service.delete_experience(
+            actor.organization_id,
+            experience_id,
+            actor_id=actor.actor_id,
+            can_manage_all=actor.role is PlatformRole.ADMIN,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    return {"deleted": True}
 
 
 @router.get("/interview-library/mentions")
@@ -3254,7 +3306,10 @@ def _stream_result_payload(
     payload: dict[str, object] = {
         "turn": _turn_payload(response_result.turn),
         "message": _message_payload(intake_result.persisted_message),
-        "assistant_message": _message_payload(response_result.assistant_message),
+        "assistant_message": _message_payload(
+            response_result.assistant_message,
+            _response_model_metadata(response_result),
+        ),
         "completed_steps": [step.value for step in intake_result.completed_steps],
         "job_source": _job_source_payload(intake_result),
         "activated_skills": _activated_skill_payloads(
@@ -3468,9 +3523,16 @@ def _collection_candidate_payload(candidate) -> dict[str, object]:
     }
 
 
-def _interview_experience_payload(experience, *, sources=()) -> dict[str, object]:
+def _interview_experience_payload(experience, *, sources=(), actor=None) -> dict[str, object]:
     """将面经领域记录转换为稳定的前端 JSON，不返回检索向量。"""
 
+    can_write = bool(
+        actor is not None
+        and (
+            actor.role is PlatformRole.ADMIN
+            or getattr(experience, "created_by_actor_id", None) == actor.actor_id
+        )
+    )
     return {
         "id": str(experience.id),
         "company_id": str(experience.company_id),
@@ -3497,6 +3559,7 @@ def _interview_experience_payload(experience, *, sources=()) -> dict[str, object
         ),
         "created_at": experience.created_at.isoformat(),
         "updated_at": experience.updated_at.isoformat(),
+        "can_write": can_write,
         "sources": [
             {
                 "id": str(source.id),
@@ -3785,16 +3848,47 @@ def _job_assessment_payload(record) -> dict[str, object] | None:
     return payload
 
 
-def _message_payload(message) -> dict[str, object]:
+def _message_payload(message, model_metadata=None) -> dict[str, object]:
     """把已脱敏消息转换为 API JSON。"""
 
-    return {
+    payload = {
         "id": str(message.id),
         "turn_id": str(message.turn_id) if message.turn_id else None,
         "role": message.role.value,
         "content": message.content_text,
         "is_redacted": message.is_redacted,
         "created_at": message.created_at.isoformat(),
+    }
+    if message.role is MessageRole.ASSISTANT and model_metadata is not None:
+        payload["model"] = _model_metadata_payload(model_metadata)
+    return payload
+
+
+def _response_model_metadata(response_result):
+    """只为确实调用过 Provider 的回复生成模型标签。"""
+
+    if not response_result.model_was_invoked or response_result.model_resolution is None:
+        return None
+    resolution = response_result.model_resolution
+    reported_model_id = response_result.provider_reported_model_id
+    return {
+        "provider_key": resolution.profile.provider_key,
+        "requested_model_id": resolution.profile.model_id,
+        "provider_reported_model_id": reported_model_id,
+        "model_id": reported_model_id or resolution.profile.model_id,
+        "source": "provider_response" if reported_model_id else "request",
+    }
+
+
+def _model_metadata_payload(model_metadata) -> dict[str, object]:
+    if isinstance(model_metadata, dict):
+        return model_metadata
+    return {
+        "provider_key": model_metadata.provider_key,
+        "model_id": model_metadata.model_id,
+        "requested_model_id": model_metadata.requested_model_id,
+        "provider_reported_model_id": model_metadata.provider_reported_model_id,
+        "source": model_metadata.source,
     }
 
 

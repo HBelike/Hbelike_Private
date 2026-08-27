@@ -241,6 +241,78 @@ class AppConfig:
         return float(self.raw["image"].get("timeout_seconds", 180))
 
     @property
+    def image_renderer(self) -> str:
+        return str(self._image_renderer_raw().get("name", "gotenberg_html"))
+
+    @property
+    def image_gotenberg_base_url(self) -> str:
+        environment_url = os.getenv("CAREER_GOTENBERG_SERVICE_BASE_URL", "").strip()
+        if environment_url:
+            return environment_url
+        return str(
+            self._image_renderer_raw().get(
+                "gotenberg_base_url",
+                "http://127.0.0.1:3000",
+            )
+        )
+
+    @property
+    def image_gotenberg_timeout_seconds(self) -> float:
+        return float(self._image_renderer_raw().get("timeout_seconds", 60))
+
+    @property
+    def image_renderer_max_attempts(self) -> int:
+        return int(self._image_renderer_raw().get("max_attempts", 5))
+
+    @property
+    def image_canvas_width(self) -> int:
+        return int(self._image_renderer_raw().get("width", 2048))
+
+    @property
+    def image_canvas_height(self) -> int:
+        return int(self._image_renderer_raw().get("height", 1152))
+
+    @property
+    def image_template_version(self) -> str:
+        return str(self._image_renderer_raw().get("template_version", "article_visual_v1"))
+
+    @property
+    def image_renderer_version(self) -> str:
+        return str(self._image_renderer_raw().get("renderer_version", "gotenberg_html_v1"))
+
+    @property
+    def image_font_path(self) -> Path:
+        configured_path = Path(
+            str(
+                self._image_renderer_raw().get(
+                    "font_path",
+                    "assets/fonts/NotoSansSC-VF.ttf",
+                )
+            )
+        )
+        if configured_path.is_absolute():
+            return configured_path
+        return self.project_root / configured_path
+
+    @property
+    def image_font_version(self) -> str:
+        return str(
+            self._image_renderer_raw().get(
+                "font_version",
+                "noto-cjk-2.004-523d033d",
+            )
+        )
+
+    @property
+    def image_concept_background_enabled(self) -> bool:
+        return bool(
+            self._image_renderer_raw().get(
+                "concept_background_enabled",
+                False,
+            )
+        )
+
+    @property
     def image_output_dir(self) -> Path:
         configured_path = Path(str(self.raw["image"].get("output_dir", "outputs/images")))
         if configured_path.is_absolute():
@@ -307,7 +379,7 @@ class AppConfig:
         return str(
             self._image_prompt_raw().get(
                 "visual_system",
-                "统一视觉系统：深色背景，蓝绿色高亮，高质量科技教学 PPT 信息图，干净留白。",
+                "无标题的16:9工程架构信息图，白色画布，深蓝核心卡片，浅灰普通卡片，扁平矢量，精细对齐，克制留白。",
             )
         )
 
@@ -316,7 +388,7 @@ class AppConfig:
         return str(
             self._image_prompt_raw().get(
                 "composition_rule",
-                "中心一个无字核心模块，左侧 2 个无字输入节点，右侧 2 个无字输出节点，下方 1 个无字场景节点；最多 6 个节点、2 条主箭头。",
+                "严格按指定数量和位置绘制节点，每个节点只出现一次；正交箭头只连接指定起止节点，禁止镜像、复制或补齐对称节点。",
             )
         )
 
@@ -325,7 +397,7 @@ class AppConfig:
         return str(
             self._image_prompt_raw().get(
                 "text_rule",
-                "绝对不要在图片里生成任何可读文字：不要中文、不要英文、不要字母、不要数字、不要代码、不要标签、不要标题、不要仓库名、不要 logo、不要水印。",
+                "只显示指定的节点名称，连线不生成文字；禁止标题区、正文段落、仓库名和额外文字。",
             )
         )
 
@@ -334,7 +406,7 @@ class AppConfig:
         return str(
             self._image_prompt_raw().get(
                 "style_rule",
-                "Subject first, scene second, modifiers last；先主体，再布局，最后材质、光线、色彩。",
+                "核心节点使用深蓝底白字，普通节点使用浅灰底深色字；突出组件边界和数据流向，不使用空白占位卡片。",
             )
         )
 
@@ -352,7 +424,7 @@ class AppConfig:
         return str(
             self._image_prompt_raw().get(
                 "negative_prompt",
-                "避免复杂网络乱线、密集小字、乱码、假代码、错误 UI、抽象海报、过多节点。",
+                "不要标题区、装饰点、重复节点、镜像节点、空白占位卡片、曲线、交叉线、logo、水印、伪文字或乱码。",
             )
         )
 
@@ -363,6 +435,14 @@ class AppConfig:
         if not isinstance(raw_prompt, dict):
             return {}
         return raw_prompt
+
+    def _image_renderer_raw(self) -> dict[str, Any]:
+        """读取确定性图片渲染配置段；缺失时返回空配置。"""
+
+        raw_renderer = self.raw["image"].get("renderer", {})
+        if not isinstance(raw_renderer, dict):
+            return {}
+        return raw_renderer
 
     @property
     def audio_provider(self) -> str:
@@ -951,6 +1031,58 @@ class ConfigManager:
         image_timeout_seconds = float(raw["image"].get("timeout_seconds", 180))
         if image_timeout_seconds <= 0:
             raise ValueError("image.timeout_seconds 必须大于 0")
+
+        image_renderer = raw["image"].get("renderer", {})
+        if not isinstance(image_renderer, dict):
+            raise ValueError("image.renderer 必须是 YAML 对象")
+
+        renderer_name = str(image_renderer.get("name", "gotenberg_html")).strip()
+        if renderer_name not in {"gotenberg_html", "seedream"}:
+            raise ValueError("image.renderer.name 仅支持 gotenberg_html 或 seedream")
+
+        gotenberg_base_url = str(
+            image_renderer.get("gotenberg_base_url", "http://127.0.0.1:3000")
+        ).strip()
+        if not gotenberg_base_url:
+            raise ValueError("image.renderer.gotenberg_base_url 不能为空")
+
+        renderer_timeout_seconds = float(image_renderer.get("timeout_seconds", 60))
+        if renderer_timeout_seconds <= 0:
+            raise ValueError("image.renderer.timeout_seconds 必须大于 0")
+
+        renderer_max_attempts = int(image_renderer.get("max_attempts", 5))
+        if renderer_max_attempts != 5:
+            raise ValueError("image.renderer.max_attempts 必须为 5")
+
+        renderer_width = int(image_renderer.get("width", 2048))
+        if renderer_width != 2048:
+            raise ValueError("image.renderer.width 必须为 2048")
+
+        renderer_height = int(image_renderer.get("height", 1152))
+        if renderer_height != 1152:
+            raise ValueError("image.renderer.height 必须为 1152")
+
+        for version_key in ("template_version", "renderer_version", "font_version"):
+            if not str(image_renderer.get(version_key, "")).strip():
+                raise ValueError(f"image.renderer.{version_key} 不能为空")
+
+        renderer_font_path = Path(str(image_renderer.get("font_path", "")).strip())
+        if not str(renderer_font_path):
+            raise ValueError("image.renderer.font_path 不能为空")
+        resolved_font_path = (
+            renderer_font_path
+            if renderer_font_path.is_absolute()
+            else self.project_root / renderer_font_path
+        )
+        if not resolved_font_path.is_file():
+            raise ValueError(f"image.renderer.font_path 不存在：{resolved_font_path}")
+
+        concept_background_enabled = image_renderer.get(
+            "concept_background_enabled",
+            False,
+        )
+        if not isinstance(concept_background_enabled, bool):
+            raise ValueError("image.renderer.concept_background_enabled 必须是布尔值")
 
         image_github_asset_timeout_seconds = float(raw["image"].get("github_asset_timeout_seconds", 20))
         if image_github_asset_timeout_seconds <= 0:

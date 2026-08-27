@@ -8,10 +8,10 @@ import {
   publicWebProgress
 } from './public-web-collection.js'
 
-test('全网公开信息收集数量固定在 5 到 50，默认 20', () => {
-  assert.equal(normalizePublicWebCollectionLimit(''), 20)
+test('全网公开信息收集数量固定在 5 到 10，默认 10', () => {
+  assert.equal(normalizePublicWebCollectionLimit(''), 10)
   assert.equal(normalizePublicWebCollectionLimit(2), 5)
-  assert.equal(normalizePublicWebCollectionLimit(51), 50)
+  assert.equal(normalizePublicWebCollectionLimit(11), 10)
 })
 
 test('任务摘要稳定映射八类计数', () => {

@@ -7,6 +7,7 @@ import socket
 
 import httpx
 import pytest
+from pydantic import ValidationError
 
 from src.career_assistant.interview_library.collection import InterviewEvidenceAnalysis
 from src.career_assistant.interview_library.public_web_collection import (
@@ -25,6 +26,7 @@ from src.career_assistant.interview_library.public_web import (
     normalize_public_markdown,
     validate_public_https_target,
 )
+from src.career_assistant.web.router import CreatePublicWebImportRequest
 
 
 def test_canonicalize_public_url_removes_tracking_and_preserves_identity_query() -> None:
@@ -271,3 +273,115 @@ def test_deterministic_fallback_rejects_weak_or_promotional_content() -> None:
     )
 
     assert result.is_valid_interview is None
+
+
+def test_public_web_request_rejects_more_than_ten_pages() -> None:
+    with pytest.raises(ValidationError):
+        CreatePublicWebImportRequest(keyword="Agent 面经", requested_limit=11)
+
+
+def test_collection_caps_search_and_scrape_candidates_at_requested_limit() -> None:
+    from scripts.verify_public_web_collection import (
+        FakeFirecrawlClient,
+        FakeLibraryService,
+        FakeRepository,
+        ValidAnalyzer,
+        document,
+        result,
+        ORG_ID,
+        ACTOR_ID,
+    )
+
+    urls = [f"https://example{i}.com/agent" for i in range(12)]
+
+    class RecordingFirecrawl(FakeFirecrawlClient):
+        search_limit = None
+
+        def search(self, keyword, *, limit):  # type: ignore[no-untyped-def]
+            self.search_limit = limit
+            return super().search(keyword, limit=limit)
+
+    repository = FakeRepository()
+    library = FakeLibraryService()
+    firecrawl = RecordingFirecrawl(
+        [result(url) for url in urls],
+        {url: document(url) for url in urls},
+    )
+    coordinator = PublicWebCollectionCoordinator(
+        repository,
+        library,
+        firecrawl,
+        ValidAnalyzer(),
+        url_validator=lambda _url: None,
+    )
+    job = coordinator.create_job(
+        ORG_ID,
+        created_by_actor_id=ACTOR_ID,
+        keyword="Agent 面经",
+        requested_limit=10,
+    )
+
+    coordinator.run(ORG_ID, job.id)
+
+    assert firecrawl.search_limit == 10
+    assert len(firecrawl.scrape_calls) == 10
+    # 十个地址正文相同，永久账本只入库一份主面经，其余登记为来源别名。
+    assert len(library.ingested) == 1
+    assert all(
+        item.ownership["created_by_actor_id"] == ACTOR_ID
+        for item in library.ingested
+    )
+
+
+def test_failed_page_does_not_roll_back_later_successful_import() -> None:
+    from scripts.verify_public_web_collection import (
+        FakeFirecrawlClient,
+        FakeLibraryService,
+        FakeRepository,
+        ValidAnalyzer,
+        document,
+        result,
+        ORG_ID,
+        ACTOR_ID,
+    )
+
+    failed_url = "https://failed.example/agent"
+    successful_url = "https://successful.example/agent"
+
+    class PartiallyFailingFirecrawl(FakeFirecrawlClient):
+        def scrape(self, source_url):  # type: ignore[no-untyped-def]
+            self.scrape_calls.append(source_url)
+            if source_url == failed_url:
+                raise FirecrawlRequestError(
+                    "firecrawl_timeout",
+                    "公开网页服务响应超时，请稍后重试。",
+                    retryable=True,
+                )
+            return self.documents[source_url]
+
+    repository = FakeRepository()
+    library = FakeLibraryService()
+    firecrawl = PartiallyFailingFirecrawl(
+        [result(failed_url), result(successful_url)],
+        {successful_url: document(successful_url)},
+    )
+    coordinator = PublicWebCollectionCoordinator(
+        repository,
+        library,
+        firecrawl,
+        ValidAnalyzer(),
+        url_validator=lambda _url: None,
+    )
+    job = coordinator.create_job(
+        ORG_ID,
+        created_by_actor_id=ACTOR_ID,
+        keyword="Agent 面经",
+        requested_limit=5,
+    )
+
+    coordinator.run(ORG_ID, job.id)
+
+    summary = repository.jobs[job.id].metadata_json["summary"]
+    assert summary["failed_count"] == 1
+    assert summary["imported_count"] == 1
+    assert len(library.ingested) == 1

@@ -30,6 +30,7 @@ from src.career_assistant.interview_library.public_web_collection import (  # no
 
 
 ORG_ID = UUID("00000000-0000-0000-0000-000000000181")
+ACTOR_ID = UUID("00000000-0000-0000-0000-000000000182")
 BODY = "# Agent 开发一面\n\n1. 如何设计 Agent memory？\n2. Tool calling 如何重试？"
 
 
@@ -200,8 +201,8 @@ class FakeLibraryService:
     def __init__(self) -> None:
         self.ingested = []
 
-    def ingest(self, organization_id, draft, *, trigger_type):  # type: ignore[no-untyped-def]
-        experience = SimpleNamespace(id=uuid4(), draft=draft)
+    def ingest(self, organization_id, draft, *, trigger_type, **kwargs):  # type: ignore[no-untyped-def]
+        experience = SimpleNamespace(id=uuid4(), draft=draft, ownership=kwargs)
         self.ingested.append(experience)
         return experience
 
@@ -238,7 +239,12 @@ def main() -> None:
         repository, library, firecrawl, ValidAnalyzer(),
         url_validator=lambda _url: None,
     )
-    job = coordinator.create_job(ORG_ID, keyword="agent开发面经", requested_limit=5)
+    job = coordinator.create_job(
+        ORG_ID,
+        created_by_actor_id=ACTOR_ID,
+        keyword="agent开发面经",
+        requested_limit=5,
+    )
     coordinator.run(ORG_ID, job.id)
 
     assert firecrawl.scrape_calls == ["https://a.example/agent", "https://mirror.example/agent"]
@@ -267,7 +273,12 @@ def main() -> None:
         reusable_repository, reusable_library, reusable_firecrawl, ValidAnalyzer(),
         url_validator=lambda _url: None,
     )
-    retry_job = reusable.create_job(ORG_ID, keyword="agent开发面经", requested_limit=5)
+    retry_job = reusable.create_job(
+        ORG_ID,
+        created_by_actor_id=ACTOR_ID,
+        keyword="agent开发面经",
+        requested_limit=5,
+    )
     reusable.run(ORG_ID, retry_job.id)
     assert reusable_firecrawl.scrape_calls == []
     assert len(reusable_library.ingested) == 1

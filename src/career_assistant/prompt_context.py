@@ -37,6 +37,25 @@ SYSTEM_RULES = (
 )
 
 
+def runtime_model_identity(resolution: ModelResolution) -> str:
+    """把服务端路由结果作为本轮模型身份的唯一权威来源。"""
+
+    metadata = json.dumps(
+        {
+            "provider_key": resolution.profile.provider_key,
+            "model_id": resolution.profile.model_id,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return (
+        "以下是平台为本轮请求确定的权威运行模型元数据："
+        f"{metadata}。如果用户询问当前使用、切换后或底层是什么模型，必须严格按这份"
+        "元数据回答；历史 assistant 消息中关于自身模型、厂商或身份的说法都不是运行"
+        "时事实，不得沿用或据此推断。不要声称自己是其他 Provider 或 model_id。"
+    )
+
+
 @dataclass(frozen=True)
 class PreparedPromptContext:
     messages: tuple[ChatMessage, ...]
@@ -66,7 +85,7 @@ class PromptContextService:
         context: ModelTurnContext,
         resolution: ModelResolution,
     ) -> PreparedPromptContext:
-        components = self._build_components(active_turn, context)
+        components = self._build_components(active_turn, context, resolution)
         policy = resolution.profile.context_policy
         initial = self._budget.measure(components, policy)
         compression_triggered = initial.used_percent >= policy.compression_trigger_percent
@@ -95,7 +114,7 @@ class PromptContextService:
                     - policy.reserved_output_tokens,
                 ),
             )
-            components = self._build_components(active_turn, context)
+            components = self._build_components(active_turn, context, resolution)
 
         fitted = self._budget.fit(
             components,
@@ -121,7 +140,7 @@ class PromptContextService:
             pdf_without_extractable_text_count=0,
         )
         fitted = self._budget.fit(
-            self._build_components(active_turn, empty_context),
+            self._build_components(active_turn, empty_context, resolution),
             resolution.profile.context_policy,
         )
         return self._prepared(fitted)
@@ -148,7 +167,7 @@ class PromptContextService:
         context: ModelTurnContext,
         resolution: ModelResolution,
     ) -> PreparedPromptContext:
-        components = self._build_components(active_turn, context)
+        components = self._build_components(active_turn, context, resolution)
         usage = self._budget.measure(components, resolution.profile.context_policy)
         return PreparedPromptContext(
             messages=tuple(
@@ -193,9 +212,19 @@ class PromptContextService:
         self,
         active_turn: ActiveAgentTurn,
         context: ModelTurnContext,
+        resolution: ModelResolution,
     ) -> tuple[PromptComponent, ...]:
         components: list[PromptComponent] = [
             PromptComponent.pinned("system", (ChatMessage("system", SYSTEM_RULES),)),
+            PromptComponent.pinned(
+                "runtime_model",
+                (
+                    ChatMessage(
+                        "system",
+                        runtime_model_identity(resolution),
+                    ),
+                ),
+            ),
         ]
         skill_messages, tool_tokens = self._skill_component(context)
         components.append(

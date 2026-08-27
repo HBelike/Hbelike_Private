@@ -152,6 +152,7 @@ class CareerAgentTurnProcessor:
                     "content": final_result.assistant_message.content_text,
                     "is_redacted": final_result.assistant_message.is_redacted,
                     "created_at": final_result.assistant_message.created_at.isoformat(),
+                    **_response_model_payload(final_result),
                 },
                 "completed_steps": [step.value for step in intake_result.completed_steps],
                 "job_source": {
@@ -200,6 +201,24 @@ class CareerAgentTurnProcessor:
                 },
             },
         )
+
+
+def _response_model_payload(response_result) -> dict[str, object]:
+    """把本轮真实模型附到 Worker 完成事件中的助手消息。"""
+
+    if not response_result.model_was_invoked or response_result.model_resolution is None:
+        return {}
+    resolution = response_result.model_resolution
+    reported_model_id = response_result.provider_reported_model_id
+    return {
+        "model": {
+            "provider_key": resolution.profile.provider_key,
+            "model_id": reported_model_id or resolution.profile.model_id,
+            "requested_model_id": resolution.profile.model_id,
+            "provider_reported_model_id": reported_model_id,
+            "source": "provider_response" if reported_model_id else "request",
+        },
+    }
 
 
 class CareerTurnWorker:

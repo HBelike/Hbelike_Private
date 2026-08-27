@@ -39,6 +39,7 @@ class FakePublicWebService:
         self,
         organization_id: UUID,
         *,
+        created_by_actor_id: UUID,
         keyword: str,
         requested_limit: int,
     ) -> InterviewCollectionJobRecord:
@@ -46,6 +47,7 @@ class FakePublicWebService:
         return InterviewCollectionJobRecord(
             id=uuid4(),
             organization_id=organization_id,
+            created_by_actor_id=created_by_actor_id,
             platform_key="public_web",
             keyword=keyword,
             requested_limit=requested_limit,
@@ -86,6 +88,8 @@ class FakeInterviewRepository:
         self.experience_id = uuid4()
         self.experience = SimpleNamespace(
             id=self.experience_id,
+            organization_id=career_router.DEFAULT_ORGANIZATION_ID,
+            created_by_actor_id=career_router.DEFAULT_ACTOR_ID,
             company_id=uuid4(),
             company_name="公开资料",
             job_name=None,
@@ -129,11 +133,17 @@ class FakeInterviewRepository:
     def get_experience(self, _organization_id: UUID, experience_id: UUID):  # type: ignore[no-untyped-def]
         return self.experience if experience_id == self.experience_id else None
 
+    def get_public_experience(self, experience_id: UUID):
+        return self.experience if experience_id == self.experience_id else None
+
     def list_experience_sources(
         self,
         _organization_id: UUID,
         experience_id: UUID,
     ):  # type: ignore[no-untyped-def]
+        return self.sources if experience_id == self.experience_id else []
+
+    def list_public_experience_sources(self, experience_id: UUID):
         return self.sources if experience_id == self.experience_id else []
 
 
@@ -157,7 +167,7 @@ def main() -> None:
         with TestClient(app) as client:
             unavailable = client.post(
                 "/api/career/interview-library/public-web-imports",
-                json={"keyword": "agent开发面经", "requested_limit": 50},
+                json={"keyword": "agent开发面经", "requested_limit": 10},
             )
             assert unavailable.status_code == 503, unavailable.text
             assert "FIRECRAWL_API_KEY" in unavailable.json()["detail"]
@@ -165,13 +175,13 @@ def main() -> None:
             current = FakePublicWebService(ready=True)
             accepted = client.post(
                 "/api/career/interview-library/public-web-imports",
-                json={"keyword": "agent开发面经", "requested_limit": 50},
+                json={"keyword": "agent开发面经", "requested_limit": 10},
             )
             assert accepted.status_code == 202, accepted.text
             payload = accepted.json()["job"]
             assert payload["platform_key"] == "public_web"
             assert payload["keyword"] == "agent开发面经"
-            assert payload["requested_limit"] == 50
+            assert payload["requested_limit"] == 10
             assert payload["connector_kind"] == "public_api"
             assert payload["metadata"]["summary"]["imported"] == 0
             assert current.run_calls == [
@@ -180,7 +190,7 @@ def main() -> None:
 
             invalid = client.post(
                 "/api/career/interview-library/public-web-imports",
-                json={"keyword": "agent开发面经", "requested_limit": 51},
+                json={"keyword": "agent开发面经", "requested_limit": 11},
             )
             assert invalid.status_code == 422, invalid.text
 

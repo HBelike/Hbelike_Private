@@ -51,6 +51,7 @@ import {
   getCareerLayoutMode,
   getPanelAfterLayoutChange
 } from '../career-responsive-layout.js'
+import { createChatAutoScroller } from '../career-chat-auto-scroll.js'
 
 const emit = defineEmits(['navigate'])
 
@@ -80,6 +81,8 @@ const connectionTestError = ref('')
 const connectionSaveError = ref('')
 const connectionConfigRef = ref(null)
 const composerHighlightLayer = ref(null)
+const messageListRef = ref(null)
+const latestMessageRef = ref(null)
 const composerDisplayText = ref('')
 const messageText = ref('')
 const interviewMentionQuery = ref('')
@@ -197,6 +200,10 @@ let skillMentionRequestId = 0
 let contextUsageRequestId = 0
 let careerResizeObserver = null
 const turnObservationCoordinator = createTurnObservationCoordinator()
+const chatAutoScroller = createChatAutoScroller({
+  getContainer: () => messageListRef.value,
+  getTarget: () => latestMessageRef.value
+})
 
 function dismissError() {
   errorMessage.value = ''
@@ -216,6 +223,14 @@ watch(errorMessage, (message) => {
   }, 3000)
 })
 
+watch(
+  [sending, streamedAssistantText, streamStatus, streamProgress, feedback, () => messages.value.length],
+  ([isSending], [wasSending]) => {
+    if (isSending || wasSending) chatAutoScroller.request()
+  },
+  { deep: true, flush: 'post' }
+)
+
 onBeforeUnmount(() => {
   if (errorToastTimer) clearTimeout(errorToastTimer)
   if (interviewMentionDebounceTimer) clearTimeout(interviewMentionDebounceTimer)
@@ -224,6 +239,7 @@ onBeforeUnmount(() => {
   document.removeEventListener('keydown', handleCareerPanelKeydown)
   careerResizeObserver?.disconnect()
   careerResizeObserver = null
+  chatAutoScroller.cancel()
   stopContextRailResize()
   stopActiveTurnObservation()
   stopTurnRecoveryPolling()
@@ -972,6 +988,12 @@ async function loadContextUsage() {
   } finally {
     if (requestId === contextUsageRequestId) contextUsageLoading.value = false
   }
+}
+
+function messageModelLabel(message) {
+  const model = message?.model
+  if (!model?.provider_key || !model?.model_id) return ''
+  return `${providerOption(model.provider_key).label} · ${model.model_id}`
 }
 
 function useFreeQuotaFirstSelection() {
@@ -2292,13 +2314,16 @@ onMounted(() => {
         <button class="empty-context-button" type="button" @click="startNewConversation">直接开启对话</button>
       </section>
 
-      <section v-else class="message-list" aria-live="polite">
+      <section v-else ref="messageListRef" class="message-list" aria-live="polite">
         <article v-if="!messages.length" class="agent-message">
           <header class="message-role"><i aria-hidden="true">职</i><strong>求职助手</strong></header>
           <CareerMessageContent :content="welcomeMessage" />
         </article>
         <article v-for="message in messages" :key="message.id" class="message" :class="[message.role === 'user' ? 'from-user' : 'from-agent', message.local_state ? `message-${message.local_state}` : '']" :aria-label="message.role === 'user' ? '你的消息' : '求职助手消息'">
-          <header v-if="message.role !== 'user'" class="message-role"><i aria-hidden="true">职</i><strong>求职助手</strong></header>
+          <header v-if="message.role !== 'user'" class="message-role">
+            <i aria-hidden="true">职</i><strong>求职助手</strong>
+            <span v-if="messageModelLabel(message)" class="message-model-label" title="本条回复的实际调用模型">{{ messageModelLabel(message) }}</span>
+          </header>
           <CareerMessageContent :content="message.content" />
           <small class="message-time">{{ formatDate(message.created_at) }}<template v-if="message.local_state === 'sending'"> · 正在发送</template><template v-else-if="message.local_state === 'queued'"> · 等待回复</template><template v-else-if="message.local_state === 'failed'"> · 发送失败</template></small>
         </article>
@@ -2309,6 +2334,7 @@ onMounted(() => {
           </ol>
           <CareerMessageContent v-if="streamedAssistantText" class="streamed-answer" :content="streamedAssistantText" />
           <p v-else class="stream-status">{{ streamStatus || '正在思考…' }}</p>
+          <span ref="latestMessageRef" class="message-scroll-anchor" aria-hidden="true"></span>
         </article>
         <section v-if="pendingTurns.length" class="turn-queue-preview" aria-label="待回复消息">
           <strong>待回复消息（{{ pendingTurns.length }}）</strong>
@@ -2610,9 +2636,11 @@ onMounted(() => {
 .message-role { display:flex; align-items:center; gap:7px; margin-bottom:10px; color:var(--ui-text-secondary); }
 .message-role i { display:grid; width:24px; height:24px; flex:0 0 auto; place-items:center; border-radius:7px; background:var(--ui-surface-active); color:var(--ui-accent-ink); font-size:11px; font-style:normal; font-weight:900; }
 .message-role strong { color:var(--ui-text-secondary); font-size:12px; font-weight:800; }
+.message-model-label { overflow:hidden; max-width:360px; border:1px solid var(--ui-line); border-radius:999px; background:var(--ui-surface-soft); padding:3px 7px; color:var(--ui-text-muted); font-size:10px; font-weight:750; text-overflow:ellipsis; white-space:nowrap; }
 .message-time { display:block; margin-top:10px; color:var(--ui-text-muted); font-size:10px; }.from-user .message-time { margin-top:6px; color:#8193aa; text-align:right; }
 .turn-status { align-self:center; border-radius:999px; background:var(--ui-surface-soft); color:var(--ui-text-secondary); padding:7px 11px; font-size:12px; }.turn-status.active { background:var(--ui-warning-soft); color:var(--ui-warning); }
 .message-sending,.message-queued { opacity:.76; }.message-failed { border-color:#edcaca; background:#fff8f8 !important; }.message-failed small { color:#b35454; font-weight:800; }.agent-pending { width:min(560px,86%); color:var(--ui-text-secondary); }.stream-pending-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; color:var(--ui-text-secondary); }.stream-pending-heading .message-role { margin-bottom:0; }.stream-pending-heading::before { width:13px; height:13px; flex:0 0 auto; border:2px solid var(--ui-line-strong); border-top-color:var(--ui-accent); border-radius:50%; content:''; animation:career-thinking-spin .8s linear infinite; }.stream-pending-heading span { color:var(--ui-text-muted); font-size:11px; font-weight:800; }.stream-progress-list { display:grid; gap:7px; margin:11px 0 0; padding:0; list-style:none; }.stream-progress-item { display:flex; align-items:center; gap:8px; color:var(--ui-text-muted); font-size:12px; line-height:1.45; }.stream-progress-item i { width:7px; height:7px; flex:0 0 auto; border-radius:50%; background:var(--ui-line-strong); }.stream-progress-item.running { color:var(--ui-accent-ink); font-weight:750; }.stream-progress-item.running i { background:var(--ui-accent); animation:career-progress-pulse 1s ease-in-out infinite; }.stream-progress-item.completed i { background:var(--ui-success); }.stream-status,.streamed-answer { margin:10px 0 0 !important; }.streamed-answer { border-top:1px solid var(--ui-line); padding-top:10px; } @keyframes career-progress-pulse { 50% { transform:scale(.72); opacity:.55; } }
+.message-scroll-anchor { display:block; width:100%; height:1px; pointer-events:none; }
 .turn-queue-preview{display:grid;width:min(560px,86%);gap:7px;border:1px dashed var(--ui-line-strong);border-radius:12px;background:var(--ui-surface-soft);padding:10px 12px;color:var(--ui-text-secondary)}.turn-queue-preview>strong{font-size:11px}.turn-queue-preview article{display:grid;grid-template-columns:20px minmax(0,1fr) auto;align-items:start;gap:7px}.turn-queue-preview article span{display:grid;width:18px;height:18px;place-items:center;border-radius:50%;background:var(--ui-surface-active);color:var(--ui-accent-ink);font-size:10px;font-weight:850}.turn-queue-preview article p{overflow:hidden;margin:0;font-size:12px;line-height:1.45;text-overflow:ellipsis;white-space:nowrap}.turn-queue-preview article small{border-radius:999px;background:#fff;padding:2px 6px;color:var(--ui-text-muted);font-size:10px;font-weight:800}
 @keyframes career-thinking-spin { to { transform:rotate(360deg); } }
 .composer { border-top:1px solid #edf0e7; background:#fff; padding:12px 16px 14px; }.composer-toolbar { min-height:36px; flex-wrap:wrap; border-bottom:1px solid #edf0e7; padding-bottom:9px; }.input-tools,.session-tools { display:flex; min-width:0; flex-wrap:wrap; align-items:center; gap:7px; }.session-tools { margin-left:auto; justify-content:flex-end; }.job-url-row { display:grid; grid-template-columns:auto 1fr; align-items:center; gap:8px; margin:10px 0 9px; color:#738068; font-size:12px; font-weight:800; }.job-url-row input,.composer textarea { padding:10px 11px; }.composer textarea { display:block; min-height:68px; resize:vertical; }.composer-footer { margin-top:9px; }.composer-submit-tools { display:flex; flex:none; align-items:center; gap:10px; }.input-tools { justify-content:flex-start; }.resume-input { display:none; }.chip-button.active { max-width:240px; overflow:hidden; background:#eaf4d4; color:#5a7d21; text-overflow:ellipsis; white-space:nowrap; }.file-clear-button { border-color:#f0d5d5; background:#fff8f8; color:#a65a5a; }.free-model-entry-button { border-style:dashed; background:#fff; color:#62812d; }.free-model-entry-button:hover { border-color:#9fbd67; background:#f5f9ed; }.model-select { width:auto; max-width:300px; padding:7px 9px; color:#65775a; font-size:12px; font-weight:700; }.send-button { min-width:88px; padding:9px 13px; }.composer-footer > small { color:#98a18e; font-size:11px; }

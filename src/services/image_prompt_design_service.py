@@ -12,22 +12,13 @@ class ImagePromptDesignService:
 
     SummaryTask 只负责给出项目价值与 ``visual_brief``；本服务不猜测某个项目应当
     使用通用蓝色流程图，而是根据 diagram_type、真实节点和关系生成一张独立的
-    白底商务技术 PPT 教学图。该服务不调用外部 API、不写数据库，也不做本地叠字，最终图像
+    无标题工程架构信息图。该服务不调用外部 API、不写数据库，也不做本地叠字，最终图像
     始终由火山方舟原始生成。
     """
 
     _whitespace_pattern = re.compile(r"\s+")
     _url_pattern = re.compile(r"https?://\S+", re.IGNORECASE)
     _repo_pattern = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
-
-    _compact_diagram_layouts = {
-        "structural_breakdown": "分区结构拆解，组件边界清楚",
-        "linear_progression": "自左向右单主线流程",
-        "circular_flow": "顺时针闭环，回流方向明确",
-        "hub_spoke": "中心模块连接周边组件",
-        "layered_system": "自下而上分层，层间垂直连接",
-        "comparison": "左右对照，中间突出关键变化",
-    }
 
     def __init__(self, config: AppConfig) -> None:
         self.config = config
@@ -61,49 +52,137 @@ class ImagePromptDesignService:
             project_index=project_index,
         )
 
+        nodes = brief.get("nodes") if isinstance(brief.get("nodes"), list) else []
+        relationships = (
+            brief.get("relationships") if isinstance(brief.get("relationships"), list) else []
+        )
         diagram_type = str(brief.get("diagram_type", "structural_breakdown"))
-        layout_instruction = self._compact_diagram_layouts.get(
-            diagram_type,
-            self._compact_diagram_layouts["structural_breakdown"],
+        layout_instruction = self._format_layout(
+            diagram_type=diagram_type,
+            raw_nodes=nodes,
+            raw_relationships=relationships,
+            raw_reading_order=brief.get("reading_order"),
         )
+        relationship_instruction = self._format_relationships(relationships, nodes)
 
-        node_instruction = self._format_nodes(brief.get("nodes"))
-        relationship_instruction = self._format_relationships(brief.get("relationships"), brief.get("nodes"))
-        semantic_focus = self._compact_text(
-            str(brief.get("visual_thesis", "")).strip() or cleaned_focus or cleaned_summary,
-            max_length=42,
-        )
-
-        # 官方建议中文图片 prompt 不超过 300 字。这里保留“风格、结论、模块、关系、
-        # 文字禁区”五类高优先级信息，不再重复堆叠全局说明书。
-        style_contract = self._compact_text(self.config.image_prompt_visual_system, max_length=72)
+        # 图片模型最容易在抽象的“中心连接周边”指令中自行补齐对称节点。最终 Prompt
+        # 因此只保留可以直接照着画的节点数量、位置和箭头拓扑，不再重复项目摘要或要求
+        # 模型排版连线文字。详细语义仍由同源 visual_brief 和文章图注承担。
+        style_contract = self._compact_text(self.config.image_prompt_visual_system, max_length=60)
         body_parts = [
             style_contract,
-            f"核心结论：{semantic_focus}。" if semantic_focus else "",
-            f"布局：{layout_instruction}；规整矩形模块分区，位置对齐，线条不交叉。",
-            f"模块文字仅限：{node_instruction}。",
-            f"黑色实线正交折线箭头，严格禁用曲线：{relationship_instruction}。",
+            (
+                f"仅绘制{len(nodes)}个模块，每个模块只出现一次；"
+                "禁止镜像、复制或新增，禁止为对称构图补节点。"
+            ),
+            layout_instruction,
+            f"深灰正交箭头仅限：{relationship_instruction}。",
         ]
         terminal_contract = (
-            "只显示上述模块名和连线标签，字体规整清晰且不重叠；"
-            "禁标题、正文、页码、人物、照片、logo、水印、额外文字、伪文字和乱码。"
+            "画面只写节点标签，连线不写文字；禁止标题区、装饰点、空白占位框、"
+            "曲线、交叉线、人物、logo、水印、伪文字和乱码。"
         )
         prompt = " ".join(part for part in body_parts if part)
         available = max(1, self.config.image_prompt_max_length - len(terminal_contract) - 1)
         prompt = self._limit_text(prompt, max_length=available)
         return f"{prompt} {terminal_contract}".strip()
 
-    def _format_nodes(self, raw_nodes: Any) -> str:
+    def _format_layout(
+        self,
+        diagram_type: str,
+        raw_nodes: Any,
+        raw_relationships: Any,
+        raw_reading_order: Any,
+    ) -> str:
+        """把抽象图表类型编译成每个节点唯一且可执行的位置指令。"""
+
         if not isinstance(raw_nodes, list):
-            return "3到4个语义明确的短标签"
-        nodes: list[str] = []
-        for raw_node in raw_nodes[:4]:
-            if not isinstance(raw_node, dict):
+            return "位置：模块沿单一主线规整排列。"
+        label_map = {
+            str(node.get("id", "")).strip(): self._short_text(node.get("label"), 8)
+            for node in raw_nodes
+            if isinstance(node, dict) and str(node.get("id", "")).strip()
+        }
+        ordered_ids: list[str] = []
+        if isinstance(raw_reading_order, list):
+            for raw_id in raw_reading_order:
+                node_id = str(raw_id).strip()
+                if node_id in label_map and node_id not in ordered_ids:
+                    ordered_ids.append(node_id)
+        ordered_ids.extend(node_id for node_id in label_map if node_id not in ordered_ids)
+        ordered_labels = [f"「{label_map[node_id]}」" for node_id in ordered_ids]
+        sequence = "→".join(ordered_labels)
+
+        if diagram_type == "hub_spoke":
+            return self._format_hub_layout(label_map, ordered_ids, raw_relationships)
+        if diagram_type == "circular_flow":
+            return f"位置与阅读顺序：从顶部顺时针{sequence}。"
+        if diagram_type == "layered_system":
+            return f"位置与阅读顺序：自上而下{sequence}。"
+        if diagram_type == "comparison":
+            return f"位置与阅读顺序：左到右对照{sequence}。"
+        if diagram_type == "structural_breakdown":
+            return f"位置与阅读顺序：左到右分区{sequence}。"
+        return f"位置与阅读顺序：左到右{sequence}。"
+
+    def _format_hub_layout(
+        self,
+        label_map: dict[str, str],
+        ordered_ids: list[str],
+        raw_relationships: Any,
+    ) -> str:
+        """根据实际入边和出边安排 hub-spoke，避免模型做无依据的左右镜像。"""
+
+        relationships = raw_relationships if isinstance(raw_relationships, list) else []
+        degree = {node_id: 0 for node_id in ordered_ids}
+        for relation in relationships:
+            if not isinstance(relation, dict):
                 continue
-            label = self._short_text(raw_node.get("label"), 8)
-            if label:
-                nodes.append(f"「{label}」")
-        return "、".join(nodes) or "3到4个语义明确的短标签"
+            source = str(relation.get("from", "")).strip()
+            target = str(relation.get("to", "")).strip()
+            if source in degree and target in degree:
+                degree[source] += 1
+                degree[target] += 1
+        hub_id = max(ordered_ids, key=lambda node_id: degree[node_id], default="")
+        if not hub_id:
+            return "位置：模块沿单一主线规整排列。"
+
+        incoming: list[str] = []
+        outgoing: list[str] = []
+        for relation in relationships:
+            if not isinstance(relation, dict):
+                continue
+            source = str(relation.get("from", "")).strip()
+            target = str(relation.get("to", "")).strip()
+            if target == hub_id and source in label_map and source not in incoming:
+                incoming.append(source)
+            if source == hub_id and target in label_map and target not in outgoing:
+                outgoing.append(target)
+        remaining = [
+            node_id
+            for node_id in ordered_ids
+            if node_id != hub_id and node_id not in incoming and node_id not in outgoing
+        ]
+        incoming.extend(remaining)
+
+        placements = [f"中心「{label_map[hub_id]}」"]
+        if len(incoming) == 1:
+            placements.append(f"左侧「{label_map[incoming[0]]}」")
+        elif incoming:
+            left_slots = ("左上", "左下", "左侧")
+            placements.extend(
+                f"{slot}「{label_map[node_id]}」"
+                for slot, node_id in zip(left_slots, incoming, strict=False)
+            )
+        if len(outgoing) == 1:
+            placements.append(f"右侧「{label_map[outgoing[0]]}」")
+        elif outgoing:
+            right_slots = ("右上", "右下", "右侧")
+            placements.extend(
+                f"{slot}「{label_map[node_id]}」"
+                for slot, node_id in zip(right_slots, outgoing, strict=False)
+            )
+        return f"位置：{'；'.join(placements)}。"
 
     def _format_relationships(self, raw_relationships: Any, raw_nodes: Any) -> str:
         if not isinstance(raw_relationships, list) or not isinstance(raw_nodes, list):
@@ -119,10 +198,9 @@ class ImagePromptDesignService:
                 continue
             source = label_map.get(str(raw_relation.get("from", "")).strip(), "")
             target = label_map.get(str(raw_relation.get("to", "")).strip(), "")
-            label = self._short_text(raw_relation.get("label"), 8) or "流转"
             if source and target:
-                relationships.append(f"「{source}」—{label}→「{target}」")
-        return "；".join(relationships) or "只保留主数据流"
+                relationships.append(f"「{source}」→「{target}」")
+        return "；".join(relationships) or "主数据流"
 
     def _sanitize_visual_text(self, text: str, repository_full_name: str, max_length: int) -> str:
         """清理不适合进入图像提示词的 URL、仓库名和格式噪声。"""

@@ -5,11 +5,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from src.providers.gotenberg_screenshot_provider import GotenbergScreenshotProvider
 from src.providers.github_repository_asset_provider import GitHubRepositoryAssetProvider
 from src.providers.local_image_provider import LocalTechCardImageProvider
 from src.providers.seedream_provider import SeedreamProvider
 from src.repositories.generated_content_repository import GeneratedContentForImage, GeneratedContentRepository
 from src.repositories.media_asset_repository import MediaAssetInput, MediaAssetRecord, MediaAssetRepository
+from src.services.article_visual_generation_service import ArticleVisualGenerationService
 from src.services.image_prompt_design_service import ImagePromptDesignService
 from src.repositories.video_storyboard_repository import VideoStoryboardRecord, VideoStoryboardRepository
 from src.tasks.base_task import BaseTask
@@ -32,13 +34,142 @@ class ImageTask(BaseTask):
     task_name = "ImageTask"
 
     def execute(self, context: TaskContext) -> dict[str, Any]:
+        """按配置执行默认图片渲染器。"""
+
+        return self.execute_for_content(context)
+
+    def execute_for_content(
+        self,
+        context: TaskContext,
+        content_id: int | None = None,
+    ) -> dict[str, Any]:
+        """为最新或指定内容生成图片，显式 renderer 决定调用链。"""
+
+        renderer = str(
+            getattr(context.config, "image_renderer", "gotenberg_html")
+        ).strip()
+        if renderer == "gotenberg_html":
+            return self._execute_deterministic(context, content_id=content_id)
+        if renderer == "seedream":
+            return self._execute_seedream(context, content_id=content_id)
+        raise RuntimeError(f"不支持的图片 renderer：{renderer}")
+
+    def _execute_deterministic(
+        self,
+        context: TaskContext,
+        *,
+        content_id: int | None,
+    ) -> dict[str, Any]:
+        """使用 ArticleVisualSpec 和 Gotenberg 完成整批关闭式渲染。"""
+
+        content_repository = GeneratedContentRepository(
+            database_manager=context.database_manager
+        )
+        media_asset_repository = MediaAssetRepository(
+            database_manager=context.database_manager
+        )
+        content = (
+            content_repository.get_for_image_generation(content_id)
+            if content_id is not None
+            else content_repository.latest_for_image_generation()
+        )
+        if content is None:
+            raise RuntimeError(f"没有可生成图片的内容：content_id={content_id}")
+        if not content.image_prompts:
+            raise RuntimeError(f"content_id={content.id} 没有可用 image_prompts")
+
+        existing_assets = media_asset_repository.list_by_content_id(
+            content.id, "image"
+        )
+        provider = GotenbergScreenshotProvider(config=context.config)
+        generation_service = ArticleVisualGenerationService(
+            context.config,
+            provider=provider,
+        )
+        batch = generation_service.prepare(
+            content=content,
+            existing_assets=existing_assets,
+        )
+
+        created_records: list[MediaAssetRecord] = []
+        if batch.new_assets:
+            try:
+                created_records = media_asset_repository.create_and_replace_images(
+                    assets=[item.input for item in batch.new_assets],
+                    replace_asset_ids=list(batch.replace_asset_ids),
+                )
+            except Exception:
+                generation_service.cleanup_new_files(batch)
+                raise
+
+        assets = [
+            {
+                "asset_id": asset.id,
+                "repository_full_name": str(
+                    asset.metadata.get("repository_full_name", "")
+                ),
+                "path": asset.path,
+                "provider": asset.provider,
+                "reused": False,
+            }
+            for asset in created_records
+        ]
+        assets.extend(
+            {
+                "asset_id": asset.id,
+                "repository_full_name": str(
+                    asset.metadata.get("repository_full_name", "")
+                ),
+                "path": asset.path,
+                "provider": asset.provider,
+                "reused": True,
+            }
+            for asset in batch.reused_assets
+        )
+        return {
+            "content_id": content.id,
+            "week_end": content.week_end,
+            "prompt_count": len(content.image_prompts),
+            "image_asset_count": len(batch.new_assets) + len(batch.reused_assets),
+            "renderer": "gotenberg_html",
+            "provider": "gotenberg_html",
+            "rendered_image_count": len(batch.new_assets),
+            "reused_image_count": len(batch.reused_assets),
+            # 兼容旧工作台字段，含义保持为本轮复用数量。
+            "reusable_image_count": len(batch.reused_assets),
+            "created_image_count": len(created_records),
+            "replaced_image_count": len(batch.replace_asset_ids),
+            "validation_failed_count": 0,
+            "figure_role_counts": batch.figure_role_counts,
+            "prompt_source": "summary_image_prompt",
+            "storyboard_id": None,
+            "github_asset_fallback_allowed": False,
+            "skipped": not bool(batch.new_assets),
+            "skip_reason": "all_render_keys_reused"
+            if not batch.new_assets
+            else None,
+            "network_called": bool(batch.new_assets),
+            "paid_generation_called": False,
+            "assets": assets,
+        }
+
+    def _execute_seedream(
+        self,
+        context: TaskContext,
+        *,
+        content_id: int | None = None,
+    ) -> dict[str, Any]:
         """读取最新内容，补齐缺失的项目配图，并写入 media_assets。"""
 
         content_repository = GeneratedContentRepository(database_manager=context.database_manager)
         media_asset_repository = MediaAssetRepository(database_manager=context.database_manager)
         storyboard_repository = VideoStoryboardRepository(database_manager=context.database_manager)
 
-        base_content = content_repository.latest_for_image_generation()
+        base_content = (
+            content_repository.get_for_image_generation(content_id)
+            if content_id is not None
+            else content_repository.latest_for_image_generation()
+        )
         if base_content is None:
             raise RuntimeError("没有可生成图片的 generated_contents，请先运行 SummaryTask")
         prompt_selection = self._select_image_prompts(

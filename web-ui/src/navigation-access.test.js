@@ -6,7 +6,8 @@ import {
   DEFAULT_APP_ROUTE,
   buildNavigationFallback,
   canAccessNavigationItem,
-  normalizeAppRoute
+  normalizeAppRoute,
+  resolveAuthenticatedRoute
 } from './navigation-access.js'
 
 const careerItem = {
@@ -28,7 +29,31 @@ test('应用侧栏和登录成功流程都以求职助手为第一入口', async
 
   assert.ok(careerIndex >= 0)
   assert.ok(workbenchIndex > careerIndex)
-  assert.match(source, /isAuthRoute\(currentRoute\.value\) \? DEFAULT_APP_ROUTE : currentRoute\.value/)
+  assert.match(source, /resolveAuthenticatedRoute\(currentRoute\.value\)/)
+})
+
+test('登录用户刷新认证页面时统一回到求职首页', () => {
+  assert.equal(resolveAuthenticatedRoute('/login'), '/career')
+  assert.equal(resolveAuthenticatedRoute('/register'), '/career')
+  assert.equal(resolveAuthenticatedRoute('/forgot-password'), '/career')
+  assert.equal(resolveAuthenticatedRoute('/interviews'), '/interviews')
+})
+
+test('应用启动恢复登录态后立即解析认证页面，避免渲染空壳', async () => {
+  const source = await readFile(new URL('./App.vue', import.meta.url), 'utf8')
+  const loadCurrentUserSource = source.match(
+    /async function loadCurrentUser\(\) \{([\s\S]*?)\n\}/
+  )?.[1]
+
+  assert.ok(loadCurrentUserSource, '应能定位登录态恢复函数')
+  assert.match(loadCurrentUserSource, /const authenticatedRoute = resolveAuthenticatedRoute\(currentRoute\.value\)/)
+  assert.match(loadCurrentUserSource, /window\.history\.replaceState\(\{\}, '', authenticatedRoute\)/)
+  assert.match(loadCurrentUserSource, /currentRoute\.value = authenticatedRoute/)
+  assert.ok(
+    loadCurrentUserSource.indexOf('currentRoute.value = authenticatedRoute')
+      < loadCurrentUserSource.indexOf('authReady.value = true'),
+    '认证路由必须在开放登录态渲染之前修正'
+  )
 })
 
 test('工作台子路由仍按现有目录规范化', () => {

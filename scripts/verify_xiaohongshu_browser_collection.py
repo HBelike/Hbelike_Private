@@ -31,6 +31,7 @@ from scripts.verify_xiaohongshu_import_orchestration import (
     FakeEvidenceAnalyzer,
     FakeLibraryService,
     FakeRepository,
+    ACTOR_ID,
     ORGANIZATION_ID,
 )
 
@@ -110,6 +111,7 @@ def verify_browser_collection() -> None:
     service, repository, library, attachments = build_service()
     job = service.create_xiaohongshu_browser_collection_job(
         ORGANIZATION_ID,
+        created_by_actor_id=ACTOR_ID,
         keyword="全栈开发面经",
         requested_limit=20,
     )
@@ -166,6 +168,7 @@ def verify_duplicate_and_pause() -> None:
     repository.experiences_by_url[canonical_url] = SimpleNamespace(id=UUID("00000000-0000-0000-0000-000000000999"))
     job = service.create_xiaohongshu_browser_collection_job(
         ORGANIZATION_ID,
+        created_by_actor_id=ACTOR_ID,
         keyword="AI 面经",
         requested_limit=20,
     )
@@ -179,6 +182,7 @@ def verify_duplicate_and_pause() -> None:
 
     paused_job = service.create_xiaohongshu_browser_collection_job(
         ORGANIZATION_ID,
+        created_by_actor_id=ACTOR_ID,
         keyword="后端面经",
         requested_limit=20,
     )
@@ -195,6 +199,7 @@ def verify_restricted_note_is_recorded_and_skipped() -> None:
     service, repository, library, attachments = build_service()
     job = service.create_xiaohongshu_browser_collection_job(
         ORGANIZATION_ID,
+        created_by_actor_id=ACTOR_ID,
         keyword="agent开发面经",
         requested_limit=50,
     )

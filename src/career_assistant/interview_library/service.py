@@ -68,6 +68,8 @@ class InterviewLibraryService:
         draft: InterviewExperienceDraft,
         *,
         trigger_type: IngestionTriggerType,
+        created_by_actor_id: UUID | None = None,
+        can_manage_all: bool = False,
     ) -> InterviewExperienceRecord:
         """建立面经解析、切片与索引父链，只记录规模和来源类别。"""
 
@@ -89,6 +91,8 @@ class InterviewLibraryService:
                 organization_id,
                 draft,
                 trigger_type=trigger_type,
+                created_by_actor_id=created_by_actor_id,
+                can_manage_all=can_manage_all,
             ),
             summarize=lambda _: {"completed": True},
         )
@@ -99,6 +103,8 @@ class InterviewLibraryService:
         draft: InterviewExperienceDraft,
         *,
         trigger_type: IngestionTriggerType,
+        created_by_actor_id: UUID | None,
+        can_manage_all: bool,
     ) -> InterviewExperienceRecord:
         """将已解析文本持久化并同步建立无向量切片索引。"""
 
@@ -115,6 +121,7 @@ class InterviewLibraryService:
         content_hash = sha256(markdown_content.encode("utf-8")).hexdigest()
         experience = self._repository.create_experience(
             organization_id=organization_id,
+            created_by_actor_id=created_by_actor_id,
             company_id=company.id,
             job_name=job_name,
             role_name=draft.role_name,
@@ -127,6 +134,7 @@ class InterviewLibraryService:
             source_content_hash=content_hash,
             summary_text=draft.summary_text,
             tags=draft.tags,
+            can_manage_all=can_manage_all,
         )
         chunks = self._chunker.split(
             experience.normalized_markdown,
@@ -147,6 +155,8 @@ class InterviewLibraryService:
         organization_id: UUID,
         experience_id: UUID,
         *,
+        actor_id: UUID,
+        can_manage_all: bool = False,
         company_name: str | None = None,
         role_name: str | None = None,
         markdown_content: str,
@@ -155,19 +165,24 @@ class InterviewLibraryService:
     ) -> InterviewExperienceRecord:
         """保存编辑内容并同步重建切片，保证 Markdown 与索引版本一致。"""
 
-        current = self._repository.get_experience(organization_id, experience_id)
+        current = self._repository.get_public_experience(experience_id)
         if current is None:
-            raise LookupError("面经不存在或无访问权限")
+            raise LookupError("面经不存在")
+        if not self.can_write(current, actor_id=actor_id, can_manage_all=can_manage_all):
+            raise PermissionError("仅创建者或管理员可以修改该面经")
+        target_organization_id = current.organization_id
         company = self._repository.upsert_company(
-            organization_id,
+            target_organization_id,
             company_name if company_name is not None else current.company_name,
         )
         resolved_role_name = role_name if role_name is not None else current.role_name
         normalized_markdown = self._normalize_for_retrieval(markdown_content)
         content_hash = sha256(self._normalize_markdown(markdown_content).encode("utf-8")).hexdigest()
         updated = self._repository.update_experience_markdown(
-            organization_id,
+            target_organization_id,
             experience_id,
+            actor_id=actor_id,
+            can_manage_all=can_manage_all,
             company_id=company.id,
             role_name=resolved_role_name,
             markdown_content=markdown_content,
@@ -182,12 +197,35 @@ class InterviewLibraryService:
             role_name=updated.role_name,
             job_name=updated.job_name,
         )
-        self._repository.replace_chunks(organization_id, updated.id, chunks)
-        self._index_without_blocking_ingestion(organization_id, updated.id)
-        reloaded = self._repository.get_experience(organization_id, updated.id)
+        self._repository.replace_chunks(target_organization_id, updated.id, chunks)
+        self._index_without_blocking_ingestion(target_organization_id, updated.id)
+        reloaded = self._repository.get_experience(target_organization_id, updated.id)
         if reloaded is None:
             raise RuntimeError("面经重建索引后无法重新读取")
         return reloaded
+
+    def delete_experience(
+        self,
+        organization_id: UUID,
+        experience_id: UUID,
+        *,
+        actor_id: UUID,
+        can_manage_all: bool = False,
+    ) -> None:
+        """永久删除一份面经及其数据库内 RAG 切片和来源记录。"""
+
+        del organization_id
+        current = self._repository.get_public_experience(experience_id)
+        if current is None:
+            raise LookupError("面经不存在")
+        if not self.can_write(current, actor_id=actor_id, can_manage_all=can_manage_all):
+            raise PermissionError("仅创建者或管理员可以删除该面经")
+        if not self._repository.delete_experience(
+            experience_id,
+            actor_id=actor_id,
+            can_manage_all=can_manage_all,
+        ):
+            raise PermissionError("面经归属已变化，请刷新后重试")
 
     def search_for_mention(
         self,
@@ -199,6 +237,17 @@ class InterviewLibraryService:
         """用于求职助手 @面经 的候选列表；只返回用户可见元数据和 Markdown。"""
 
         return self._repository.search_experiences(organization_id, query, limit=limit)
+
+    @staticmethod
+    def can_write(
+        experience: InterviewExperienceRecord,
+        *,
+        actor_id: UUID,
+        can_manage_all: bool,
+    ) -> bool:
+        """管理员可维护全部面经；普通用户仅可维护自己创建的记录。"""
+
+        return can_manage_all or experience.created_by_actor_id == actor_id
 
     def _index_without_blocking_ingestion(
         self,

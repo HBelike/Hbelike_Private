@@ -54,3 +54,27 @@ test('左右主标题统一显示面试岗位并使用最近保存时间', () =>
   assert.doesNotMatch(component, /payload\.job_name/)
   assert.doesNotMatch(component, /formatDate\(selectedExperience\.interview_date\)/)
 })
+
+test('面经详情支持二次确认后永久删除并刷新树', () => {
+  assert.match(component, /const deleting = ref\(false\)/)
+  assert.match(component, /async function deleteExperience\(\)/)
+  assert.match(component, /window\.confirm\([^]*永久删除/)
+  assert.match(component, /method:\s*'DELETE'/)
+  assert.match(component, /面经已删除/)
+  assert.match(component, /class="danger-action"[^>]*@click="deleteExperience"/)
+})
+
+test('公开面经根据服务端写权限进入可编辑或只读状态', () => {
+  assert.match(component, /const canWriteSelected = computed\(\(\) => selectedExperience\.value\?\.can_write === true\)/)
+  assert.match(component, /v-if="!editMode && canWriteSelected"/)
+  assert.match(component, /公开面经，仅创建者或管理员可维护/)
+  assert.match(component, /if \(!selectedExperience\.value \|\| !canWriteSelected\.value\) return/)
+  assert.match(component, /if \(!experience \|\| !canWriteSelected\.value \|\| deleting\.value\) return/)
+})
+
+test('公开信息收集界面默认 10 条且最多分析 10 条', () => {
+  assert.match(component, /mode === 'keyword'[^\n]*requestedLimit = 10/)
+  assert.match(component, /默认 10 条/)
+  assert.match(component, /最多分析数量[^]*max="10"/)
+  assert.match(component, /可设置 5–10 条/)
+})

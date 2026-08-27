@@ -10,6 +10,7 @@
 - `POST /api/career/interview-library/experiences`：手工 Markdown 入库；同一组织、公司与“岗位 + 日期”再次保存时更新原面经、替换切片并重建索引，避免浏览器重试产生重复节点或数据库冲突。
 - `POST /api/career/interview-library/import-file`：复用求职助手的受控解析链路导入文件，入库后清理原件。
 - `GET /api/career/interview-library/experiences/{id}`、`PUT .../{id}`：预览、编辑、保存并重建索引。
+- `DELETE /api/career/interview-library/experiences/{id}`：按组织永久删除面经；数据库同步删除 RAG 切片和来源记录，公开网页账本仅解除关联，避免同一来源被自动重新采集。
 - `GET /api/career/interview-library/mentions`：为后续 `@面经` 候选选择提供轻量检索。
 - `GET /api/career/interview-library/search`：返回带公司、岗位、标题路径与来源链接的 RAG 证据片段。
 - `POST /api/career/live-interviews/archive/preview`、`POST /api/career/live-interviews/archive`：结束实时面试后聚合当前用户的多个会话，只把识别出的面试问题按“公司 → 岗位 + 日期”归并到面经库；已有正文先读取再追加去重，随后复用本模块的切片与索引链路。
@@ -80,7 +81,7 @@ Set-Location D:\MyPro\WechaOffiicialAccount
 npm --prefix web-ui run build
 ```
 
-本模块额外回归覆盖：显式选择资料但查询无关键词命中时的兜底召回、面经树过滤、候选搜索、资料编辑重切片与前端生产构建。
+本模块额外回归覆盖：显式选择资料但查询无关键词命中时的兜底召回、面经树过滤、候选搜索、资料编辑重切片、组织隔离的永久删除与前端生产构建。
 其中保存接口还覆盖同一面经的重复提交：返回原有面经 ID，并以最新 Markdown 重建索引。
 实时面试归档额外覆盖多会话聚合、失败问题保留、问题去重、已有面经合并、无权会话拒绝、零问题拒绝与成功后按 `experience_id` 打开面经。
 
@@ -113,6 +114,21 @@ npm --prefix web-ui run build
 
 - 后端回归覆盖公司迁移、岗位更新、`job_name` 保持不变和切片上下文刷新。
 - 前端回归覆盖两个字段、保存后树刷新、900px 同宽视口、中文标题和蓝色主题覆盖。
+
+## 2026-08-28 面经永久删除
+
+### 设计目标与调用链
+
+1. 详情页提供“删除面经”，二次确认会明确正文、检索索引和来源记录不可恢复。
+2. 前端调用 `DELETE /api/career/interview-library/experiences/{id}`；服务层和仓储使用当前 `actor_id` 校验创建者，管理员通过 `PlatformRole.ADMIN` 取得全量维护权限，其他用户返回 403。
+3. 删除 `interview_experiences` 后，数据库外键级联清理 `interview_chunks` 和 `interview_experience_sources`；入库任务、检索反馈与公开网页账本按既有 `ON DELETE SET NULL` 规则保留历史但解除关联。
+4. 删除成功后清空详情并刷新公司树；没有面经的公司不会被树查询返回，但公司基础记录不做额外清理。
+
+### 验证结果与边界
+
+- 仓储测试确认删除 SQL 强制创建者或管理员条件并返回真实删除结果；服务测试确认不存在或越权时不会伪报成功。
+- 前端测试覆盖二次确认、`DELETE` 请求、树刷新和成功提示。
+- 本次不增加回收站、软删除或批量删除。
 - 已通过面经编辑相关测试、实时面试归档回归和前端生产构建。
 - 本次只完成本地实现与验证，未连接或部署生产环境；手机端仅继承现有单列规则，不做平板专项适配。
 
@@ -122,3 +138,36 @@ npm --prefix web-ui run build
 - `job_name` 是导入时生成的内部面经名称，继续用于去重、归档兼容和检索上下文，不再作为页面主标题展示。
 - 面经树次级信息和详情标题元信息统一显示最近保存时间，优先读取 `updated_at`，缺失时回退到 `created_at`。新建记录的 `updated_at` 即入库时间，每次编辑保存会由仓储更新为当前时间。
 - `interview_date` 继续作为实际面试日期保存在数据模型中，但不再显示在面经树和详情主标题区域，避免与保存时间混淆。
+
+## 2026-08-28 全平台公开读取与归属写权限
+
+### 设计目标与技术取舍
+
+- 面经库定位为全平台公开知识库：公司树、详情、来源、`@面经` 候选和 RAG 召回均跨 `organization_id` 读取，不执行面经级读权限判断；平台统一登录机制保持不变。
+- `interview_experiences.created_by_actor_id` 记录面经创建者，`interview_collection_jobs.created_by_actor_id` 记录公开网页、小红书或公开 URL 任务发起人。两个字段都允许为空并使用 `ON DELETE SET NULL`，避免用户账号删除时一并删除公共知识。
+- 迁移不回填历史数据。历史面经保持 `created_by_actor_id IS NULL`，普通用户只读，管理员可以修改或删除。
+- 普通用户只能修改、删除自己创建或自己发起拉取后生成的面经；管理员可以维护全部记录。`PUT`、`DELETE` 和候选入库均在服务端复核，前端 `can_write` 仅用于展示，不作为权限边界。
+- 同名面经的 `ON CONFLICT DO UPDATE` 增加创建者/管理员条件，普通用户不能借重复入库覆盖他人正文或取得归属。
+
+### 调用链与依赖
+
+1. 平台认证中间件把 `organization_id`、`actor_id` 和 `PlatformRole` 写入 `CareerRequestActor`。
+2. 手动创建、文件上传和实时面试归档直接把 `actor_id` 传入 `InterviewLibraryService.ingest`；异步收集先把发起人写入 `interview_collection_jobs`，最终入库时继承该字段。
+3. 详情接口通过 `get_public_experience` 跨组织读取，并只返回布尔值 `can_write`，不向前端暴露创建者 ID。
+4. 编辑和删除先跨组织读取目标记录，再执行“创建者相同或管理员”判断；管理员跨组织编辑时继续在目标面经原组织内维护公司、正文和索引。
+5. 全局公司树按 `normalized_name` 合并同名公司；关键词和向量检索取消组织过滤，显式选择的面经 ID 同样可以跨组织进入 RAG 上下文。
+
+### 数据库与验证边界
+
+- 迁移：`20260828_28_interview_experience_ownership.py`，只新增两个可空外键和查询索引，不修改历史归属。
+- 自动化覆盖跨组织详情和树读取、普通用户只读、创建者写入、管理员维护历史面经、服务端 403、防覆盖条件、异步拉取归属及前端只读态。
+- 本次不增加角色体系、审批流、共享编辑者、软删除或历史归属推断；匿名访问不在本次范围内，仍沿用平台现有登录入口。
+
+## 2026-08-28 管理员写权限运行态修复
+
+- **问题原因**：新前端严格要求面经详情返回 `can_write=true`；如果仍连接未更新的 API，该字段缺失会按只读处理。可选认证环境此前也不会把已有登录会话的角色注入 Career Actor。
+- **身份边界**：唯一管理员继续是 `2963613812@qq.com`，沿用迁移 `20260825_20` 的现有约束，不新增或调整管理员账号迁移。
+- **调用链修复**：`PLATFORM_AUTH_REQUIRED` 只控制缺少有效会话时是否返回 401。业务 API 只要携带有效 Cookie，强制或可选认证模式都会把真实 `PlatformRole` 注入 `CareerRequestActor`。
+- **权限边界**：前端仍以服务端 `can_write` 为准；`PUT` 和 `DELETE` 继续由服务层复核管理员或创建者身份，不因页面显示“管理员”而跳过后端校验。
+- **运行版本**：健康接口返回 `career_runtime_revision=2026-08-28-interview-admin-permissions-v2`，用于确认运行中的后端已经包含该修复。
+- **验证结果**：后端、前端测试通过，Alembic 仍以 `20260828_28` 为唯一 head，Vite 生产构建通过；本次未部署生产。

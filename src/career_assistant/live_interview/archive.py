@@ -76,6 +76,7 @@ class LiveInterviewArchiveService:
         *,
         organization_id: UUID,
         actor_id: UUID,
+        can_manage_all: bool = False,
         session_ids: tuple[UUID, ...],
         company_name: str,
         role_name: str,
@@ -133,6 +134,8 @@ class LiveInterviewArchiveService:
                     job_name=job_name,
                 ),
                 trigger_type=IngestionTriggerType.API_SYNC,
+                created_by_actor_id=actor_id,
+                can_manage_all=can_manage_all,
             )
         else:
             markdown = (
@@ -143,6 +146,8 @@ class LiveInterviewArchiveService:
             experience = self._interview_service.update_markdown(
                 organization_id,
                 existing.id,
+                actor_id=actor_id,
+                can_manage_all=can_manage_all,
                 markdown_content=markdown,
                 summary_text=summary,
                 tags=merge_tags(existing.tags, ("面试大师", "实时面试")),

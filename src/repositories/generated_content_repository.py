@@ -545,6 +545,7 @@ class GeneratedContentRepository:
                 "visual_title",
                 "raw_prompt",
                 "prompt_stage",
+                "visual_spec",
                 "visual_brief",
                 "video_brief",
             ):

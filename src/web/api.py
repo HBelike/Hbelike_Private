@@ -44,6 +44,62 @@ _PUBLIC_API_PATHS = frozenset({"/api/health"})
 _PUBLIC_API_PREFIXES = ("/api/auth/",)
 
 
+async def enforce_platform_access(request: Request, call_next: Any) -> Any:
+    """校验业务 API 会话，并把已登录身份注入 Career 请求上下文。
+
+    ``PLATFORM_AUTH_REQUIRED`` 只控制未登录请求是否必须返回 401。只要请求携带
+    有效会话，即使本地关闭强制登录，也应继续传递真实角色，避免页面账户区显示
+    管理员而 Career 接口仍按默认普通用户判权。
+    """
+
+    request_path = request.url.path
+    is_business_api = (
+        request_path.startswith("/api/")
+        and request_path not in _PUBLIC_API_PATHS
+        and not request_path.startswith(_PUBLIC_API_PREFIXES)
+    )
+    if not is_business_api:
+        return await call_next(request)
+
+    requires_session = platform_auth_required()
+    raw_token = request.cookies.get("platform_session", "")
+    if not requires_session and not raw_token:
+        return await call_next(request)
+
+    try:
+        access_service = get_platform_access_service(request)
+        session = access_service.resolve_session(raw_token)
+    except HTTPException as exc:
+        if not requires_session:
+            return await call_next(request)
+        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+    except Exception:
+        if not requires_session:
+            logger.exception("可选平台身份解析失败，当前请求按未登录身份继续")
+            return await call_next(request)
+        logger.exception("平台身份服务初始化失败")
+        return JSONResponse(status_code=503, content={"detail": "身份服务暂不可用，请稍后重试"})
+
+    if session is None:
+        if not requires_session:
+            return await call_next(request)
+        return JSONResponse(status_code=401, content={"detail": "请先登录后继续"})
+
+    actor_token = set_request_actor(
+        CareerRequestActor(
+            organization_id=session.user.organization_id,
+            actor_id=session.user.id,
+            role=session.user.role,
+        )
+    )
+    try:
+        response = await call_next(request)
+        refresh_platform_session_cookie(response, request, session)
+        return response
+    finally:
+        reset_request_actor(actor_token)
+
+
 class ContentApprovalRequest(BaseModel):
     """内容审核接口的请求体。"""
 
@@ -207,48 +263,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
     install_evaluation_api(app)
     install_platform_access_api(app, resolved_project_root)
 
-    @app.middleware("http")
-    async def enforce_platform_access(request: Request, call_next: Any) -> Any:
-        """在生产环境为全部业务 API 建立统一登录与运营者边界。
-
-        登录、初始化和健康检查必须保持公开；其余 API 由服务端校验 Cookie，而不是只
-        依赖 Vue 路由守卫。认证后的身份会同步写入 Career ContextVar，实现会话隔离；
-        管理员专属 API 继续由各自的服务端依赖执行角色校验。
-        """
-
-        request_path = request.url.path
-        should_protect = (
-            platform_auth_required()
-            and request_path.startswith("/api/")
-            and request_path not in _PUBLIC_API_PATHS
-            and not request_path.startswith(_PUBLIC_API_PREFIXES)
-        )
-        if not should_protect:
-            return await call_next(request)
-
-        try:
-            access_service = get_platform_access_service(request)
-            session = access_service.resolve_session(request.cookies.get("platform_session", ""))
-        except HTTPException as exc:
-            return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
-        except Exception:
-            logger.exception("平台身份服务初始化失败")
-            return JSONResponse(status_code=503, content={"detail": "身份服务暂不可用，请稍后重试"})
-
-        if session is None:
-            return JSONResponse(status_code=401, content={"detail": "请先登录后继续"})
-        actor_token = set_request_actor(
-            CareerRequestActor(
-                organization_id=session.user.organization_id,
-                actor_id=session.user.id,
-            )
-        )
-        try:
-            response = await call_next(request)
-            refresh_platform_session_cookie(response, request, session)
-            return response
-        finally:
-            reset_request_actor(actor_token)
+    app.middleware("http")(enforce_platform_access)
 
     @app.get("/api/health")
     def health() -> dict[str, Any]:
@@ -259,7 +274,7 @@ def create_app(project_root: Path | None = None) -> FastAPI:
             "app": config.app_name,
             "run_mode": config.run_mode,
             # 该标记仅用于排查浏览器是否仍在连接旧开发后端，不包含配置或密钥。
-            "career_runtime_revision": "2026-08-10-platform-access-v1",
+            "career_runtime_revision": "2026-08-28-interview-admin-permissions-v2",
         }
 
     @app.get("/api/skills")

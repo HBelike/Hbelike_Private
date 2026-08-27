@@ -11,6 +11,7 @@ from src.career_assistant.interview_library.repository import InterviewLibraryRe
 
 
 ORG_ID = UUID("00000000-0000-0000-0000-000000000151")
+ACTOR_ID = UUID("00000000-0000-0000-0000-000000000154")
 DOCUMENT_ID = UUID("00000000-0000-0000-0000-000000000152")
 EXPERIENCE_ID = UUID("00000000-0000-0000-0000-000000000153")
 NOW = datetime(2026, 8, 27, 8, 0, tzinfo=UTC)
@@ -210,3 +211,62 @@ def test_list_web_documents_by_hash_stays_inside_organization() -> None:
     assert "content_hash = :content_hash" in sql
     assert params["organization_id"] == ORG_ID
     assert documents[0].content_hash == "a" * 64
+
+
+def test_delete_experience_requires_creator_or_admin_and_relies_on_fk_cleanup() -> None:
+    database = FakeDatabase([FakeResult(row={"id": EXPERIENCE_ID})])
+    repository = InterviewLibraryRepository(database)
+
+    deleted = repository.delete_experience(
+        EXPERIENCE_ID,
+        actor_id=ACTOR_ID,
+        can_manage_all=False,
+    )
+
+    sql, params = database.connection.calls[0]
+    assert "DELETE FROM career_assistant.interview_experiences" in sql
+    assert "created_by_actor_id = :actor_id" in sql
+    assert "OR :can_manage_all" in sql
+    assert "RETURNING id" in sql
+    assert params == {
+        "experience_id": EXPERIENCE_ID,
+        "actor_id": ACTOR_ID,
+        "can_manage_all": False,
+    }
+    assert deleted is True
+
+
+def test_public_tree_has_no_organization_filter_and_merges_same_company() -> None:
+    second_experience_id = uuid4()
+    rows = [
+        {
+            "normalized_name": "示例科技",
+            "company_name": "示例科技",
+            "experience_id": EXPERIENCE_ID,
+            "job_name": "后端开发 · 日期待补充",
+            "role_name": "后端开发",
+            "interview_date": None,
+            "status": "indexed",
+            "updated_at": NOW,
+        },
+        {
+            "normalized_name": "示例科技",
+            "company_name": "示例科技",
+            "experience_id": second_experience_id,
+            "job_name": "AI Agent · 日期待补充",
+            "role_name": "AI Agent",
+            "interview_date": None,
+            "status": "indexed",
+            "updated_at": NOW,
+        },
+    ]
+    database = FakeDatabase([FakeResult(rows=rows)])
+    repository = InterviewLibraryRepository(database)
+
+    tree = repository.list_tree(query="Agent")
+
+    sql, params = database.connection.calls[0]
+    assert "organization_id = :organization_id" not in sql
+    assert params == {"query": "%agent%"}
+    assert len(tree) == 1
+    assert len(tree[0]["children"]) == 2

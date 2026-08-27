@@ -89,6 +89,7 @@ class InterviewLibraryRepository:
         self,
         *,
         organization_id: UUID,
+        created_by_actor_id: UUID | None,
         company_id: UUID,
         job_name: str,
         role_name: str,
@@ -102,6 +103,7 @@ class InterviewLibraryRepository:
         summary_text: str | None = None,
         tags: Iterable[str] = (),
         status: InterviewExperienceStatus = InterviewExperienceStatus.PARSED,
+        can_manage_all: bool = False,
     ) -> InterviewExperienceRecord:
         """写入一份已解析的面经正文，拒绝无归属公司或空 Markdown。"""
 
@@ -123,13 +125,13 @@ class InterviewLibraryRepository:
                 text(
                     """
                     INSERT INTO career_assistant.interview_experiences (
-                        id, organization_id, company_id, job_name, role_name,
+                        id, organization_id, created_by_actor_id, company_id, job_name, role_name,
                         normalized_role_name, interview_date, source_type, source_platform,
                         source_url, source_content_hash, markdown_content, normalized_markdown,
                         summary_text, tags, status
                     )
                     SELECT
-                        :id, :organization_id, company.id, :job_name, :role_name,
+                        :id, :organization_id, :created_by_actor_id, company.id, :job_name, :role_name,
                         :normalized_role_name, :interview_date, :source_type,
                         :source_platform, :source_url, :source_content_hash,
                         :markdown_content, :normalized_markdown, :summary_text,
@@ -155,7 +157,9 @@ class InterviewLibraryRepository:
                         chunking_version = NULL,
                         indexed_at = NULL,
                         updated_at = NOW()
-                    RETURNING id, organization_id, company_id, job_name, role_name,
+                    WHERE interview_experiences.created_by_actor_id = :created_by_actor_id
+                       OR :can_manage_all
+                    RETURNING id, organization_id, created_by_actor_id, company_id, job_name, role_name,
                               normalized_role_name, interview_date, source_type,
                               source_platform, source_url, source_content_hash,
                               markdown_content, normalized_markdown, summary_text, tags,
@@ -165,6 +169,8 @@ class InterviewLibraryRepository:
                 {
                     "id": uuid4(),
                     "organization_id": organization_id,
+                    "created_by_actor_id": created_by_actor_id,
+                    "can_manage_all": can_manage_all,
                     "company_id": company_id,
                     "job_name": normalized_job_name,
                     "role_name": normalized_role_name,
@@ -182,7 +188,7 @@ class InterviewLibraryRepository:
                 },
             ).mappings().one_or_none()
         if row is None:
-            raise LookupError("公司不存在或不属于当前组织，不能写入面经")
+            raise LookupError("公司不存在，或同名面经不属于当前用户")
         return self._to_experience(row, company_name=self._company_name_for(company_id, organization_id))
 
     def update_experience_markdown(
@@ -190,6 +196,8 @@ class InterviewLibraryRepository:
         organization_id: UUID,
         experience_id: UUID,
         *,
+        actor_id: UUID,
+        can_manage_all: bool,
         company_id: UUID,
         role_name: str,
         markdown_content: str,
@@ -226,7 +234,12 @@ class InterviewLibraryRepository:
                         updated_at = NOW()
                     WHERE experience.id = :experience_id
                       AND experience.organization_id = :organization_id
-                    RETURNING experience.id, experience.organization_id, experience.company_id,
+                      AND (
+                          experience.created_by_actor_id = :actor_id
+                          OR :can_manage_all
+                      )
+                    RETURNING experience.id, experience.organization_id,
+                              experience.created_by_actor_id, experience.company_id,
                               experience.job_name, experience.role_name,
                               experience.normalized_role_name, experience.interview_date,
                               experience.source_type, experience.source_platform,
@@ -240,6 +253,8 @@ class InterviewLibraryRepository:
                     {
                         "experience_id": experience_id,
                         "organization_id": organization_id,
+                        "actor_id": actor_id,
+                        "can_manage_all": can_manage_all,
                         "company_id": company_id,
                         "role_name": normalized_role_name,
                         "normalized_role_name": self._normalize_key(normalized_role_name),
@@ -255,6 +270,36 @@ class InterviewLibraryRepository:
         if row is None:
             raise LookupError("面经不存在或无访问权限")
         return self._to_experience(row, company_name=self._company_name_for(row["company_id"], organization_id))
+
+    def delete_experience(
+        self,
+        experience_id: UUID,
+        *,
+        actor_id: UUID,
+        can_manage_all: bool,
+    ) -> bool:
+        """仅创建者或管理员可永久删除；关联记录由外键规则同步清理。"""
+
+        with self._database.transaction() as connection:
+            row = connection.execute(
+                text(
+                    """
+                    DELETE FROM career_assistant.interview_experiences
+                    WHERE id = :experience_id
+                      AND (
+                          created_by_actor_id = :actor_id
+                          OR :can_manage_all
+                      )
+                    RETURNING id
+                    """,
+                ),
+                {
+                    "experience_id": experience_id,
+                    "actor_id": actor_id,
+                    "can_manage_all": can_manage_all,
+                },
+            ).mappings().one_or_none()
+        return row is not None
 
     def replace_chunks(
         self,
@@ -474,7 +519,7 @@ class InterviewLibraryRepository:
                         ON experience.id = chunk.experience_id
                     INNER JOIN career_assistant.interview_companies AS company
                         ON company.id = experience.company_id
-                    WHERE experience.organization_id = :organization_id
+                    WHERE TRUE
                       {scope_clause}
                       AND (
                           LOWER(chunk.contextual_content) LIKE :like_query
@@ -489,7 +534,6 @@ class InterviewLibraryRepository:
                     """,
                 ),
                 {
-                    "organization_id": organization_id,
                     "query": normalized_query,
                     "like_query": f"%{normalized_query}%",
                     "limit": limit,
@@ -536,8 +580,7 @@ class InterviewLibraryRepository:
                         ON experience.id = chunk.experience_id
                     INNER JOIN career_assistant.interview_companies AS company
                         ON company.id = experience.company_id
-                    WHERE experience.organization_id = :organization_id
-                      AND chunk.embedding IS NOT NULL
+                    WHERE chunk.embedding IS NOT NULL
                       {scope_clause}
                     ORDER BY chunk.embedding <=> CAST(:query_embedding AS vector) ASC,
                              chunk.updated_at DESC
@@ -545,7 +588,6 @@ class InterviewLibraryRepository:
                     """,
                 ),
                 {
-                    "organization_id": organization_id,
                     "query_embedding": vector_literal,
                     "limit": limit,
                     **scope_parameters,
@@ -588,14 +630,13 @@ class InterviewLibraryRepository:
                         ON experience.id = chunk.experience_id
                     INNER JOIN career_assistant.interview_companies AS company
                         ON company.id = experience.company_id
-                    WHERE experience.organization_id = :organization_id
+                    WHERE TRUE
                       {scope_clause}
                     ORDER BY experience.updated_at DESC, chunk.chunk_index ASC
                     LIMIT :limit
                     """,
                 ),
                 {
-                    "organization_id": organization_id,
                     "limit": limit,
                     **scope_parameters,
                 },
@@ -642,6 +683,7 @@ class InterviewLibraryRepository:
         self,
         *,
         organization_id: UUID,
+        created_by_actor_id: UUID | None,
         platform_key: str,
         keyword: str,
         requested_limit: int,
@@ -668,13 +710,13 @@ class InterviewLibraryRepository:
                 text(
                     """
                     INSERT INTO career_assistant.interview_collection_jobs (
-                        id, organization_id, platform_key, keyword, requested_limit,
+                        id, organization_id, created_by_actor_id, platform_key, keyword, requested_limit,
                         connector_kind, policy_decision, metadata_json
                     ) VALUES (
-                        :id, :organization_id, :platform_key, :keyword, :requested_limit,
+                        :id, :organization_id, :created_by_actor_id, :platform_key, :keyword, :requested_limit,
                         :connector_kind, :policy_decision, CAST(:metadata_json AS jsonb)
                     )
-                    RETURNING id, organization_id, platform_key, keyword, requested_limit,
+                    RETURNING id, organization_id, created_by_actor_id, platform_key, keyword, requested_limit,
                               connector_kind, status, policy_decision, error_code,
                               error_message, metadata_json, started_at, completed_at,
                               created_at, updated_at
@@ -683,6 +725,7 @@ class InterviewLibraryRepository:
                 {
                     "id": uuid4(),
                     "organization_id": organization_id,
+                    "created_by_actor_id": created_by_actor_id,
                     "platform_key": normalized_platform,
                     "keyword": normalized_keyword,
                     "requested_limit": requested_limit,
@@ -704,7 +747,7 @@ class InterviewLibraryRepository:
             row = connection.execute(
                 text(
                     """
-                    SELECT id, organization_id, platform_key, keyword, requested_limit,
+                    SELECT id, organization_id, created_by_actor_id, platform_key, keyword, requested_limit,
                            connector_kind, status, policy_decision, error_code,
                            error_message, metadata_json, started_at, completed_at,
                            created_at, updated_at
@@ -742,7 +785,7 @@ class InterviewLibraryRepository:
                     WHERE id = :job_id
                       AND organization_id = :organization_id
                       AND status = 'queued'
-                    RETURNING id, organization_id, platform_key, keyword, requested_limit,
+                    RETURNING id, organization_id, created_by_actor_id, platform_key, keyword, requested_limit,
                               connector_kind, status, policy_decision, error_code,
                               error_message, metadata_json, started_at, completed_at,
                               created_at, updated_at
@@ -796,7 +839,7 @@ class InterviewLibraryRepository:
                         completed_at = CASE WHEN :terminal THEN NOW() ELSE NULL END,
                         updated_at = NOW()
                     WHERE id = :job_id AND organization_id = :organization_id
-                    RETURNING id, organization_id, platform_key, keyword, requested_limit,
+                    RETURNING id, organization_id, created_by_actor_id, platform_key, keyword, requested_limit,
                               connector_kind, status, policy_decision, error_code,
                               error_message, metadata_json, started_at, completed_at,
                               created_at, updated_at
@@ -1202,11 +1245,11 @@ class InterviewLibraryRepository:
             raise LookupError("入库任务或面经不存在，无法收口")
         return self._to_ingestion_job(row)
 
-    def list_tree(self, organization_id: UUID, *, query: str | None = None) -> list[dict[str, object]]:
-        """读取公司→岗位→日期的树数据，供 Element Plus Tree 直接消费。"""
+    def list_tree(self, *, query: str | None = None) -> list[dict[str, object]]:
+        """跨组织读取公开公司→面经树，并合并规范化名称相同的公司。"""
 
         normalized_query = (query or "").strip().lower()
-        parameters: dict[str, object] = {"organization_id": organization_id}
+        parameters: dict[str, object] = {}
         filter_clause = ""
         if normalized_query:
             parameters["query"] = f"%{normalized_query}%"
@@ -1221,14 +1264,14 @@ class InterviewLibraryRepository:
             rows = connection.execute(
                 text(
                     f"""
-                    SELECT company.id AS company_id, company.display_name AS company_name,
+                    SELECT company.normalized_name, company.display_name AS company_name,
                            experience.id AS experience_id, experience.job_name,
                            experience.role_name, experience.interview_date,
                            experience.status, experience.updated_at
                     FROM career_assistant.interview_companies AS company
                     INNER JOIN career_assistant.interview_experiences AS experience
                         ON experience.company_id = company.id
-                    WHERE company.organization_id = :organization_id
+                    WHERE TRUE
                     {filter_clause}
                     ORDER BY company.display_name ASC,
                              experience.role_name ASC,
@@ -1239,13 +1282,13 @@ class InterviewLibraryRepository:
                 parameters,
             ).mappings().all()
 
-        companies: dict[UUID, dict[str, object]] = {}
+        companies: dict[str, dict[str, object]] = {}
         for row in rows:
-            company_id = row["company_id"]
+            company_key = str(row["normalized_name"])
             company = companies.setdefault(
-                company_id,
+                company_key,
                 {
-                    "id": f"company:{company_id}",
+                    "id": f"company:{company_key}",
                     "node_type": "company",
                     "label": row["company_name"],
                     "children": [],
@@ -1263,6 +1306,59 @@ class InterviewLibraryRepository:
                 },
             )
         return list(companies.values())
+
+    def get_public_experience(
+        self,
+        experience_id: UUID,
+    ) -> InterviewExperienceRecord | None:
+        """按 ID 跨组织读取公开面经，不执行读权限判断。"""
+
+        with self._database.transaction() as connection:
+            row = connection.execute(
+                text(
+                    """
+                    SELECT experience.id, experience.organization_id,
+                           experience.created_by_actor_id, experience.company_id,
+                           company.display_name AS company_name, experience.job_name,
+                           experience.role_name, experience.normalized_role_name,
+                           experience.interview_date, experience.source_type,
+                           experience.source_platform, experience.source_url,
+                           experience.source_content_hash, experience.markdown_content,
+                           experience.normalized_markdown, experience.summary_text,
+                           experience.tags, experience.status, experience.chunking_version,
+                           experience.indexed_at, experience.created_at, experience.updated_at
+                    FROM career_assistant.interview_experiences AS experience
+                    INNER JOIN career_assistant.interview_companies AS company
+                        ON company.id = experience.company_id
+                    WHERE experience.id = :experience_id
+                    """,
+                ),
+                {"experience_id": experience_id},
+            ).mappings().one_or_none()
+        return self._to_experience(row) if row is not None else None
+
+    def list_public_experience_sources(
+        self,
+        experience_id: UUID,
+    ) -> list[InterviewExperienceSourceRecord]:
+        """跨组织读取公开面经来源，不执行读权限判断。"""
+
+        with self._database.transaction() as connection:
+            rows = connection.execute(
+                text(
+                    """
+                    SELECT id, organization_id, experience_id, canonical_url,
+                           source_url, source_platform, is_primary,
+                           discovery_keywords_json, first_seen_at, last_seen_at,
+                           created_at, updated_at
+                    FROM career_assistant.interview_experience_sources
+                    WHERE experience_id = :experience_id
+                    ORDER BY is_primary DESC, first_seen_at ASC
+                    """,
+                ),
+                {"experience_id": experience_id},
+            ).mappings().all()
+        return [self._to_experience_source(row) for row in rows]
 
     def register_web_document(
         self,
@@ -1762,7 +1858,8 @@ class InterviewLibraryRepository:
             row = connection.execute(
                 text(
                     """
-                    SELECT experience.id, experience.organization_id, experience.company_id,
+                    SELECT experience.id, experience.organization_id,
+                           experience.created_by_actor_id, experience.company_id,
                            company.display_name AS company_name, experience.job_name,
                            experience.role_name, experience.normalized_role_name,
                            experience.interview_date, experience.source_type,
@@ -1902,7 +1999,8 @@ class InterviewLibraryRepository:
             row = connection.execute(
                 text(
                     """
-                    SELECT experience.id, experience.organization_id, experience.company_id,
+                    SELECT experience.id, experience.organization_id,
+                           experience.created_by_actor_id, experience.company_id,
                            company.display_name AS company_name, experience.job_name,
                            experience.role_name, experience.normalized_role_name,
                            experience.interview_date, experience.source_type,
@@ -1936,7 +2034,8 @@ class InterviewLibraryRepository:
             row = connection.execute(
                 text(
                     """
-                    SELECT experience.id, experience.organization_id, experience.company_id,
+                    SELECT experience.id, experience.organization_id,
+                           experience.created_by_actor_id, experience.company_id,
                            company.display_name AS company_name, experience.job_name,
                            experience.role_name, experience.normalized_role_name,
                            experience.interview_date, experience.source_type,
@@ -1975,7 +2074,8 @@ class InterviewLibraryRepository:
             row = connection.execute(
                 text(
                     """
-                    SELECT experience.id, experience.organization_id, experience.company_id,
+                    SELECT experience.id, experience.organization_id,
+                           experience.created_by_actor_id, experience.company_id,
                            company.display_name AS company_name, experience.job_name,
                            experience.role_name, experience.normalized_role_name,
                            experience.interview_date, experience.source_type,
@@ -2007,7 +2107,7 @@ class InterviewLibraryRepository:
         *,
         limit: int = 8,
     ) -> list[InterviewExperienceRecord]:
-        """提供 @面经 的轻量名称/公司模糊匹配，RAG 向量召回由下一层实现。"""
+        """跨组织提供 @面经 的公开名称/公司模糊匹配。"""
 
         normalized_query = self._normalize_text(query, "检索关键词", 120).lower()
         if not 1 <= limit <= 30:
@@ -2016,7 +2116,8 @@ class InterviewLibraryRepository:
             rows = connection.execute(
                 text(
                     """
-                    SELECT experience.id, experience.organization_id, experience.company_id,
+                    SELECT experience.id, experience.organization_id,
+                           experience.created_by_actor_id, experience.company_id,
                            company.display_name AS company_name, experience.job_name,
                            experience.role_name, experience.normalized_role_name,
                            experience.interview_date, experience.source_type,
@@ -2028,8 +2129,7 @@ class InterviewLibraryRepository:
                     FROM career_assistant.interview_experiences AS experience
                     INNER JOIN career_assistant.interview_companies AS company
                         ON company.id = experience.company_id
-                    WHERE experience.organization_id = :organization_id
-                      AND (
+                    WHERE (
                         LOWER(company.display_name) LIKE :query
                         OR LOWER(experience.job_name) LIKE :query
                         OR LOWER(experience.role_name) LIKE :query
@@ -2039,7 +2139,6 @@ class InterviewLibraryRepository:
                     """,
                 ),
                 {
-                    "organization_id": organization_id,
                     "query": f"%{normalized_query}%",
                     "limit": limit,
                 },
@@ -2205,7 +2304,8 @@ class InterviewLibraryRepository:
     @staticmethod
     def _to_experience(row: RowMapping, company_name: str | None = None) -> InterviewExperienceRecord:
         return InterviewExperienceRecord(
-            id=row["id"], organization_id=row["organization_id"], company_id=row["company_id"],
+            id=row["id"], organization_id=row["organization_id"],
+            created_by_actor_id=row.get("created_by_actor_id"), company_id=row["company_id"],
             company_name=company_name or row["company_name"], job_name=row["job_name"],
             role_name=row["role_name"], normalized_role_name=row["normalized_role_name"],
             interview_date=row["interview_date"], source_type=InterviewSourceType(row["source_type"]),
@@ -2266,6 +2366,7 @@ class InterviewLibraryRepository:
         return InterviewCollectionJobRecord(
             id=row["id"],
             organization_id=row["organization_id"],
+            created_by_actor_id=row.get("created_by_actor_id"),
             platform_key=row["platform_key"],
             keyword=row["keyword"],
             requested_limit=row["requested_limit"],

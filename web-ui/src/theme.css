@@ -651,6 +651,18 @@ html[data-ui-theme="blue"] :is(.quiet-action, .close-button, .tree-node, .platfo
   color: var(--ui-text-secondary);
 }
 
+html[data-ui-theme="blue"] .interview-library-shell .danger-action {
+  border-color: color-mix(in srgb, var(--ui-danger) 34%, white);
+  background: var(--ui-danger-soft);
+  color: var(--ui-danger);
+}
+
+html[data-ui-theme="blue"] .interview-library-shell .library-notice {
+  border-color: var(--ui-line-strong);
+  background: var(--ui-accent-soft);
+  color: var(--ui-accent-ink);
+}
+
 html[data-ui-theme="blue"] :is(.tree-node.active, .platform-card.active, .platform-card:hover, .import-tabs button.active) {
   border-color: var(--ui-line-strong);
   background: var(--ui-surface-active);

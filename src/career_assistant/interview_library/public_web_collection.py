@@ -41,6 +41,7 @@ from src.career_assistant.interview_library.service import (
 
 LOGGER = logging.getLogger(__name__)
 MIN_PUBLIC_WEB_MARKDOWN_CHARACTERS = 40
+MAX_PUBLIC_WEB_PAGES_PER_JOB = 10
 _INTERVIEW_TITLE_PATTERN = re.compile(
     r"(?:面经|面试(?:题|经历|复盘|总结)|[一二三四五六七八九十终]+面)",
     re.IGNORECASE,
@@ -96,16 +97,18 @@ class PublicWebCollectionCoordinator:
         self,
         organization_id: UUID,
         *,
+        created_by_actor_id: UUID,
         keyword: str,
         requested_limit: int,
     ):
         normalized_keyword = " ".join(str(keyword or "").split())
         if not normalized_keyword:
             raise ValueError("请输入搜索关键词。")
-        if not 5 <= requested_limit <= 50:
-            raise ValueError("全网公开信息收集数量必须在 5 到 50 之间")
+        if not 5 <= requested_limit <= MAX_PUBLIC_WEB_PAGES_PER_JOB:
+            raise ValueError("全网公开信息收集数量必须在 5 到 10 之间")
         return self._repository.create_collection_job(
             organization_id=organization_id,
+            created_by_actor_id=created_by_actor_id,
             platform_key="public_web",
             keyword=normalized_keyword,
             requested_limit=requested_limit,
@@ -128,7 +131,8 @@ class PublicWebCollectionCoordinator:
         try:
             results = self._firecrawl.search(
                 job.keyword,
-                limit=min(100, job.requested_limit * 3),
+                # Free 方案每分钟最多执行 10 次 /scrape；候选数与单批抓取预算保持一致。
+                limit=min(MAX_PUBLIC_WEB_PAGES_PER_JOB, job.requested_limit),
             )
         except FirecrawlRequestError as exc:
             self._fail_job(organization_id, job.id, exc.code, exc.message, summary)
@@ -622,6 +626,7 @@ class PublicWebCollectionCoordinator:
                     ),
                 ),
                 trigger_type=IngestionTriggerType.API_SYNC,
+                created_by_actor_id=job.created_by_actor_id,
             )
         except Exception as exc:
             self._repository.update_collection_candidate(

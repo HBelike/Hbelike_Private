@@ -194,7 +194,7 @@ def main() -> None:
     parser.add_argument("--smoke-limit", type=int, choices=(1,))
     args = parser.parse_args()
     keyword = os.getenv("PUBLIC_WEB_TEST_KEYWORD", "agent开发面经").strip()
-    requested_limit = int(os.getenv("PUBLIC_WEB_TEST_LIMIT", "50"))
+    requested_limit = int(os.getenv("PUBLIC_WEB_TEST_LIMIT", "10"))
     if args.smoke_limit == 1:
         smoke(keyword)
         return

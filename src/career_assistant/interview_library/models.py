@@ -138,6 +138,7 @@ class InterviewExperienceRecord:
     indexed_at: datetime | None
     created_at: datetime
     updated_at: datetime
+    created_by_actor_id: UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -222,6 +223,7 @@ class InterviewCollectionJobRecord:
     # 采集批次的轻量可观测信息，例如入口 URL、页码和发现数量。
     # 仅保存 JSON 可序列化的派生信息，绝不保存 Cookie、原始 HTML 或附件。
     metadata_json: Mapping[str, object] = field(default_factory=dict)
+    created_by_actor_id: UUID | None = None
 
 
 @dataclass(frozen=True)

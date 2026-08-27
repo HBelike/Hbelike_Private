@@ -85,15 +85,27 @@ image:
     - .gif
   local_fallback_enabled: false
   chinese_overlay_enabled: false
+  renderer:
+    name: gotenberg_html
+    gotenberg_base_url: http://127.0.0.1:3000
+    timeout_seconds: 60
+    max_attempts: 5
+    width: 2048
+    height: 1152
+    template_version: article_visual_v1
+    renderer_version: gotenberg_html_v1
+    font_path: assets/fonts/NotoSansSC-VF.ttf
+    font_version: noto-cjk-2.004-523d033d
+    concept_background_enabled: false
   prompt:
     # 火山方舟官方建议中文图片 prompt 不超过 300 字；更长的说明留在文章图注中。
     max_length: 300
-    visual_system: "技术教学讲义风格，白底，商务技术PPT质感，简洁专业架构框图，扁平化2D矢量风；黑白灰为主，少量蓝色点缀，无多余装饰、3D效果或花哨渐变。"
-    composition_rule: "使用规整矩形模块分区；黑色实线正交折线箭头表示数据流向，严格禁止曲线；线条不交叉。仅在真实连线旁标注同步调用、异步调用、数据流、事件推送、强耦合或弱耦合。"
-    text_rule: "只显示指定的模块名称和连线标签；字体规整清晰，文字不重叠。禁止标题、正文段落、说明性长句、页码、仓库名和额外文字。"
-    style_rule: "重点突出组件边界、数据流动方向和模块耦合关系；布局分区清晰，模块位置规整，逻辑流向一目了然。"
+    visual_system: "无标题的16:9工程架构信息图，白色画布，深蓝核心卡片，浅灰普通卡片，扁平矢量，精细对齐，克制留白。"
+    composition_rule: "严格按指定数量和位置绘制节点，每个节点只出现一次；深灰实线正交箭头只连接指定起止节点，禁止镜像、复制、补齐对称节点、曲线或交叉线。"
+    text_rule: "只显示指定的节点名称，连线不生成文字；禁止标题区、正文段落、说明性长句、页码、仓库名和额外文字。"
+    style_rule: "核心节点使用深蓝底白字，普通节点使用浅灰底深色字；突出组件边界和数据流向，不使用空白占位卡片。"
     safe_zone_rule: "主体位于画面中心安全区，四周留白，模块、文字和箭头均不得贴边。"
-    negative_prompt: "不要人物、照片、曲线箭头、交叉线、花哨渐变、3D效果、装饰图标、真实logo、水印、网页或代码截图、长英文、密集小字、伪文字或乱码。"
+    negative_prompt: "不要标题区、底部装饰点、重复节点、镜像节点、空白占位卡片、人物、照片、曲线箭头、交叉线、3D效果、真实logo、水印、长英文、伪文字或乱码。"
 
 audio:
   # 音频生成总开关；关闭后不调用豆包 TTS，也不启用本地或 Edge 语音兜底。

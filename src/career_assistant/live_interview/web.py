@@ -53,6 +53,7 @@ from src.platform_access.web import (
     get_platform_access_service,
     platform_auth_required,
 )
+from src.platform_access.contracts import PlatformRole
 
 
 router = APIRouter(prefix="/api/career/live-interviews", tags=["live-interview"])
@@ -245,6 +246,7 @@ def archive_interview(
         result = get_live_archive_service(request).archive(
             organization_id=actor.organization_id,
             actor_id=actor.actor_id,
+            can_manage_all=actor.role is PlatformRole.ADMIN,
             session_ids=tuple(payload.session_ids),
             company_name=payload.company_name,
             role_name=payload.role_name,
@@ -252,6 +254,8 @@ def archive_interview(
         )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except RuntimeError as exc:
@@ -373,7 +377,11 @@ async def _resolve_websocket_actor(websocket: WebSocket):
     if resolution is None:
         await websocket.close(code=4401, reason="请先登录后继续")
         return None
-    return CareerRequestActor(resolution.user.organization_id, resolution.user.id)
+    return CareerRequestActor(
+        resolution.user.organization_id,
+        resolution.user.id,
+        resolution.user.role,
+    )
 
 
 def _repository_for_websocket(websocket: WebSocket) -> LiveInterviewRepository:

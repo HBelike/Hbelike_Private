@@ -28,6 +28,8 @@ const detailLoading = ref(false)
 const detailError = ref('')
 const editMode = ref(false)
 const saving = ref(false)
+const deleting = ref(false)
+const libraryNotice = ref('')
 const editorCompanyName = ref('')
 const editorRoleName = ref('')
 const editorMarkdown = ref('')
@@ -68,6 +70,7 @@ const fileDraft = ref(createFileDraft())
 const emptyState = computed(() => !detailLoading.value && !selectedExperience.value)
 const selectedTags = computed(() => selectedExperience.value?.tags ?? [])
 const selectedSources = computed(() => selectedExperience.value?.sources ?? [])
+const canWriteSelected = computed(() => selectedExperience.value?.can_write === true)
 const renderedMarkdownBlocks = computed(() => parseMarkdownBlocks(selectedExperience.value?.markdown_content ?? ''))
 const importFileCount = computed(() => importFiles.value.length)
 const fileStrategyDescription = computed(() => fileImportStrategy.value === 'merge'
@@ -670,6 +673,7 @@ async function selectExperience(experienceId) {
 
   detailLoading.value = true
   detailError.value = ''
+  libraryNotice.value = ''
   editMode.value = false
   try {
     const payload = await requestJson(`/api/career/interview-library/experiences/${encodeURIComponent(experienceId)}`)
@@ -692,7 +696,7 @@ function syncEditor(experience) {
 }
 
 function startEditing() {
-  if (!selectedExperience.value) return
+  if (!selectedExperience.value || !canWriteSelected.value) return
   syncEditor(selectedExperience.value)
   detailError.value = ''
   editMode.value = true
@@ -705,7 +709,7 @@ function cancelEditing() {
 }
 
 async function saveExperience() {
-  if (!selectedExperience.value) return
+  if (!selectedExperience.value || !canWriteSelected.value) return
   if (!editorCompanyName.value.trim() || !editorRoleName.value.trim()) {
     detailError.value = '公司名称和面试岗位不能为空。'
     return
@@ -739,6 +743,32 @@ async function saveExperience() {
     detailError.value = error instanceof Error ? error.message : '保存失败，请稍后重试。'
   } finally {
     saving.value = false
+  }
+}
+
+async function deleteExperience() {
+  const experience = selectedExperience.value
+  if (!experience || !canWriteSelected.value || deleting.value) return
+  const label = `${experience.company_name} · ${experience.role_name}`
+  if (!window.confirm(`永久删除“${label}”？正文、检索索引和来源记录都会被删除，且无法恢复。`)) return
+
+  deleting.value = true
+  detailError.value = ''
+  libraryNotice.value = ''
+  try {
+    await requestJson(
+      `/api/career/interview-library/experiences/${encodeURIComponent(experience.id)}`,
+      { method: 'DELETE' }
+    )
+    selectedExperience.value = null
+    selectedExperienceId.value = ''
+    editMode.value = false
+    await loadTree({ preserveSelection: false })
+    libraryNotice.value = `面经已删除：${label}`
+  } catch (error) {
+    detailError.value = error instanceof Error ? error.message : '面经删除失败，请稍后重试。'
+  } finally {
+    deleting.value = false
   }
 }
 
@@ -810,6 +840,7 @@ async function openCollection(mode = 'xiaohongshu') {
   collectionJob.value = null
   collectionCandidates.value = []
   candidateDrafts.value = {}
+  if (mode === 'keyword') collectionDraft.value.requestedLimit = 10
   showCollectionModal.value = true
   if (collectionPlatforms.value.length || collectionLoading.value) return
   collectionLoading.value = true
@@ -1313,6 +1344,8 @@ onBeforeUnmount(() => {
       </div>
     </header>
 
+    <p v-if="libraryNotice" class="library-notice" role="status">{{ libraryNotice }}</p>
+
     <section class="library-layout">
       <aside class="interview-tree-pane" aria-label="面经树">
         <div class="tree-pane-header">
@@ -1396,7 +1429,11 @@ onBeforeUnmount(() => {
             </div>
             <div class="experience-actions">
               <span class="index-status" :class="`index-${selectedExperience.status}`">{{ statusText(selectedExperience.status) }}</span>
-              <button v-if="!editMode" type="button" class="quiet-action" @click="startEditing">编辑面经</button>
+              <template v-if="!editMode && canWriteSelected">
+                <button type="button" class="danger-action" :disabled="deleting" @click="deleteExperience">{{ deleting ? '正在删除…' : '删除面经' }}</button>
+                <button type="button" class="quiet-action" :disabled="deleting" @click="startEditing">编辑面经</button>
+              </template>
+              <span v-else-if="!editMode" class="read-only-notice">公开面经，仅创建者或管理员可维护</span>
               <template v-else>
                 <button type="button" class="quiet-action" :disabled="saving" @click="cancelEditing">取消</button>
                 <button type="button" class="primary-action" :disabled="saving" @click="saveExperience">
@@ -1739,7 +1776,7 @@ onBeforeUnmount(() => {
                   <h3>从公开网页建立面经候选池</h3>
                   <p>系统只检索无需登录即可访问的 HTTPS 页面，不携带浏览器登录态。相同地址和相同正文都会跨任务去重，已入库内容只追加新的来源记录。</p>
                 </div>
-                <span class="collection-loading">默认 20 条</span>
+                <span class="collection-loading">默认 10 条</span>
               </div>
               <p v-if="collectionPlatforms.length && !publicWebAvailabilityState.ready" class="public-web-unavailable">{{ publicWebAvailabilityState.reason }}</p>
             </section>
@@ -1749,8 +1786,8 @@ onBeforeUnmount(() => {
                 <input v-model="collectionDraft.keyword" required maxlength="120" :disabled="collectionSubmitting || (collectionJob && !isCollectionTerminal(collectionJob.status))" placeholder="例如：agent开发面经" />
               </label>
               <label class="collection-field compact-field">最多分析数量
-                <input v-model.number="collectionDraft.requestedLimit" type="number" min="5" max="50" inputmode="numeric" :disabled="collectionSubmitting || (collectionJob && !isCollectionTerminal(collectionJob.status))" />
-                <small>可设置 5–50 条；数量表示目标有效面经数，搜索阶段会预留无效和重复结果。</small>
+                <input v-model.number="collectionDraft.requestedLimit" type="number" min="5" max="10" inputmode="numeric" :disabled="collectionSubmitting || (collectionJob && !isCollectionTerminal(collectionJob.status))" />
+                <small>可设置 5–10 条；每批最多读取 10 个网页。单条失败不会影响其他有效面经立即入库。</small>
               </label>
             </div>
 
@@ -1886,7 +1923,9 @@ onBeforeUnmount(() => {
 .library-actions .quiet-action { background: #f8faf5; }
 .library-actions .primary-action { box-shadow: none; }
 .danger-action { min-height: 42px; border: 1px solid #efb0a8; border-radius: 10px; background: #fff5f3; color: #b53a2d; padding: 10px 16px; font: inherit; font-weight: 800; cursor: pointer; }
-.danger-action:hover { background: #ffeae6; }
+.danger-action:hover:not(:disabled) { background: #ffeae6; }
+.read-only-notice { max-width: 240px; color: #74829b; font-size: 13px; line-height: 1.5; text-align: right; }
+.library-notice { margin: -4px 0 0; border: 1px solid #bdd7f5; border-radius: 10px; background: #f2f8ff; color: #145da8; padding: 9px 13px; font-size: 12px; font-weight: 750; }
 .primary-action,.quiet-action,.tree-refresh,.close-button { border: 1px solid #dfe8d2; border-radius: 10px; cursor: pointer; font: inherit; font-weight: 750; transition: transform .16s ease, box-shadow .16s ease, background .16s ease; }
 .primary-action { border-color: #8eae37; background: #91b236; color: white; box-shadow: 0 8px 16px rgba(112, 139, 37, .18); padding: 10px 15px; }
 .quiet-action { background: #fff; color: #5d713b; padding: 9px 13px; }

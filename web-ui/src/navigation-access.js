@@ -23,6 +23,10 @@ export function normalizeAppRoute(pathname, reviewRoutes = []) {
   return DEFAULT_APP_ROUTE
 }
 
+export function resolveAuthenticatedRoute(route) {
+  return AUTH_ROUTES.has(route) ? DEFAULT_APP_ROUTE : route
+}
+
 export function canAccessNavigationItem(item, configuredModule, role) {
   if (role === 'admin') return true
   if (!item?.enabled) return false

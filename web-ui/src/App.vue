@@ -14,10 +14,16 @@ import ThemeSwitcher from './components/ThemeSwitcher.vue'
 import ImagePreviewDialog from './components/ImagePreviewDialog.vue'
 import { decorateOpenableImages, resolveImagePreviewRequest } from './image-preview.js'
 import {
+  figureRoleLabel,
+  visualSpecSummary,
+  visualValidationLabel
+} from './article-visual.js'
+import {
   DEFAULT_APP_ROUTE,
   buildNavigationFallback,
   canAccessNavigationItem,
-  normalizeAppRoute
+  normalizeAppRoute,
+  resolveAuthenticatedRoute
 } from './navigation-access.js'
 
 const preview = ref(null)
@@ -154,7 +160,7 @@ const routeItems = [
   ...(isStoryboardReviewVisible
     ? [{ path: '/review/storyboard', label: '短视频蓝图', description: '分镜规划' }]
     : []),
-  { path: '/review/prompts', label: '生成提示词', description: '文图视频' }
+  { path: '/review/prompts', label: '生成方案', description: '图片方案与视频提示词' }
 ]
 
 const appNavItems = [
@@ -372,8 +378,8 @@ const moduleCards = computed(() => [
   {
     path: '/review/prompts',
     kind: 'prompts',
-    title: '生成提示词',
-    description: `图像提示词 ${imagePrompts.value.length} 条，视频片段 ${videoClipPlans.value.length} 条`,
+    title: '生成方案',
+    description: `图片总结方案 ${imagePrompts.value.length} 条，视频片段 ${videoClipPlans.value.length} 条`,
     accent: 'blue'
   }
 ])
@@ -558,6 +564,13 @@ async function loadCurrentUser() {
     }
     const payload = await response.json()
     authUser.value = payload.user ?? null
+    if (authUser.value) {
+      const authenticatedRoute = resolveAuthenticatedRoute(currentRoute.value)
+      if (authenticatedRoute !== currentRoute.value) {
+        window.history.replaceState({}, '', authenticatedRoute)
+        currentRoute.value = authenticatedRoute
+      }
+    }
   } catch {
     authUser.value = null
   } finally {
@@ -568,7 +581,7 @@ async function loadCurrentUser() {
 async function handleAuthenticated(user) {
   authUser.value = user
   authReady.value = true
-  const nextPath = isAuthRoute(currentRoute.value) ? DEFAULT_APP_ROUTE : currentRoute.value
+  const nextPath = resolveAuthenticatedRoute(currentRoute.value)
   window.history.replaceState({}, '', nextPath)
   currentRoute.value = nextPath
   await loadNavigationConfig()
@@ -1083,6 +1096,9 @@ function compactWechatTitle(value, maxLength = 28) {
 }
 
 function promptPreviewText(prompt) {
+  if (prompt?.prompt_stage === 'deterministic_rendered') {
+    return shortText(visualSpecSummary(prompt.visual_spec), 82)
+  }
   return shortText(
     prompt?.summary_text
       ?? prompt?.project_summary_text
@@ -1091,6 +1107,25 @@ function promptPreviewText(prompt) {
       ?? '等待图像提示词生成',
     82
   )
+}
+
+function visualTakeaways(prompt) {
+  const takeaways = prompt?.visual_spec?.takeaways
+  if (!Array.isArray(takeaways)) return []
+  return takeaways
+    .filter((item) => typeof item === 'string' && item.trim())
+    .slice(0, 3)
+}
+
+function shortRenderKey(value) {
+  const renderKey = typeof value === 'string' ? value.trim() : ''
+  return renderKey ? renderKey.slice(0, 12) : '未提供'
+}
+
+function visualValidationClass(result) {
+  if (result?.status === 'passed') return 'is-success'
+  if (result?.status === 'failed') return 'is-danger'
+  return 'is-muted'
 }
 
 function skillDescription(skill) {
@@ -2121,14 +2156,48 @@ onBeforeUnmount(() => {
         </section>
         <section class="prompt-grid">
           <article class="detail-card prompt-column">
-            <header class="prompt-column-header"><h2>生图提示词</h2></header>
+            <header class="prompt-column-header"><h2>图片总结方案</h2></header>
             <div class="prompt-column-scroll">
-              <div v-if="!imagePrompts.length" class="empty-media">暂无生图提示词。</div>
+              <div v-if="!imagePrompts.length" class="empty-media">暂无图片总结方案。</div>
               <div v-else class="prompt-list">
-                <article v-for="(prompt, index) in imagePrompts" :key="prompt.repository_full_name || index">
+                <article
+                  v-for="(prompt, index) in imagePrompts"
+                  :key="prompt.repository_full_name || index"
+                  :class="{ 'visual-plan-card': prompt.prompt_stage === 'deterministic_rendered' }"
+                >
                   <strong>图 {{ index + 1 }} · {{ prompt.repository_full_name }}</strong>
-                  <p>{{ prompt.summary_text }}</p>
-                  <pre>{{ prompt.prompt }}</pre>
+                  <template v-if="prompt.prompt_stage === 'deterministic_rendered'">
+                    <div class="visual-plan-evidence">
+                      <span>{{ figureRoleLabel(prompt.figure_role || prompt.visual_spec?.figure_role) }}</span>
+                      <span
+                        class="status-pill"
+                        :class="visualValidationClass(prompt.validation_result)"
+                      >
+                        {{ visualValidationLabel(prompt.validation_result) }}
+                      </span>
+                      <small>模板 {{ prompt.template_version || '未知' }}</small>
+                      <small>标识 {{ shortRenderKey(prompt.render_key) }}</small>
+                    </div>
+                    <div
+                      class="visual-plan-copy"
+                      :aria-label="visualSpecSummary(prompt.visual_spec)"
+                    >
+                      <h3>{{ prompt.visual_spec?.headline || '未提供标题' }}</h3>
+                      <p>{{ prompt.visual_spec?.purpose || '未提供总结目的' }}</p>
+                      <ul v-if="visualTakeaways(prompt).length" class="visual-plan-takeaways">
+                        <li
+                          v-for="takeaway in visualTakeaways(prompt)"
+                          :key="takeaway"
+                        >
+                          {{ takeaway }}
+                        </li>
+                      </ul>
+                    </div>
+                  </template>
+                  <template v-else>
+                    <p>{{ prompt.summary_text }}</p>
+                    <pre>{{ prompt.prompt }}</pre>
+                  </template>
                 </article>
               </div>
             </div>
@@ -2203,3 +2272,45 @@ onBeforeUnmount(() => {
     </Teleport>
   </div>
 </template>
+
+<style scoped>
+.visual-plan-evidence {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin: 10px 0 14px;
+  padding: 10px 0;
+  border-block: 1px solid var(--ui-line);
+  color: var(--ui-text-muted);
+}
+
+.visual-plan-evidence > span:first-child {
+  color: var(--ui-accent-ink);
+  font-weight: 800;
+}
+
+.visual-plan-evidence small {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.visual-plan-copy h3 {
+  margin: 0 0 8px;
+  color: var(--ui-text);
+  font-size: 18px;
+  line-height: 1.4;
+}
+
+.visual-plan-copy > p {
+  margin: 0;
+}
+
+.visual-plan-takeaways {
+  display: grid;
+  gap: 6px;
+  margin: 12px 0 0;
+  padding-left: 20px;
+  color: var(--ui-text);
+  line-height: 1.6;
+}
+</style>

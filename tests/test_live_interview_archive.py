@@ -52,8 +52,8 @@ class FakeInterviewService:
         self.ingested = None
         self.updated = None
 
-    def ingest(self, organization_id, draft, *, trigger_type):
-        self.ingested = (organization_id, draft, trigger_type)
+    def ingest(self, organization_id, draft, *, trigger_type, **ownership):
+        self.ingested = (organization_id, draft, trigger_type, ownership)
         return _experience(
             company_name=draft.company_name,
             role_name=draft.role_name,
@@ -62,13 +62,25 @@ class FakeInterviewService:
             source_type=draft.source_type,
         )
 
-    def update_markdown(self, organization_id, experience_id, *, markdown_content, summary_text, tags):
+    def update_markdown(
+        self,
+        organization_id,
+        experience_id,
+        *,
+        actor_id,
+        can_manage_all,
+        markdown_content,
+        summary_text,
+        tags,
+    ):
         self.updated = {
             "organization_id": organization_id,
             "experience_id": experience_id,
             "markdown_content": markdown_content,
             "summary_text": summary_text,
             "tags": tags,
+            "actor_id": actor_id,
+            "can_manage_all": can_manage_all,
         }
         return SimpleNamespace(
             **{
