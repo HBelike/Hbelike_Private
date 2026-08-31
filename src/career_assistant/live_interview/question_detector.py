@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+from collections.abc import Callable
 import re
 
 from src.career_assistant.live_interview.contracts import (
@@ -12,34 +14,35 @@ from src.career_assistant.live_interview.contracts import (
 )
 
 
-_QUESTION_MARKERS = (
-    "？",
-    "?",
-    "请介绍",
-    "请说明",
-    "请解释",
-    "请设计",
-    "谈谈",
-    "说说",
-    "如何",
-    "为什么",
-    "什么",
-    "怎么",
-    "是否",
-    "能否",
-    "describe",
-    "explain",
-    "design",
-    "how ",
-    "why ",
-    "what ",
-    "tell me",
+_FILLER_UTTERANCES = frozenset(
+    {
+        "嗯",
+        "嗯嗯",
+        "哦",
+        "噢",
+        "啊",
+        "好的",
+        "好",
+        "行",
+        "可以",
+        "知道了",
+        "明白了",
+        "okay",
+        "ok",
+    }
 )
+_EDGE_PUNCTUATION = re.compile(r"^[\s，。！？!?、,.；;：:~～…]+|[\s，。！？!?、,.；;：:~～…]+$")
+_DUPLICATE_WINDOW_SECONDS = 3.0
 _FOLLOW_UP = ("那如果", "进一步", "继续", "刚才", "那么", "除此之外", "具体呢", "why exactly")
 
 
 class RuleBasedQuestionDetector:
     """确定性首层检测器；接口可替换为带结构化 LLM 的复合检测器。"""
+
+    def __init__(self, *, clock: Callable[[], float] = time.monotonic) -> None:
+        self._clock = clock
+        self._last_text: str | None = None
+        self._last_detected_at: float | None = None
 
     def detect(
         self,
@@ -50,8 +53,18 @@ class RuleBasedQuestionDetector:
             return None
         text = re.sub(r"\s+", " ", event.text).strip()
         lowered = text.casefold()
-        if len(text) < 3 or not any(marker.casefold() in lowered for marker in _QUESTION_MARKERS):
+        filler_key = _EDGE_PUNCTUATION.sub("", lowered)
+        if not text or filler_key in _FILLER_UTTERANCES:
             return None
+        now = self._clock()
+        if (
+            self._last_text == lowered
+            and self._last_detected_at is not None
+            and now - self._last_detected_at <= _DUPLICATE_WINDOW_SECONDS
+        ):
+            return None
+        self._last_text = lowered
+        self._last_detected_at = now
         is_follow_up = previous_question is not None and any(
             marker.casefold() in lowered for marker in _FOLLOW_UP
         )
@@ -59,7 +72,7 @@ class RuleBasedQuestionDetector:
         return DetectedQuestion(
             normalized_question=text,
             intent=intent,
-            confidence=0.94 if text.endswith(("?", "？")) else 0.86,
+            confidence=1.0,
             is_follow_up=is_follow_up,
         )
 

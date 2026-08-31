@@ -165,6 +165,73 @@ def test_detector_marks_follow_up() -> None:
     assert detected.is_follow_up
 
 
+@pytest.mark.parametrize(
+    "text",
+    (
+        "分析一下日股。",
+        "评价一下这个方案。",
+        "展开。",
+        "Redis 为什么这么快",
+    ),
+)
+def test_detector_answers_every_non_filler_interviewer_final(text: str) -> None:
+    detected = RuleBasedQuestionDetector().detect(
+        TranscriptEvent(
+            channel=AudioChannel.INTERVIEWER,
+            sequence=1,
+            text=text,
+            is_final=True,
+        )
+    )
+
+    assert detected is not None
+    assert detected.confidence == 1.0
+
+
+@pytest.mark.parametrize("text", ("嗯。", "哦", "好的。", "OK!"))
+def test_detector_ignores_exact_filler_utterances(text: str) -> None:
+    detected = RuleBasedQuestionDetector().detect(
+        TranscriptEvent(
+            channel=AudioChannel.INTERVIEWER,
+            sequence=1,
+            text=text,
+            is_final=True,
+        )
+    )
+
+    assert detected is None
+
+
+def test_detector_does_not_treat_filler_prefix_as_whole_utterance() -> None:
+    detected = RuleBasedQuestionDetector().detect(
+        TranscriptEvent(
+            channel=AudioChannel.INTERVIEWER,
+            sequence=1,
+            text="好的，请继续说明缓存一致性。",
+            is_final=True,
+        )
+    )
+
+    assert detected is not None
+
+
+def test_detector_only_deduplicates_inside_three_second_window() -> None:
+    timestamps = iter((10.0, 11.0, 14.1))
+    detector = RuleBasedQuestionDetector(clock=lambda: next(timestamps))
+
+    def event(sequence: int) -> TranscriptEvent:
+        return TranscriptEvent(
+            channel=AudioChannel.INTERVIEWER,
+            sequence=sequence,
+            text="解释 CAP。",
+            is_final=True,
+        )
+
+    assert detector.detect(event(1)) is not None
+    assert detector.detect(event(2)) is None
+    assert detector.detect(event(3)) is not None
+
+
 def test_openai_transcription_messages_map_to_domain_events() -> None:
     partial = map_openai_event(
         {
