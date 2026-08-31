@@ -92,7 +92,7 @@ async def _assert_answer_service_streams_without_buffering_entire_answer() -> No
 
 
 class ScriptedAsrSession:
-    def __init__(self, transcript: TranscriptEvent) -> None:
+    def __init__(self, transcript: TranscriptEvent | None = None) -> None:
         self.transcript = transcript
         self.queue: asyncio.Queue[TranscriptEvent | None] = asyncio.Queue()
         self.closed = False
@@ -101,7 +101,11 @@ class ScriptedAsrSession:
         assert pcm and sequence >= 0
 
     async def commit(self) -> None:
-        await self.queue.put(self.transcript)
+        if self.transcript is not None:
+            await self.queue.put(self.transcript)
+
+    async def emit(self, transcript: TranscriptEvent) -> None:
+        await self.queue.put(transcript)
 
     async def events(self) -> AsyncIterator[TranscriptEvent]:
         while True:
@@ -213,7 +217,7 @@ def test_follow_up_prompt_uses_recent_conversation_for_reference_resolution() ->
 
 
 def test_follow_up_prompt_uses_four_prior_utterances_without_repeating_current() -> None:
-    current = "那它在分区恢复后怎么收敛？"
+    current = "那如果分区恢复，它怎么收敛？"
     history = (
         "interviewer: 请解释 CAP。",
         "candidate: CAP 需要在一致性和可用性之间取舍。",
@@ -229,6 +233,142 @@ def test_follow_up_prompt_uses_four_prior_utterances_without_repeating_current()
 
     assert all(item in prompt for item in history)
     assert prompt.count(current) == 1
+
+
+def test_session_manager_answers_rapid_finals_in_fifo_order() -> None:
+    asyncio.run(_assert_session_manager_answers_rapid_finals_in_fifo_order())
+
+
+async def _assert_session_manager_answers_rapid_finals_in_fifo_order() -> None:
+    interviewer = ScriptedAsrSession()
+    first_release = asyncio.Event()
+    prompts: list[str] = []
+
+    async def answer(prompt: str):
+        prompts.append(prompt)
+        if "分析一下日股。" in prompt:
+            await first_release.wait()
+            yield "日股回答"
+            return
+        yield "方案回答"
+
+    manager = LiveSessionManager(
+        asr_sessions={AudioChannel.INTERVIEWER: interviewer},
+        answer_service=LiveAnswerService(answer),
+    )
+    await manager.start()
+    await _wait_for_type(manager, "session.ready")
+    await interviewer.emit(TranscriptEvent(AudioChannel.INTERVIEWER, 1, "分析一下日股。", True))
+    first_started = await _wait_for_type(manager, "answer.started")
+    await interviewer.emit(TranscriptEvent(AudioChannel.INTERVIEWER, 2, "评价一下这个方案。", True))
+    await _wait_for_type(manager, "transcript.final")
+    first_release.set()
+
+    event_types: list[str] = []
+    detected_questions = ["分析一下日股。"]
+    completed_answers: list[str] = []
+    while len(completed_answers) < 2:
+        event = await asyncio.wait_for(manager.next_event(), timeout=1)
+        event_types.append(event.type)
+        if event.type == "question.detected":
+            detected_questions.append(str(event.payload["question"]))
+        if event.type == "answer.completed":
+            completed_answers.append(str(event.payload["answer_text"]))
+
+    assert first_started.payload["question_version"] == 1
+    assert detected_questions == ["分析一下日股。", "评价一下这个方案。"]
+    assert completed_answers == ["日股回答", "方案回答"]
+    assert "answer.cancelled" not in event_types
+    assert len(prompts) == 2
+    await manager.close("test")
+
+
+def test_session_manager_continues_queue_after_answer_failure() -> None:
+    asyncio.run(_assert_session_manager_continues_queue_after_answer_failure())
+
+
+async def _assert_session_manager_continues_queue_after_answer_failure() -> None:
+    interviewer = ScriptedAsrSession()
+    first_release = asyncio.Event()
+
+    async def answer(prompt: str):
+        if "第一题" in prompt:
+            await first_release.wait()
+            raise RuntimeError("模型失败")
+        yield "第二题回答"
+
+    manager = LiveSessionManager(
+        asr_sessions={AudioChannel.INTERVIEWER: interviewer},
+        answer_service=LiveAnswerService(answer),
+    )
+    await manager.start()
+    await _wait_for_type(manager, "session.ready")
+    await interviewer.emit(TranscriptEvent(AudioChannel.INTERVIEWER, 1, "第一题。", True))
+    await _wait_for_type(manager, "answer.started")
+    await interviewer.emit(TranscriptEvent(AudioChannel.INTERVIEWER, 2, "第二题。", True))
+    await _wait_for_type(manager, "transcript.final")
+    first_release.set()
+
+    saw_failure = False
+    completed = None
+    while completed is None:
+        event = await asyncio.wait_for(manager.next_event(), timeout=1)
+        if event.type == "error" and event.payload.get("code") == "answer_failed":
+            saw_failure = True
+        if event.type == "answer.completed":
+            completed = event
+
+    assert saw_failure
+    assert completed.payload["answer_text"] == "第二题回答"
+    await manager.close("test")
+
+
+def test_session_manager_snapshots_four_prior_utterances_for_follow_up() -> None:
+    asyncio.run(_assert_session_manager_snapshots_four_prior_utterances_for_follow_up())
+
+
+async def _assert_session_manager_snapshots_four_prior_utterances_for_follow_up() -> None:
+    interviewer = ScriptedAsrSession()
+    candidate = ScriptedAsrSession()
+    prompts: list[str] = []
+
+    async def answer(prompt: str):
+        prompts.append(prompt)
+        yield "回答"
+
+    manager = LiveSessionManager(
+        asr_sessions={
+            AudioChannel.INTERVIEWER: interviewer,
+            AudioChannel.CANDIDATE: candidate,
+        },
+        answer_service=LiveAnswerService(answer),
+    )
+    await manager.start()
+    await _wait_for_type(manager, "session.ready")
+
+    prior_events = (
+        TranscriptEvent(AudioChannel.INTERVIEWER, 1, "请解释 CAP。", True),
+        TranscriptEvent(AudioChannel.CANDIDATE, 1, "CAP 需要在一致性和可用性之间取舍。", True),
+        TranscriptEvent(AudioChannel.INTERVIEWER, 2, "重点讲讲 AP。", True),
+        TranscriptEvent(AudioChannel.CANDIDATE, 2, "AP 优先保证可用性。", True),
+    )
+    await interviewer.emit(prior_events[0])
+    await _wait_for_type(manager, "answer.completed")
+    await candidate.emit(prior_events[1])
+    await _wait_for_type(manager, "transcript.final")
+    await interviewer.emit(prior_events[2])
+    await _wait_for_type(manager, "answer.completed")
+    await candidate.emit(prior_events[3])
+    await _wait_for_type(manager, "transcript.final")
+
+    current = "那如果分区恢复，它怎么收敛？"
+    await interviewer.emit(TranscriptEvent(AudioChannel.INTERVIEWER, 3, current, True))
+    await _wait_for_type(manager, "answer.completed")
+    follow_up_prompt = prompts[-1]
+
+    assert all(f"{event.role.value}: {event.text}" in follow_up_prompt for event in prior_events)
+    assert follow_up_prompt.count(current) == 1
+    await manager.close("test")
 
 
 def test_manual_regenerate_increments_attempt_and_close_is_idempotent() -> None:

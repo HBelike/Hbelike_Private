@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 
 from src.career_assistant.live_interview.answer_service import LiveAnswerContext, LiveAnswerService
 from src.career_assistant.live_interview.asr.base import AsrSession
@@ -45,6 +47,16 @@ async def _noop_answer(
     return None
 
 
+@dataclass(frozen=True)
+class _QueuedAnswer:
+    detected: DetectedQuestion
+    recent_conversation: tuple[str, ...]
+    manual: bool = False
+    version: int | None = None
+    attempt: int = 1
+    emit_detected: bool = True
+
+
 class LiveSessionManager:
     """每个连接一个实例；负责释放 ASR 与取消迟到回答。"""
 
@@ -67,12 +79,16 @@ class LiveSessionManager:
         self._outgoing: asyncio.Queue[ServerEvent] = asyncio.Queue(maxsize=1_000)
         self._reader_tasks: list[asyncio.Task[None]] = []
         self._answer_task: asyncio.Task[None] | None = None
+        self._answer_queue: deque[_QueuedAnswer] = deque()
+        self._answer_running = False
         self._closed = False
         self._started = False
         self._question_version = 0
         self._attempt = 0
         self._active_question: str | None = None
         self._active_intent = QuestionIntent.KNOWLEDGE
+        self._active_recent_conversation: tuple[str, ...] = ()
+        self._last_detected_question: str | None = None
         self._last_interviewer_final: str | None = None
         self._recent_conversation: list[str] = []
 
@@ -114,6 +130,7 @@ class LiveSessionManager:
             await self._handle_answer_request(event)
         elif isinstance(event, AnswerCancelEvent):
             await self._cancel_answer("user")
+            self._ensure_answer_worker()
         elif isinstance(event, PingEvent):
             await self._emit("pong")
         elif isinstance(event, SessionEndEvent):
@@ -142,66 +159,125 @@ class LiveSessionManager:
         )
         if not event.is_final:
             return
+        prior_conversation = tuple(self._recent_conversation[-4:])
         self._recent_conversation.append(f"{event.role.value}: {event.text}")
         self._recent_conversation = self._recent_conversation[-12:]
         await self._transcript_hook(event)
         if event.channel is AudioChannel.INTERVIEWER:
             self._last_interviewer_final = event.text
-        detected = self._detector.detect(event, self._active_question)
+        detected = self._detector.detect(event, self._last_detected_question)
         if detected is not None:
-            await self._activate_question(detected)
+            self._last_detected_question = detected.normalized_question
+            self._answer_queue.append(
+                _QueuedAnswer(
+                    detected=detected,
+                    recent_conversation=prior_conversation,
+                )
+            )
+            self._ensure_answer_worker()
 
-    async def _activate_question(self, detected: DetectedQuestion) -> None:
-        await self._cancel_answer("superseded")
-        self._question_version += 1
-        self._attempt = 1
-        self._active_question = detected.normalized_question
-        self._active_intent = detected.intent
-        await self._emit(
-            "question.detected",
-            question_version=self._question_version,
-            question=self._active_question,
-            intent=detected.intent.value,
-            confidence=detected.confidence,
-            is_follow_up=detected.is_follow_up,
-        )
-        self._start_answer_task()
+    async def _activate_job(self, job: _QueuedAnswer) -> None:
+        if job.version is None:
+            self._question_version += 1
+        else:
+            self._question_version = job.version
+        self._attempt = job.attempt
+        self._active_question = job.detected.normalized_question
+        self._active_intent = job.detected.intent
+        self._active_recent_conversation = job.recent_conversation
+        if job.emit_detected:
+            await self._emit(
+                "question.detected",
+                question_version=self._question_version,
+                question=self._active_question,
+                intent=job.detected.intent.value,
+                confidence=job.detected.confidence,
+                is_follow_up=job.detected.is_follow_up,
+                manual=job.manual,
+            )
 
     async def _handle_answer_request(self, event: AnswerRequestEvent) -> None:
         if event.mode == "regenerate":
             if self._active_question is None:
                 raise ValueError("当前没有可重新生成的问题")
+            question = self._active_question
+            intent = self._active_intent
+            recent_conversation = self._active_recent_conversation
+            version = self._question_version
+            attempt = self._attempt + 1
             await self._cancel_answer("regenerate")
-            self._attempt += 1
+            self._answer_queue.appendleft(
+                _QueuedAnswer(
+                    detected=DetectedQuestion(
+                        normalized_question=question,
+                        intent=intent,
+                        confidence=1.0,
+                        is_follow_up=intent is QuestionIntent.FOLLOW_UP,
+                    ),
+                    recent_conversation=recent_conversation,
+                    version=version,
+                    attempt=attempt,
+                    emit_detected=False,
+                )
+            )
         else:
             question = event.question or self._last_interviewer_final
             if not question:
                 raise ValueError("尚未收到可用于生成的面试官话语")
             await self._cancel_answer("manual_replaced")
-            self._question_version += 1
-            self._attempt = 1
-            self._active_question = question
-            self._active_intent = QuestionIntent.KNOWLEDGE
-            await self._emit(
-                "question.detected",
-                question_version=self._question_version,
-                question=question,
-                intent=self._active_intent.value,
+            self._answer_queue = deque(
+                job
+                for job in self._answer_queue
+                if job.detected.normalized_question != question
+            )
+            detected = DetectedQuestion(
+                normalized_question=question,
+                intent=QuestionIntent.KNOWLEDGE,
                 confidence=1.0,
                 is_follow_up=False,
-                manual=True,
             )
-        self._start_answer_task()
+            self._last_detected_question = question
+            self._answer_queue.appendleft(
+                _QueuedAnswer(
+                    detected=detected,
+                    recent_conversation=tuple(self._recent_conversation[-4:]),
+                    manual=True,
+                )
+            )
+        self._ensure_answer_worker()
 
-    def _start_answer_task(self) -> None:
-        version = self._question_version
-        attempt = self._attempt
-        question = self._active_question
-        assert question is not None
+    def _ensure_answer_worker(self) -> None:
+        if self._closed or not self._answer_queue:
+            return
+        if self._answer_task is not None and not self._answer_task.done():
+            return
         self._answer_task = asyncio.create_task(
-            self._run_answer(version, attempt, question, self._active_intent),
-            name=f"live-answer-{version}-{attempt}",
+            self._drain_answer_queue(),
+            name="live-answer-worker",
         )
+
+    async def _drain_answer_queue(self) -> None:
+        worker = asyncio.current_task()
+        try:
+            while self._answer_queue and not self._closed:
+                job = self._answer_queue.popleft()
+                await self._activate_job(job)
+                question = self._active_question
+                assert question is not None
+                self._answer_running = True
+                try:
+                    await self._run_answer(
+                        self._question_version,
+                        self._attempt,
+                        question,
+                        self._active_intent,
+                        job.recent_conversation,
+                    )
+                finally:
+                    self._answer_running = False
+        finally:
+            if self._answer_task is worker:
+                self._answer_task = None
 
     async def _run_answer(
         self,
@@ -209,6 +285,7 @@ class LiveSessionManager:
         attempt: int,
         question: str,
         intent: QuestionIntent,
+        recent_conversation: tuple[str, ...],
     ) -> None:
         text = ""
         try:
@@ -217,7 +294,7 @@ class LiveSessionManager:
             context = LiveAnswerContext(
                 candidate_facts=self._answer_context.candidate_facts,
                 target_role=self._answer_context.target_role,
-                recent_conversation=tuple(self._recent_conversation),
+                recent_conversation=recent_conversation,
                 interview_evidence=self._answer_context.interview_evidence,
                 terminology=self._answer_context.terminology,
             )
@@ -258,15 +335,18 @@ class LiveSessionManager:
         if task is None or task.done():
             return
         version, attempt = self._question_version, self._attempt
+        had_active_answer = self._answer_running and version > 0 and attempt > 0
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
-        await self._emit(
-            "answer.cancelled",
-            question_version=version,
-            attempt=attempt,
-            reason=reason,
-        )
-        self._answer_task = None
+        if had_active_answer:
+            await self._emit(
+                "answer.cancelled",
+                question_version=version,
+                attempt=attempt,
+                reason=reason,
+            )
+        if self._answer_task is task:
+            self._answer_task = None
 
     async def _emit(self, event_type: str, **payload: object) -> None:
         await self._outgoing.put(ServerEvent(event_type, dict(payload)))
@@ -275,6 +355,7 @@ class LiveSessionManager:
         if self._closed:
             return
         self._closed = True
+        self._answer_queue.clear()
         await self._cancel_answer(reason)
         for task in self._reader_tasks:
             task.cancel()
