@@ -19,7 +19,7 @@ def build_answer_prompt(
     follow_up_context = ""
     context_rule = "2. 只根据下方“面试官问题”作答，不使用简历、岗位、面经或历史对话。"
     if intent is QuestionIntent.FOLLOW_UP and context.recent_conversation:
-        recent = "\n".join(context.recent_conversation[-2:])
+        recent = "\n".join(context.recent_conversation[-4:])
         follow_up_context = f"\n仅用于理解追问指代的最近对话：\n{recent}\n"
         context_rule = (
             "2. 以当前面试官问题为核心；最近对话只用于理解“它、刚才、那个方案”等指代，"

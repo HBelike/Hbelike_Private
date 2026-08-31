@@ -212,6 +212,25 @@ def test_follow_up_prompt_uses_recent_conversation_for_reference_resolution() ->
     assert "令牌补充与突发流量" in prompt
 
 
+def test_follow_up_prompt_uses_four_prior_utterances_without_repeating_current() -> None:
+    current = "那它在分区恢复后怎么收敛？"
+    history = (
+        "interviewer: 请解释 CAP。",
+        "candidate: CAP 需要在一致性和可用性之间取舍。",
+        "interviewer: 重点讲讲 AP。",
+        "candidate: AP 优先保证可用性。",
+    )
+
+    prompt = build_answer_prompt(
+        current,
+        QuestionIntent.FOLLOW_UP,
+        LiveAnswerContext(recent_conversation=history),
+    )
+
+    assert all(item in prompt for item in history)
+    assert prompt.count(current) == 1
+
+
 def test_manual_regenerate_increments_attempt_and_close_is_idempotent() -> None:
     asyncio.run(_assert_manual_regenerate_increments_attempt_and_close_is_idempotent())
 
