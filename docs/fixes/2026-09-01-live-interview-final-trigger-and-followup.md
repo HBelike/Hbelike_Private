@@ -76,6 +76,16 @@ ASR final
 
 唯一 warning 来自 FastAPI TestClient 对 `httpx` 兼容层的既有弃用提示，与本次修改无关。
 
+随后运行仓库完整 Python 回归：
+
+```text
+.\.venv\Scripts\python.exe -m pytest -q
+
+581 passed, 5 warnings
+```
+
+5 条 warning 均为既有 Starlette/FastAPI 弃用提示，没有测试失败。
+
 新增覆盖包括：
 
 - `“分析一下日股。”`、`“评价一下这个方案。”`、`“展开。”` 和无标点问句触发。
