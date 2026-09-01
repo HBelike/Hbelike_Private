@@ -55,7 +55,7 @@ DashScope 长音频异步接口只接受公网可访问 URL。注册器为规范
 - 令牌只保存在当前 API 进程内存中，默认 30 分钟失效，不写数据库。
 - 接口只允许访问音频临时根目录下已经登记的精确文件，不接受任意路径参数。
 - 平台身份中间件只对 `/api/career/interview-library/audio-sources/` 这个精确前缀增加公开豁免；其他面经库接口继续要求现有登录会话，回源接口的唯一访问凭据是不可枚举的随机令牌。
-- 转写完成或失败后立即撤销令牌；Nginx 对该路径关闭访问日志，避免令牌进入普通访问日志。
+- 转写完成或失败后立即撤销令牌；生产入口 Caddy 对该路径使用 `log_skip`，本地 Nginx 反代同样关闭该路径访问日志，避免令牌进入普通访问日志。
 - 当前生产镜像使用单 Uvicorn 进程，因此内存注册器与 DashScope 回源请求落在同一进程。未来若扩展为多 API 实例，再将该边界替换为带过期时间的对象存储签名 URL。
 
 ### `DashScopeFileTranscriptionProvider`
@@ -118,7 +118,7 @@ DashScope 长音频异步接口只接受公网可访问 URL。注册器为规范
 - `result`：现有 `_interview_experience_payload` 结构，前端可直接刷新树并选中新面经。
 - `error`：稳定错误消息，不包含临时文件路径、令牌、模型密钥或上游响应。
 
-请求生命周期覆盖完整处理过程。Nginx 为该精确路径单独设置 520MB 请求体上限和 60 分钟读取超时，使 512MB 文件加上 multipart 边界后仍可通过，同时不扩大其他 API 的上传边界。客户端关闭或请求取消时，服务端在 `finally` 中撤销临时来源并删除文件；已经提交给 DashScope 的远端任务不保存结果，也不会继续写入面经库。
+请求生命周期覆盖完整处理过程。生产 Caddy 将 `/api/*` 直接转发给 API，因此文件体积由 API 流式读取时执行 512MB 硬限制；本地 Nginx 为该精确路径单独设置 520MB 请求体上限和 60 分钟读取超时，使 512MB 文件加上 multipart 边界后仍可通过，同时不扩大其他 API 的上传边界。API 容器的附件 `tmpfs` 调整为 640MB，为原文件、规范化文件和处理开销保留明确上限。客户端关闭或请求取消时，服务端在 `finally` 中撤销临时来源并删除文件；已经提交给 DashScope 的远端任务不保存结果，也不会继续写入面经库。
 
 ## 页面设计
 
@@ -141,12 +141,12 @@ PC 端完成后只验证现有小屏断点不会造成弹窗溢出；手机端�
 
 - `CAREER_AUDIO_PUBLIC_BASE_URL=`：DashScope 回源使用的 HTTPS 站点根地址。
 - `DASHSCOPE_FILE_ASR_BASE_URL=https://dashscope.aliyuncs.com/api/v1`：与现有 DashScope Key 地域匹配的离线任务 API 根地址。
-- `DASHSCOPE_FILE_ASR_MODEL=qwen-audio-3.0-asr-flash-filetrans`：允许固定快照时覆盖，但首版只支持具备说话人分离的模型族。
+- `DASHSCOPE_FILE_ASR_MODEL=qwen-audio-3.0-asr-flash-filetrans`：首版只接受这个已验证支持说话人分离的模型值，不开放其他模型覆盖。
 - `CAREER_AUDIO_MAX_BYTES=536870912`：默认 512MB。
 - `CAREER_AUDIO_MAX_DURATION_SECONDS=7200`：默认 2 小时。
 - `CAREER_AUDIO_SOURCE_TTL_SECONDS=1800`：默认 30 分钟。
 
-本次只更新示例配置、Compose 变量透传和 Nginx 本地配置，不填写真实密钥，不连接生产服务器，不部署或重建生产容器。
+本次只更新示例配置、Compose 变量透传、Caddy 令牌路径日志规则和 Nginx 本地配置，不填写真实密钥，不连接生产服务器，不部署或重建生产容器。
 
 ## 错误处理
 
