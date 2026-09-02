@@ -367,14 +367,20 @@ async def _send_manager_events(websocket: WebSocket, manager: LiveSessionManager
 async def _resolve_websocket_actor(websocket: WebSocket):
     from src.career_assistant.web.router import CareerRequestActor
 
-    if not platform_auth_required():
-        return CareerRequestActor(DEFAULT_ORGANIZATION_ID, DEFAULT_ACTOR_ID)
+    requires_session = platform_auth_required()
     token = websocket.cookies.get(SESSION_COOKIE_NAME, "")
+    if not token:
+        if not requires_session:
+            return CareerRequestActor(DEFAULT_ORGANIZATION_ID, DEFAULT_ACTOR_ID)
+        await websocket.close(code=4401, reason="请先登录后继续")
+        return None
     try:
         resolution = get_platform_access_service(websocket).resolve_session(token)
     except HTTPException:
         resolution = None
     if resolution is None:
+        if not requires_session:
+            return CareerRequestActor(DEFAULT_ORGANIZATION_ID, DEFAULT_ACTOR_ID)
         await websocket.close(code=4401, reason="请先登录后继续")
         return None
     return CareerRequestActor(

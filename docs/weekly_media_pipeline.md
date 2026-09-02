@@ -12,27 +12,40 @@
 
 为避免一次 DeepSeek 调用同时生成动态 Top N 长文章、N 张图 Prompt、七段视频脚本和旁白而触发输出截断，当前链路按项目和产物所有权拆分：
 
-- `SummaryTask`：按排名串行执行 N 次单项目生成，再执行 1 次全局综合；代码确定性拼装单篇深度文章，并编译 N 份共享 `ContentBrief`。
+- `SummaryTask`：按排名串行执行 N 次单项目生成，再执行 1 次全局综合；代码确定性拼装单篇深度文章，并为每个项目产出经证据校验的 `ArticleVisualSpec v1`。
 - `ShortVideoPromptTask`：基于 `ContentBrief` 生成渐进式讲稿、统一旁白与七段视频分镜，并回写 `video_script`、`voiceover_text`。
-- `ImageTask`：基于同一 `ContentBrief` 生成 N 张图片各自的 Ark 最终 Prompt，再调用 Seedream。每张图同时表达一个项目的模块架构与主数据流。
+- `ImageTask`：校验 N 份 `ArticleVisualSpec`，选择固定 HTML/SVG 模板，经 Gotenberg 生成可核验的 `2048×1152` PNG；静态技术图主路径不再调用 Seedream。
 - `VideoClipPlanTask`：把分镜翻译为 Seedance 分片计划，不重新总结项目事实。
 - `AudioTask`、`SeedanceClipTask`：只消费已生成的旁白与分片 Prompt，不承担内容创作。
 
 因此文章、图片、视频均引用同一份项目事实合同，但每个 Task 只生成自己负责的产物。`content_id` 继续作为全部正文、Prompt、分镜与媒体素材的隔离键。
 
-## Seedream 网络重试与代理降级
+## 确定性技术配图主链路
+
+- **设计目标**：技术文章中的中文、层级、节点和连线必须由程序确定，不让概率式图片模型猜测；规格或渲染失败时关闭式失败，不发布低质量兜底图。
+- **调用链**：`SummaryTask → ArticleVisualSpec v1 → ArticleVisualPlanningService → ArticleVisualSpecValidator → ArticleVisualTemplateService → GotenbergScreenshotProvider → RenderedVisualValidator → media_assets`。
+- **图型与容量**：固定支持 `summary_card`、`flow`、`architecture`、`comparison`、`timeline`。证据不足的历史内容只读取 `summary_text` 与文章固定章节并降级为 `summary_card`，不消费旧 `visual_brief` 的截断节点。三能力卡使用单列布局，正文保持 30 px，可承载 validator 允许的 60 字完整描述；句子只按句号、问号、叹号和分号结束，冒号不会生成残句。
+- **依赖与取舍**：Gotenberg 使用 `/forms/chromium/screenshot/html`；Noto Sans SC 字体和 OFL 许可证随仓库保存并随请求上传。`baoyu-article-illustrator` 的 Type × Style × Palette 方法只用于规划图型、风格和色板，不作为后端在线位图渲染器。
+- **质量门**：渲染前校验证据、禁词、数量、边引用与容量；浏览器等待字体完成后校验文字一致、溢出、越界、节点重叠和边身份；输出后用 Pillow 校验 PNG 与精确尺寸。目标文件先写 `.part` 再原子替换。
+- **重试与幂等**：Gotenberg 只对连接/超时以及 HTTP 408、429、500、502、503、504 重试，退避为 1、2、4、8 秒，最多 5 次；普通 4xx 立即失败。`render_key` 由 canonical spec、模板、renderer 和字体版本计算，文件存在且有效资产 key 相同时直接复用。
+- **失败保护**：先完成整批规格校验和所有新图渲染，再在单事务中创建新资产并把旧图标记为 `replaced`。第六张失败、孤儿目标冲突或数据库批量写入失败时，旧资产保持有效，新批次不产生半批数据库记录。
+- **真实验证（2026-08-28）**：本地 `content_id=20` 的 6 个旧项目真实降级为 6 张 `summary_card`。修复冒号残句与重复 takeaway 后，首轮 `rendered=6/reused=0`，紧接第二轮 `rendered=0/reused=6`；6 张均为 `2048×1152` PNG，metadata 的 `render_key`、模板/renderer 版本、role 与 `validation_result=passed` 完整，无 `.part`。逐张检查未发现中文方框、裁切、重叠、重复节点或禁用元文字。详细结果见本地 `outputs/visual-verification/content-20.json`。
+
+## Seedream 历史网络重试与代理降级
 
 - **设计目标**：本地系统代理或远端服务发生瞬时抖动时，不因单次连接中断终止整批图片生成，同时避免对确定性的请求参数错误反复调用付费接口。
 - **技术取舍**：生图请求和签名图片下载的最大尝试次数统一为 5 次，采用最长 6.4 秒的指数退避。连接失败、超时、传输中断、HTTP 429 和 5xx 会重试；普通 4xx 立即失败。首次请求继续尊重系统代理，出现 `ProxyError` 后剩余尝试关闭环境代理并直连，避免持续撞击已失效的本地代理。
 - **调用链**：`ImageTask` → `SeedreamProvider.generate_image` → Ark `/images/generations` → 签名图片 URL 下载。重试只封装在 Provider 内，不改变任务幂等、素材复用或数据库写入边界；只有图片完整落盘后才创建 `media_assets` 记录。
 - **依赖与边界**：继续使用现有 `requests`，不新增第三方依赖；不重试 API Key、模型、Prompt 等需要人工修正的普通 4xx 响应。
-- **真实验证**：2026-08-28 对失败批次 `content_id=20` 单独重跑 `ImageTask`，运行记录 `ImageTask-8b810bcc94004baeaa2b7e30d7575673` 状态为 `succeeded`。任务复用首张成功素材并真实生成剩余 5 张，数据库最终保留 6 张有效 Seedream 图片；全部文件可解码为 `2048x1152`，无 `.part` 半文件残留。该验证未执行文章重写、视频生成、微信公众号草稿或生产部署。
+- **历史验证**：曾对 `content_id=20` 验证 Seedream 网络重试，确认代理断连恢复有效。该结果只证明旧 Provider 的网络可用性；当前静态技术总结图主路径已经切换到上节的 Gotenberg 确定性渲染。
 
 ## 管理台媒体生成开关
 
 管理台“GitHub 热门”页提供“图片生成”“视频生成”和“语音生成”三个可视化开关，并随项目数量、关键词和提示词一起保存为版本化流水线配置。新字段为 `image_generation_enabled`、`video_generation_enabled` 与 `audio_generation_enabled`；旧配置缺少字段时分别按 `true`、`false` 与 `false` 兼容。
 
-运行时不新增第二套任务状态：`apply_pipeline_config` 将图片开关映射到现有 `image.paid_generation_enabled`，将视频开关映射到现有 `video.submit_enabled`，将语音开关映射到现有 `audio.enabled`。工作台创建的运行快照额外写入仅限本次运行的 `video.runtime_submit_enabled` 与 `audio.runtime_enabled`，优先级分别高于部署环境中的 `VIDEO_SUBMIT_ENABLED` 和 `AUDIO_ENABLED`；常规定时任务没有这些字段，仍保持原有环境变量行为。关闭图片后仍生成文章、项目视觉简报和排版结构，但 `ImageTask` 不调用外部图片生成服务；关闭视频后不进入分镜、Seedance、视觉质检和视频装配任务链；关闭语音后不调用语音合成服务，也不生成旁白音频。每次手动运行使用提交时冻结的配置版本，切换开关不会改写正在运行的任务或历史内容。
+运行时不新增第二套任务状态：`apply_pipeline_config` 将图片开关映射到现有 `image.paid_generation_enabled`，将视频开关映射到现有 `video.submit_enabled`，将语音开关映射到现有 `audio.enabled`。工作台创建的运行快照额外写入仅限本次运行的 `video.runtime_submit_enabled` 与 `audio.runtime_enabled`，优先级分别高于部署环境中的 `VIDEO_SUBMIT_ENABLED` 和 `AUDIO_ENABLED`；常规定时任务没有这些字段，仍保持原有环境变量行为。关闭图片后仍生成文章和项目视觉简报，但 `ImageTask` 不调用外部图片生成服务；关闭视频后不进入分镜、Seedance、视觉质检和视频装配任务链；关闭语音后不调用语音合成服务，也不生成旁白音频。每次手动运行使用提交时冻结的配置版本，切换开关不会改写正在运行的任务或历史内容。
+
+工作台“运行生成流程”先执行 `SearchTask` 刷新 GitHub 周榜，再生成内容，并固定在 `PreviewTask` 后结束；刷新失败会终止本次运行，不会静默复用过期快照，也不会执行 `ArticleLayoutTask` 或 `DeliverTask`。只有用户对指定 `content_id` 明确审核通过后，审核动作才进入排版和微信公众号草稿创建；周五 09:00 的独立草稿 Job 保留原有职责。文章头部以 `generated_contents.created_at` 显示真实生成时间，`week_end` 只用于单独标注周榜数据周期。微信真实草稿调用仍要求运行环境的固定出口 IP 已加入公众号后台白名单。
 
 前端在 PC 端使用三张并列服务卡展示开关与当前状态，窄屏回退为单列。开关保留原生 checkbox 语义、可见焦点和说明文本，不引入新的前端依赖。后端校验只接受布尔值，避免字符串 `"false"` 被误判为开启。
 
@@ -45,7 +58,7 @@
   -> 全文末尾工程启发
 ```
 
-项目调用只看到当前仓库证据，并同时产出正文与 `visual_brief`。全局综合只读取已经验证的项目结果，不重写项目事实。某个项目首次失败时只修复该项目；第二次仍失败则任务整体失败，不保存部分文章。
+项目调用只看到当前仓库证据，并同时产出正文与 `visual_spec`；视频兼容所需 `visual_brief` 由规划服务派生，不参与静态图模板选择。全局综合只读取已经验证的项目结果，不重写项目事实。某个项目首次失败时只修复该项目；第二次仍失败则任务整体失败，不保存部分文章。
 
 ## 运行调用链
 
@@ -53,11 +66,11 @@
 Application
   -> SearchTask
   -> SummaryTask
-       -> N 次项目生成（概述 + 三分点 + visual_brief）
+       -> N 次项目生成（概述 + 三分点 + ArticleVisualSpec）
        -> 1 次全局综合（标题 + 摘要 + 开篇 + 主线 + 结尾）
        -> 确定性拼装文章 + N 份 ContentBrief
   -> ShortVideoPromptTask（讲稿 + 旁白 + 分镜）
-  -> ImageTask（N 份图片最终 Prompt + N 张原始图片）
+  -> ImageTask（N 份规格校验 + 固定 HTML/SVG 模板 + Gotenberg PNG）
   -> VideoClipPlanTask
   -> AudioTask
   -> StorageTask
@@ -145,7 +158,7 @@ Seedance 每段只生成教学风动态画面：提示词明确禁止旁白、�
 
 | 场景 | 推荐配置 | 行为 |
 | --- | --- | --- |
-| 本地开发 | `video.submit_enabled=false`、`audio.enabled=false` | 只生成文章、图片、排版和图文草稿，不生成或上传音视频。 |
+| 本地开发 | `video.submit_enabled=false`、`audio.enabled=false` | 手动流程只生成文章、图片和审核预览，不生成或上传音视频；审核通过后才单独创建排版和图文草稿。 |
 | 生产云端 | `VIDEO_SUBMIT_ENABLED=true`、`AUDIO_ENABLED=true` | API 与 Scheduler 运行完整音视频链路，会产生 Seedance、视频质检和 TTS 调用。 |
 
 生产环境最小必需变量：

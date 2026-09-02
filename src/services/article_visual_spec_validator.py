@@ -65,7 +65,7 @@ class ArticleVisualSpecValidator:
     _styles = frozenset({"notion"})
     _palettes = frozenset({"editorial_blue"})
     _densities = frozenset({"low", "medium", "high"})
-    _max_total_visible_chars = 700
+    _max_total_visible_chars = 1200
 
     def validate(
         self,
@@ -181,7 +181,7 @@ class ArticleVisualSpecValidator:
             self._reject_unknown_fields(item, {"label", "description"}, path)
             label = self._text(item.get("label"), f"{path}.label", max_length=16)
             description = self._text(
-                item.get("description"), f"{path}.description", max_length=60
+                item.get("description"), f"{path}.description", max_length=150
             )
             if label in labels:
                 raise ArticleVisualSpecError(f"capabilities.label 重复：{label}")
@@ -194,10 +194,14 @@ class ArticleVisualSpecValidator:
         self, raw_spec: dict[str, Any]
     ) -> tuple[dict[str, Any], list[str], list[str], list[tuple[str, str]]]:
         steps, visible, node_ids = self._validate_nodes(
-            raw_spec.get("steps"), "steps", 3, 5, allow_layer=False
+            raw_spec.get("steps"), "steps", 1, None, allow_layer=False
         )
         edges, edge_pairs, edge_texts = self._validate_edges(
-            raw_spec.get("edges"), node_ids, "edges", minimum=2, maximum=8
+            raw_spec.get("edges"),
+            node_ids,
+            "edges",
+            minimum=0,
+            maximum=None,
         )
         expected_pairs = list(zip(node_ids, node_ids[1:]))
         if edge_pairs != expected_pairs:
@@ -305,7 +309,7 @@ class ArticleVisualSpecValidator:
         raw_nodes: Any,
         field: str,
         minimum: int,
-        maximum: int,
+        maximum: int | None,
         *,
         allow_layer: bool,
     ) -> tuple[list[dict[str, str]], list[str], list[str]]:
@@ -347,7 +351,7 @@ class ArticleVisualSpecValidator:
         field: str,
         *,
         minimum: int,
-        maximum: int,
+        maximum: int | None,
     ) -> tuple[list[dict[str, str]], list[tuple[str, str]], list[str]]:
         edges = self._object_list(raw_edges, field, minimum, maximum)
         valid_ids = set(node_ids)
@@ -382,7 +386,7 @@ class ArticleVisualSpecValidator:
     ) -> tuple[list[dict[str, str]], list[str], set[str]]:
         if raw_layers is None:
             return [], [], set()
-        layers = self._object_list(raw_layers, "layers", 1, 4)
+        layers = self._object_list(raw_layers, "layers", 1, None)
         normalized: list[dict[str, str]] = []
         visible: list[str] = []
         layer_ids: set[str] = set()
@@ -470,11 +474,19 @@ class ArticleVisualSpecValidator:
         raw: Any,
         field: str,
         minimum: int,
-        maximum: int,
+        maximum: int | None,
     ) -> list[dict[str, Any]]:
-        if not isinstance(raw, list) or not minimum <= len(raw) <= maximum:
+        valid_count = isinstance(raw, list) and len(raw) >= minimum
+        if valid_count and maximum is not None:
+            valid_count = len(raw) <= maximum
+        if not valid_count:
+            expected = (
+                f"至少为 {minimum}"
+                if maximum is None
+                else f"为 {minimum}–{maximum}"
+            )
             raise ArticleVisualSpecError(
-                f"{field} 数量必须为 {minimum}–{maximum}，当前为 "
+                f"{field} 数量必须{expected}，当前为 "
                 f"{len(raw) if isinstance(raw, list) else '非列表'}"
             )
         if any(not isinstance(item, dict) for item in raw):

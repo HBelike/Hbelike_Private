@@ -33,6 +33,8 @@ const completedHistory = ref([])
 const sessionIds = ref([])
 const pipRoot = ref(null)
 const pipWindow = ref(null)
+const hiddenViewportEnabled = ref(false)
+const hiddenViewportPending = ref(false)
 const latencySamples = ref([])
 const transcriptList = ref(null)
 const followLatestTranscripts = ref(true)
@@ -52,6 +54,7 @@ let liveSocket = null
 let timer = null
 let setupProgressTimer = null
 let startedAt = 0
+let startGeneration = 0
 const questionDetectedAt = new Map()
 const answeredVersions = new Set()
 
@@ -83,7 +86,12 @@ const phaseLabel = computed(() => ({
   ended: '本场已结束'
 }[phase.value] || '准备采集'))
 const actionLabel = computed(() => phase.value === 'paused' ? '重新选择声音来源' : '开始面试')
-const canOpenPip = computed(() => phase.value === 'active' && supportsAnswerPictureInPicture())
+const canOpenPip = computed(() => (
+  phase.value === 'active'
+  && connectionState.value === 'ready'
+  && supportsAnswerPictureInPicture()
+))
+const hiddenViewportSupported = computed(() => supportsAnswerPictureInPicture())
 const setupProgressLabel = computed(() => {
   if (setupProgress.value >= 100) return '模型与声音已准备完成'
   if (setupProgress.value >= 24) return '正在读取模型配置'
@@ -187,14 +195,72 @@ async function scrollTranscriptsToLatest({ force = false, smooth = false } = {})
   }
 }
 
-function handleConnectionState(nextState) {
+function connectionFailureMessage(detail = {}) {
+  if (detail.reason) return `实时连接已中断：${detail.reason}`
+  if (detail.code) return `实时连接已中断（关闭代码 ${detail.code}）。`
+  return '实时连接已中断，请检查本机服务后重试。'
+}
+
+function handleConnectionState(nextState, detail = {}) {
   connectionState.value = nextState
   if (nextState === 'backpressure') message.value = '网络发送稍慢，已跳过一小段音频以保持实时性。'
-  if (nextState === 'disconnected' && phase.value === 'active') void pauseCapture('实时连接已中断，请重新选择电脑声音。')
+  if (nextState === 'disconnected' && detail.wasReady && phase.value === 'active') {
+    void pauseCapture(connectionFailureMessage(detail))
+  }
+}
+
+function isCurrentStart(generation) {
+  return generation === startGeneration && phase.value === 'starting'
+}
+
+async function createAndConnectLiveSession(candidateAudioEnabled, generation) {
+  let lastError = null
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    if (!isCurrentStart(generation)) throw new Error('实时连接启动已取消')
+    const created = await requestJson('/api/career/live-interviews/sessions', {
+      method: 'POST',
+      body: JSON.stringify({
+        asr_model_profile_id: null,
+        answer_model_profile_id: selectedAnswerModelId.value || null,
+        client_kind: 'browser',
+        candidate_audio_enabled: candidateAudioEnabled
+      })
+    })
+    const sessionId = created.session.id
+    sessionIds.value.push(sessionId)
+    if (!isCurrentStart(generation)) throw new Error('实时连接启动已取消')
+    let socket = null
+    socket = new LiveInterviewSocket({
+      sessionId,
+      onEvent: handleServerEvent,
+      onStateChange: (nextState, detail) => {
+        if (liveSocket !== socket) return
+        handleConnectionState(nextState, detail)
+      }
+    })
+    liveSocket = socket
+    try {
+      await socket.connect()
+      if (liveSocket !== socket || !isCurrentStart(generation)) {
+        throw new Error('实时连接已被新的连接替换')
+      }
+      errorMessage.value = ''
+      return { retried: attempt > 1 }
+    } catch (error) {
+      lastError = error
+      if (liveSocket === socket) liveSocket = null
+      socket.close()
+      if (!isCurrentStart(generation)) throw error
+      if (attempt === 1) message.value = '首次实时连接未就绪，正在保留声音来源并自动重试…'
+      if (attempt === 1) errorMessage.value = ''
+    }
+  }
+  throw lastError || new Error('实时连接未能完成准备')
 }
 
 async function startInterview() {
   if (!canStart.value || phase.value === 'starting') return
+  const generation = ++startGeneration
   phase.value = 'starting'
   errorMessage.value = ''
   message.value = ''
@@ -205,30 +271,27 @@ async function startInterview() {
     const captureResult = await capture.start({
       candidateEnabled: candidateEnabled.value,
       onFrame: ({ channel, sequence, pcm }) => liveSocket?.sendAudio(channel, sequence, pcm),
-      onEnded: () => void pauseCapture('电脑声音共享已停止，回答和历史已保留。')
+      onEnded: () => {
+        if (generation === startGeneration) {
+          void pauseCapture('电脑声音共享已停止，回答和历史已保留。')
+        }
+      }
     })
-    if (captureResult.warning) message.value = captureResult.warning
+    if (!isCurrentStart(generation)) throw new Error('电脑声音共享已停止')
     candidateEnabled.value = captureResult.candidateEnabled
-    const created = await requestJson('/api/career/live-interviews/sessions', {
-      method: 'POST',
-      body: JSON.stringify({
-        asr_model_profile_id: null,
-        answer_model_profile_id: selectedAnswerModelId.value || null,
-        client_kind: 'browser',
-        candidate_audio_enabled: captureResult.candidateEnabled
-      })
-    })
-    const sessionId = created.session.id
-    sessionIds.value.push(sessionId)
-    liveSocket = new LiveInterviewSocket({
-      sessionId,
-      onEvent: handleServerEvent,
-      onStateChange: handleConnectionState
-    })
-    liveSocket.connect()
+    const connection = await createAndConnectLiveSession(captureResult.candidateEnabled, generation)
+    if (!isCurrentStart(generation)) throw new Error('实时连接启动已取消')
     phase.value = 'active'
+    const notices = []
+    if (captureResult.warning) notices.push(captureResult.warning)
+    if (connection.retried) notices.push('首次实时连接中断，已自动恢复。')
+    message.value = notices.join('；')
     startTimer()
   } catch (error) {
+    if (generation !== startGeneration) return
+    const socket = liveSocket
+    liveSocket = null
+    socket?.close()
     await capture?.stop()
     capture = null
     phase.value = sessionIds.value.length ? 'paused' : 'preparing'
@@ -249,6 +312,7 @@ function startTimer() {
 
 async function pauseCapture(reason) {
   if (!['active', 'starting'].includes(phase.value)) return
+  startGeneration += 1
   phase.value = 'paused'
   message.value = reason
   const socket = liveSocket
@@ -261,6 +325,7 @@ async function pauseCapture(reason) {
 
 async function endInterview(reason = '本场面试已结束。') {
   if (phase.value === 'ended') return
+  startGeneration += 1
   phase.value = 'ended'
   message.value = reason
   const socket = liveSocket
@@ -271,6 +336,7 @@ async function endInterview(reason = '本场面试已结束。') {
   await currentCapture?.stop()
   if (timer) window.clearInterval(timer)
   timer = null
+  hiddenViewportEnabled.value = false
   closePip()
   await openArchiveDialog()
 }
@@ -366,20 +432,64 @@ function regenerateAnswer() {
   liveSocket?.requestAnswer('regenerate')
 }
 
+async function ensurePipWindow() {
+  if (pipWindow.value && !pipWindow.value.closed) return true
+  try {
+    const result = await openAnswerPictureInPicture({ onClosed: handlePipClosed })
+    pipWindow.value = result.window
+    pipRoot.value = result.root
+    await nextTick()
+    return true
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '无法打开置顶小窗'
+    return false
+  }
+}
+
 async function openPip() {
   if (!canOpenPip.value) {
     message.value = '当前 Chrome 不支持置顶小窗，请继续使用本独立窗口。'
     return
   }
-  closePip()
-  try {
-    const result = await openAnswerPictureInPicture({ onClosed: () => closePip(false) })
-    pipWindow.value = result.window
-    pipRoot.value = result.root
-    await nextTick()
-  } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '无法打开置顶小窗'
+  await ensurePipWindow()
+}
+
+async function toggleHiddenViewport(event) {
+  const shouldEnable = event?.target ? Boolean(event.target.checked) : !hiddenViewportEnabled.value
+  if (!shouldEnable) {
+    hiddenViewportEnabled.value = false
+    closePip()
+    message.value = '隐藏视口V1 已关闭，回答已恢复到当前页面。'
+    return
   }
+  if (!hiddenViewportSupported.value) {
+    hiddenViewportEnabled.value = false
+    errorMessage.value = '当前浏览器不支持隐藏视口V1，请使用最新版 Chrome 或 Edge。'
+    return
+  }
+  if (phase.value !== 'active' || connectionState.value !== 'ready') {
+    hiddenViewportEnabled.value = false
+    errorMessage.value = '实时连接尚未准备完成，请等待状态变为“正在聆听”后再开启隐藏视口V1。'
+    return
+  }
+  hiddenViewportPending.value = true
+  errorMessage.value = ''
+  const opened = await ensurePipWindow()
+  hiddenViewportPending.value = false
+  if (!opened) {
+    hiddenViewportEnabled.value = false
+    return
+  }
+  hiddenViewportEnabled.value = true
+  message.value = '隐藏视口V1 已开启；仅分享指定标签页或窗口时生效。'
+}
+
+function handlePipClosed() {
+  pipRoot.value = null
+  pipWindow.value = null
+  if (!hiddenViewportEnabled.value) return
+  hiddenViewportEnabled.value = false
+  message.value = '回答小窗已关闭，隐藏视口V1 已同步关闭。'
 }
 
 function closePip(closeWindow = true) {
@@ -415,6 +525,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  startGeneration += 1
   stopSetupProgress()
   if (timer) window.clearInterval(timer)
   timer = null
@@ -451,9 +562,32 @@ onBeforeUnmount(() => {
       </article>
 
       <article class="preparation-panel">
-        <div>
-          <p class="section-label">开始准备</p>
-          <h2>检查模型与声音</h2>
+        <div class="preparation-heading">
+          <div>
+            <p class="section-label">开始准备</p>
+            <h2>检查模型与声音</h2>
+          </div>
+          <label
+            class="hidden-viewport-control"
+            :class="{ active: hiddenViewportEnabled, unsupported: !hiddenViewportSupported, locked: hiddenViewportSupported && connectionState !== 'ready' }"
+          >
+            <span class="hidden-viewport-copy">
+              <strong>隐藏视口V1</strong>
+              <small v-if="hiddenViewportSupported">
+                {{ hiddenViewportEnabled ? '独立小窗已开启；仅分享指定标签页或窗口时生效。' : '面试开始且实时连接就绪后可开启；分享整个屏幕时仍会显示。' }}
+              </small>
+              <small v-else>当前浏览器不支持，请使用最新版 Chrome 或 Edge。</small>
+            </span>
+            <span class="hidden-viewport-switch" aria-hidden="true"><i></i></span>
+            <input
+              type="checkbox"
+              :checked="hiddenViewportEnabled"
+              :disabled="hiddenViewportPending || !hiddenViewportSupported || connectionState !== 'ready'"
+              role="switch"
+              aria-label="隐藏视口V1"
+              @change="toggleHiddenViewport"
+            />
+          </label>
         </div>
 
         <div v-if="setupLoading" class="setup-loading" role="status" aria-live="polite">
@@ -520,6 +654,24 @@ onBeforeUnmount(() => {
       </article>
     </section>
 
+    <section v-else-if="hiddenViewportEnabled" class="hidden-viewport-stage">
+      <article class="hidden-viewport-card">
+        <span class="hidden-viewport-emblem" aria-hidden="true"><i></i></span>
+        <p class="section-label">浏览器隔离模式</p>
+        <h1>隐藏视口V1 已开启</h1>
+        <p>回答与问题已移至独立小窗，当前页面不再展示面试内容。</p>
+        <div class="hidden-viewport-warning">
+          仅分享指定标签页或窗口时生效；分享整个屏幕时，小窗仍会出现在共享画面中。
+        </div>
+        <div class="hidden-viewport-actions">
+          <button type="button" @click="toggleHiddenViewport">关闭隐藏视口V1</button>
+          <button v-if="phase === 'paused'" type="button" :disabled="!canStart" @click="startInterview">{{ actionLabel }}</button>
+          <button v-else-if="phase !== 'ended'" type="button" @click="pauseCapture('已暂停采集，结果仍保留在回答小窗。')">暂停采集</button>
+          <button v-if="phase !== 'ended'" class="danger" type="button" @click="endInterview()">结束面试</button>
+        </div>
+      </article>
+    </section>
+
     <section v-else class="live-layout">
       <aside class="live-rail">
         <div class="live-status" :class="phase">
@@ -567,6 +719,7 @@ onBeforeUnmount(() => {
             <button type="button" :disabled="phase !== 'active'" @click="answerNow">立即回答</button>
             <button type="button" :disabled="!state.currentQuestion || phase !== 'active'" @click="regenerateAnswer">重新生成</button>
             <button type="button" :disabled="!canOpenPip" @click="openPip">打开置顶小窗</button>
+            <button type="button" :disabled="!canOpenPip" @click="toggleHiddenViewport">开启隐藏视口V1</button>
           </div>
         </article>
 
@@ -675,6 +828,7 @@ onBeforeUnmount(() => {
     <Teleport v-if="pipRoot" :to="pipRoot">
       <main class="answer-pip-card">
         <header><span class="status-dot"></span><strong>面试大师</strong><small>{{ phaseLabel }}</small></header>
+        <section v-if="phase === 'preparing' || phase === 'starting'"><span>隐藏视口V1</span><h1>等待开始面试</h1></section>
         <section><span>当前问题</span><h1>{{ state.currentQuestion || '等待问题' }}</h1></section>
         <section class="pip-answer"><span>回答建议</span><p>{{ state.answerText || '正在聆听面试官…' }}</p></section>
       </main>
@@ -701,6 +855,8 @@ onBeforeUnmount(() => {
 .capture-boundary { margin-top: 64px; padding-top: 24px; max-width: 610px; display: grid; gap: 8px; border-top: 1px solid rgba(255,255,255,.18); }.capture-boundary span { color: #92a9cb; font-size: 14px; }
 .pulse-orbit { position: absolute; right: -110px; bottom: -120px; width: 440px; height: 440px; border: 1px solid rgba(59, 147, 255, .2); border-radius: 50%; }.pulse-orbit span { position: absolute; inset: 60px; border: 1px solid rgba(59,147,255,.15); border-radius: inherit; }.pulse-orbit span:nth-child(2) { inset: 130px; }.pulse-orbit span:nth-child(3) { inset: 205px; background: #1671e8; box-shadow: 0 0 80px rgba(22,113,232,.8); }
 .preparation-panel { padding: clamp(52px, 7vw, 110px); display: flex; flex-direction: column; justify-content: center; gap: 20px; background: #f7faff; }.preparation-panel h2 { margin: 6px 0 12px; font-size: 36px; letter-spacing: -.03em; }
+.preparation-heading { display: grid; grid-template-columns: minmax(220px, 1fr) minmax(280px, 330px); align-items: start; gap: 22px; }
+.hidden-viewport-control { position: relative; min-height: 78px; padding: 14px 14px 14px 16px; display: flex; align-items: center; justify-content: space-between; gap: 14px; border: 1px solid #cbd9eb; border-radius: 15px; background: rgba(255,255,255,.86); box-shadow: 0 8px 22px rgba(34,67,107,.06); cursor: pointer; transition: border-color .18s ease, background .18s ease, box-shadow .18s ease; }.hidden-viewport-control:hover { border-color: #90b8ea; }.hidden-viewport-control:focus-within { border-color: #176fe5; box-shadow: 0 0 0 4px rgba(23,111,229,.12); }.hidden-viewport-control.active { border-color: #67b49a; background: #edf9f4; box-shadow: 0 10px 24px rgba(31,132,96,.1); }.hidden-viewport-control.unsupported, .hidden-viewport-control.locked { cursor: not-allowed; opacity: .68; }.hidden-viewport-copy { min-width: 0; display: grid; gap: 5px; }.hidden-viewport-copy strong { color: #17365f; font-size: 14px; }.hidden-viewport-copy small { color: #6c7f98; font-size: 11px; line-height: 1.45; }.hidden-viewport-control.active .hidden-viewport-copy strong { color: #176449; }.hidden-viewport-switch { position: relative; width: 46px; height: 26px; flex: 0 0 auto; border-radius: 999px; background: #c6d2e2; box-shadow: inset 0 1px 2px rgba(24,50,84,.16); transition: background .18s ease; }.hidden-viewport-switch i { position: absolute; top: 4px; left: 4px; width: 18px; height: 18px; border-radius: 50%; background: white; box-shadow: 0 2px 6px rgba(20,44,75,.25); transition: transform .18s ease; }.hidden-viewport-control.active .hidden-viewport-switch { background: #29966e; }.hidden-viewport-control.active .hidden-viewport-switch i { transform: translateX(20px); }.hidden-viewport-control input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }.hidden-viewport-control input:disabled { cursor: not-allowed; }
 .setup-loading { padding: 20px; display: grid; gap: 12px; border: 1px solid #d7e2f1; border-radius: 14px; background: rgba(255,255,255,.82); box-shadow: 0 9px 24px rgba(34,67,107,.05); }
 .setup-loading-copy { display: flex; align-items: center; justify-content: space-between; gap: 20px; color: #53657e; font-size: 14px; }.setup-loading-copy strong { color: #176fe5; font: 800 13px ui-monospace, Consolas, monospace; }
 .setup-progress-track { position: relative; height: 9px; overflow: hidden; border-radius: 999px; background: #dfe8f4; box-shadow: inset 0 1px 2px rgba(20,51,91,.08); }.setup-progress-track > span { position: absolute; inset: 0 auto 0 0; border-radius: inherit; background: linear-gradient(90deg, #176fe5, #3f96ff); box-shadow: 0 0 16px rgba(23,111,229,.35); transition: width .24s ease-out; }.setup-progress-track > span::after { content: ''; position: absolute; inset: 0; background: linear-gradient(105deg, transparent 30%, rgba(255,255,255,.55) 50%, transparent 70%); transform: translateX(-100%); animation: progress-glint 1.35s ease-in-out infinite; }
@@ -709,6 +865,7 @@ onBeforeUnmount(() => {
 .toggle-row, .consent-row { display: flex; align-items: center; justify-content: space-between; gap: 18px; }.toggle-row { padding: 18px 20px; border: 1px solid #d7e2f1; border-radius: 14px; background: white; }.toggle-row span { display: grid; gap: 4px; }.toggle-row small { color: #7c8da4; }.toggle-row input { width: 44px; height: 24px; accent-color: #1671e8; }.consent-row { justify-content: flex-start; color: #53657e; font-size: 13px; }.consent-row input { width: 18px; height: 18px; accent-color: #1671e8; }
 .browser-check { padding: 16px 18px; display: flex; gap: 12px; border-radius: 14px; background: #fff2f1; color: #9c3838; }.browser-check.ok { background: #eaf8f3; color: #176449; }.browser-check > div { display: grid; gap: 4px; }.browser-check small { line-height: 1.5; }.status-dot { width: 9px; height: 9px; margin-top: 5px; flex: 0 0 auto; border-radius: 50%; background: currentColor; box-shadow: 0 0 0 5px currentColor; opacity: .6; }
 .primary-start { min-height: 58px; border: 0; border-radius: 14px; background: #176fe5; color: white; font-size: 17px; font-weight: 800; cursor: pointer; box-shadow: 0 14px 28px rgba(23,111,229,.22); }.primary-start:disabled { background: #aabbd2; box-shadow: none; cursor: not-allowed; }.inline-error { margin: 0; padding: 12px 14px; border-left: 3px solid #d34a4a; background: #fff1f1; color: #a63838; }
+.hidden-viewport-stage { min-height: calc(100vh - 68px); padding: 40px; display: grid; place-items: center; background: radial-gradient(circle at 50% 38%, rgba(38,139,105,.12), transparent 28%), #edf3fb; }.hidden-viewport-card { width: min(620px, 100%); padding: 42px; display: grid; justify-items: center; border: 1px solid #cbdbea; border-radius: 24px; background: rgba(255,255,255,.92); box-shadow: 0 28px 80px rgba(20,52,91,.12); text-align: center; }.hidden-viewport-emblem { position: relative; width: 72px; height: 52px; margin-bottom: 20px; border: 3px solid #29966e; border-radius: 15px; background: #e7f7f1; }.hidden-viewport-emblem::before { content: ''; position: absolute; left: 50%; bottom: -12px; width: 24px; height: 3px; border-radius: 3px; background: #29966e; transform: translateX(-50%); }.hidden-viewport-emblem::after { content: ''; position: absolute; left: 50%; bottom: -7px; width: 3px; height: 8px; background: #29966e; transform: translateX(-50%); }.hidden-viewport-emblem i { position: absolute; inset: 11px 16px; border-radius: 50%; border: 3px solid #29966e; }.hidden-viewport-emblem i::after { content: ''; position: absolute; left: -5px; top: 50%; width: 40px; height: 3px; border-radius: 3px; background: #29966e; transform: rotate(-32deg); }.hidden-viewport-card .section-label { margin: 0; color: #278060; }.hidden-viewport-card h1 { margin: 10px 0 12px; font-size: clamp(30px, 4vw, 46px); letter-spacing: -.045em; }.hidden-viewport-card > p:not(.section-label) { margin: 0; color: #586d87; font-size: 16px; line-height: 1.7; }.hidden-viewport-warning { margin-top: 24px; padding: 13px 16px; border-left: 3px solid #e3a02c; border-radius: 3px 11px 11px 3px; background: #fff7e8; color: #825a18; font-size: 13px; line-height: 1.55; text-align: left; }.hidden-viewport-actions { margin-top: 28px; display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; }.hidden-viewport-actions button { min-height: 42px; padding: 0 17px; border: 1px solid #ccd9e9; border-radius: 10px; background: white; color: #29405f; font: inherit; font-size: 13px; font-weight: 800; cursor: pointer; }.hidden-viewport-actions button:first-child { border-color: #176fe5; background: #176fe5; color: white; }.hidden-viewport-actions button.danger { border-color: #efc3c3; color: #a23c3c; }.hidden-viewport-actions button:disabled { opacity: .5; cursor: not-allowed; }
 .live-layout { height: calc(100vh - 68px); min-height: 0; overflow: hidden; display: grid; grid-template-columns: 330px 1fr; }.live-rail { height: 100%; min-height: 0; overflow: hidden; padding: 22px; display: flex; flex-direction: column; gap: 22px; background: #0b1d3d; color: white; }
 .live-status { padding: 16px; display: flex; align-items: center; gap: 14px; border: 1px solid rgba(255,255,255,.13); border-radius: 16px; background: rgba(255,255,255,.05); }.live-status > div:last-child { display: grid; gap: 3px; }.live-status small { color: #8fa7ca; }.question-pulse { height: 34px; display: flex; align-items: center; gap: 3px; }.question-pulse span { width: 3px; height: 10px; border-radius: 3px; background: #52a4ff; }.live-status.active .question-pulse span { animation: wave 1.05s ease-in-out infinite; }.question-pulse span:nth-child(2) { height: 25px; animation-delay: -.2s; }.question-pulse span:nth-child(3) { height: 17px; animation-delay: -.4s; }.question-pulse span:nth-child(4) { height: 30px; animation-delay: -.6s; }
 .rail-section { flex: 1; min-height: 0; display: flex; flex-direction: column; }.rail-section > header, .history-section > header { display: flex; align-items: center; justify-content: space-between; }.rail-section h2, .history-section h2 { margin: 0; font-size: 14px; }.transcript-tools { display: flex; align-items: center; gap: 8px; }.rail-section header span { color: #6f8ab2; font: 700 12px ui-monospace, monospace; }.transcript-tools button { padding: 4px 8px; border: 1px solid rgba(110,174,254,.28); border-radius: 999px; background: rgba(28,123,242,.15); color: #8cc1ff; font-size: 11px; cursor: pointer; }.transcript-list { flex: 1; min-height: 0; margin-top: 12px; padding-right: 8px; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; scrollbar-width: thin; scrollbar-color: #47698f rgba(255,255,255,.06); display: flex; flex-direction: column; gap: 10px; }.transcript-list::-webkit-scrollbar { width: 7px; }.transcript-list::-webkit-scrollbar-track { border-radius: 999px; background: rgba(255,255,255,.05); }.transcript-list::-webkit-scrollbar-thumb { border-radius: 999px; background: #47698f; }.transcript-list article { padding: 12px; border-radius: 12px; background: rgba(255,255,255,.06); }.transcript-list article.candidate { background: rgba(28,123,242,.14); }.transcript-list article.partial { opacity: .66; }.transcript-list span { color: #6eaefe; font-size: 11px; font-weight: 800; }.transcript-list p { margin: 5px 0 0; color: #d5e1f3; font-size: 13px; line-height: 1.55; }
@@ -728,5 +885,5 @@ onBeforeUnmount(() => {
 @keyframes wave { 0%,100% { transform: scaleY(.55); } 50% { transform: scaleY(1); } } @keyframes breathe { 50% { opacity: .25; transform: scale(1.45); } } @keyframes progress-glint { 65%,100% { transform: translateX(100%); } }
 @media (prefers-reduced-motion: reduce) { .brand-wave i, .question-pulse span, .typing-dot, .setup-progress-track > span::after { animation: none; } }
 @media (max-width: 1050px) { .preparation-layout { grid-template-columns: 1fr; }.preparation-thesis { min-height: 48vh; }.live-layout { grid-template-columns: 280px 1fr; }.answer-grid { grid-template-columns: 1fr; } }
-@media (max-width: 680px) { .archive-backdrop { align-items: end; padding: 0; }.archive-dialog { max-height: 92dvh; border-radius: 22px 22px 0 0; }.archive-fields { grid-template-columns: 1fr; }.archive-date-field { grid-column: auto; max-width: none; }.archive-form footer { flex-direction: column-reverse; }.archive-form footer button { width: 100%; min-height: 46px; } }
+@media (max-width: 680px) { .preparation-heading { grid-template-columns: 1fr; }.hidden-viewport-stage { padding: 20px; }.hidden-viewport-card { padding: 30px 20px; }.hidden-viewport-actions { width: 100%; flex-direction: column; }.hidden-viewport-actions button { width: 100%; }.archive-backdrop { align-items: end; padding: 0; }.archive-dialog { max-height: 92dvh; border-radius: 22px 22px 0 0; }.archive-fields { grid-template-columns: 1fr; }.archive-date-field { grid-column: auto; max-width: none; }.archive-form footer { flex-direction: column-reverse; }.archive-form footer button { width: 100%; min-height: 46px; } }
 </style>

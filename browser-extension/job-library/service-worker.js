@@ -33,13 +33,24 @@ import {
   readXiaohongshuSearchPage,
   restoreXiaohongshuSearchPage
 } from './xiaohongshu-page.js'
+import {
+  ASSESSMENT_CAPTURE_CAPABILITY,
+  ASSESSMENT_ADAPTER_REGISTRY,
+  extractAssessmentFromPage,
+  normalizeAssessmentCapture
+} from './assessment-capture.js'
+import {
+  runExtensionTask,
+  settleExtensionCalls
+} from './extension-lifecycle.js'
 
 const WEB_CHANNEL = 'find-job-job-library-web-v1'
 const GREETING_CAPABILITIES = Object.freeze([
   'retry_greeting_message',
   'greeting_submission_state',
   'greeting_fire_and_continue',
-  'xiaohongshu_keyword_collection'
+  'xiaohongshu_keyword_collection',
+  ASSESSMENT_CAPTURE_CAPABILITY
 ])
 const ALLOWED_APP_HOSTS = new Set(['127.0.0.1', 'localhost', 'xingxingtech.cn', 'www.xingxingtech.cn'])
 const APP_PAGE_PATTERNS = [
@@ -58,6 +69,10 @@ let lastRequestAt = 0
 let greetingTabId = null
 let lastXiaohongshuDetailAt = 0
 let xiaohongshuSearchContext = null
+const ASSESSMENT_LAUNCH_TTL_MS = 5 * 60 * 1000
+const ASSESSMENT_BINDING_TTL_MS = 2 * 60 * 60 * 1000
+const ASSESSMENT_MAX_SCREENSHOT_DATA_URL = 7_000_000
+let assessmentAssistantWindowId = null
 
 function isAllowedSender(sender) {
   try {
@@ -885,6 +900,189 @@ async function handleBossOperation(action, payload) {
   }
 }
 
+function randomAssessmentToken() {
+  const bytes = new Uint8Array(16)
+  crypto.getRandomValues(bytes)
+  return [...bytes].map((value) => value.toString(16).padStart(2, '0')).join('')
+}
+
+function assessmentStorageKey(kind, token) {
+  return `online-assessment:${kind}:${token}`
+}
+
+async function captureAssessmentTab(tabId, windowId) {
+  const tab = await chrome.tabs.get(tabId)
+  if (!tab?.id || !/^https?:/i.test(tab.url ?? '')) {
+    throw Object.assign(new Error('当前页面不支持题面识别，请打开在线笔试题目页后重试。'), { code: 'unsupported_source_page' })
+  }
+  const activeTabs = await chrome.tabs.query({ active: true, windowId })
+  if (activeTabs[0]?.id !== tabId) {
+    throw Object.assign(new Error('请先切回原题目标签页，再点击重新识别。'), { code: 'source_tab_not_visible' })
+  }
+  let executions
+  try {
+    executions = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: extractAssessmentFromPage,
+      args: [ASSESSMENT_ADAPTER_REGISTRY]
+    })
+  } catch (error) {
+    const detail = error instanceof Error && error.message ? `：${error.message}` : ''
+    throw Object.assign(new Error(`题面读取脚本执行失败${detail}`), { code: 'assessment_capture_script_failed' })
+  }
+  const execution = executions?.[0]
+  if (execution?.error) {
+    const detail = typeof execution.error === 'string'
+      ? execution.error
+      : execution.error?.message
+    throw Object.assign(
+      new Error(`题面读取脚本执行失败${detail ? `：${detail}` : ''}`),
+      { code: 'assessment_capture_script_failed' }
+    )
+  }
+  const result = execution?.result
+  if (!result || typeof result !== 'object') {
+    throw Object.assign(new Error('当前页面没有返回可识别的题面内容。'), { code: 'empty_assessment_capture' })
+  }
+  const capture = normalizeAssessmentCapture(result)
+  let screenshotDataUrl = ''
+  try {
+    const screenshot = await chrome.tabs.captureVisibleTab(windowId, { format: 'png' })
+    if (typeof screenshot === 'string' && screenshot.length <= ASSESSMENT_MAX_SCREENSHOT_DATA_URL) {
+      screenshotDataUrl = screenshot
+    }
+  } catch {
+    screenshotDataUrl = ''
+  }
+  return {
+    ...capture,
+    screenshotDataUrl,
+    capturedAt: new Date().toISOString()
+  }
+}
+
+async function resolveAssessmentAppOrigin() {
+  const tabs = await chrome.tabs.query({ url: APP_PAGE_PATTERNS })
+  const candidate = tabs
+    .filter((tab) => /^https?:/i.test(tab.url ?? ''))
+    .sort((left, right) => {
+      const activeDifference = Number(Boolean(right.active)) - Number(Boolean(left.active))
+      if (activeDifference) return activeDifference
+      return Number(right.lastAccessed ?? 0) - Number(left.lastAccessed ?? 0)
+    })[0]
+  if (candidate?.url) return new URL(candidate.url).origin
+  return 'https://xingxingtech.cn'
+}
+
+async function storeAssessmentLaunch(tab, capture) {
+  const launchId = randomAssessmentToken()
+  const now = Date.now()
+  await chrome.storage.session.set({
+    [assessmentStorageKey('launch', launchId)]: {
+      launchId,
+      sourceTabId: tab.id,
+      sourceWindowId: tab.windowId,
+      sourceOrigin: new URL(tab.url).origin,
+      createdAt: now,
+      expiresAt: now + ASSESSMENT_LAUNCH_TTL_MS,
+      capture
+    }
+  })
+  return launchId
+}
+
+async function openAssessmentAssistant(launchId) {
+  const origin = await resolveAssessmentAppOrigin()
+  const url = new URL('/career/online-assessment', origin)
+  url.searchParams.set('launch_id', launchId)
+  if (assessmentAssistantWindowId) {
+    try {
+      const existing = await chrome.windows.get(assessmentAssistantWindowId, { populate: true })
+      const tabId = existing.tabs?.[0]?.id
+      if (tabId) await chrome.tabs.update(tabId, { url: url.toString() })
+      await chrome.windows.update(assessmentAssistantWindowId, { focused: true })
+      return
+    } catch {
+      assessmentAssistantWindowId = null
+    }
+  }
+  const created = await chrome.windows.create({
+    url: url.toString(),
+    type: 'popup',
+    focused: true,
+    width: 1460,
+    height: 940
+  })
+  assessmentAssistantWindowId = created.id ?? null
+}
+
+async function claimAssessmentLaunch(launchId) {
+  const normalizedId = String(launchId ?? '').trim()
+  if (!/^[0-9a-f]{32}$/.test(normalizedId)) {
+    return { ok: false, error: { code: 'invalid_launch_id', message: '题面领取标识无效，请回到题目页重新点击扩展。' } }
+  }
+  const key = assessmentStorageKey('launch', normalizedId)
+  const stored = (await chrome.storage.session.get(key))[key]
+  await chrome.storage.session.remove(key)
+  if (!stored || Number(stored.expiresAt) <= Date.now()) {
+    return { ok: false, error: { code: 'assessment_launch_expired', message: '本次题面识别已过期，请回到题目页重新点击扩展。' } }
+  }
+  const captureToken = randomAssessmentToken()
+  await chrome.storage.session.set({
+    [assessmentStorageKey('binding', captureToken)]: {
+      sourceTabId: stored.sourceTabId,
+      sourceWindowId: stored.sourceWindowId,
+      sourceOrigin: stored.sourceOrigin,
+      expiresAt: Date.now() + ASSESSMENT_BINDING_TTL_MS
+    }
+  })
+  return {
+    ok: true,
+    data: {
+      captureToken,
+      sourceTabId: stored.sourceTabId,
+      capture: stored.capture
+    }
+  }
+}
+
+async function recaptureAssessment(captureToken) {
+  const normalizedToken = String(captureToken ?? '').trim()
+  const key = assessmentStorageKey('binding', normalizedToken)
+  const binding = (await chrome.storage.session.get(key))[key]
+  if (!binding || Number(binding.expiresAt) <= Date.now()) {
+    await chrome.storage.session.remove(key)
+    return { ok: false, error: { code: 'assessment_binding_expired', message: '题目标签页连接已过期，请重新点击扩展图标。' } }
+  }
+  try {
+    const currentTab = await chrome.tabs.get(binding.sourceTabId)
+    if (!currentTab?.url || new URL(currentTab.url).origin !== binding.sourceOrigin) {
+      throw Object.assign(
+        new Error('题目标签页已切换到其他网站，请在新题目页重新点击扩展图标。'),
+        { code: 'assessment_source_origin_changed' }
+      )
+    }
+    const capture = await captureAssessmentTab(binding.sourceTabId, binding.sourceWindowId)
+    return { ok: true, data: { capture, captureToken: normalizedToken, sourceTabId: binding.sourceTabId } }
+  } catch (error) {
+    return {
+      ok: false,
+      error: {
+        code: error?.code || 'assessment_capture_failed',
+        message: error instanceof Error ? error.message : '题面重新识别失败。'
+      }
+    }
+  }
+}
+
+async function handleAssessmentOperation(action, payload) {
+  if (action === 'claim_assessment_launch') return claimAssessmentLaunch(payload?.launchId)
+  if (action === 'refresh_assessment_problem' || action === 'append_assessment_problem') {
+    return recaptureAssessment(payload?.captureToken)
+  }
+  return { ok: false, error: { code: 'unsupported_assessment_action', message: '不支持的题面操作。' } }
+}
+
 async function handleMessage(message, sender) {
   if (!isAllowedSender(sender) || message?.channel !== WEB_CHANNEL) {
     return { ok: false, error: { code: 'forbidden_sender', message: '当前页面不能调用职位库助手。' } }
@@ -898,6 +1096,9 @@ async function handleMessage(message, sender) {
         capabilities: GREETING_CAPABILITIES
       }
     }
+  }
+  if (['claim_assessment_launch', 'refresh_assessment_problem', 'append_assessment_problem'].includes(message.action)) {
+    return handleAssessmentOperation(message.action, message.payload ?? {})
   }
   if (['preflight_greeting', 'send_greeting', 'retry_greeting_message'].includes(message.action)) {
     return handleGreetingOperation(message.action, message.payload ?? {})
@@ -915,17 +1116,60 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   requestQueue = requestQueue
     .catch(() => undefined)
     .then(() => handleMessage(message, sender))
-    .then(sendResponse)
-    .catch((error) => sendResponse({
-      ok: false,
-      error: {
-        code: 'extension_error',
-        message: error instanceof Error ? error.message : '职位库助手运行失败。'
+    .then((response) => {
+      try {
+        sendResponse(response)
+      } catch {
+        // 扩展重载会关闭原消息端口；响应已无接收方时直接结束旧任务。
       }
-    }))
+    })
+    .catch((error) => {
+      try {
+        sendResponse({
+          ok: false,
+          error: {
+            code: 'extension_error',
+            message: error instanceof Error ? error.message : '职位库助手运行失败。'
+          }
+        })
+      } catch {
+        // 与上方相同，避免失效消息端口产生第二次未处理异常。
+      }
+    })
   return true
 })
 
 chrome.runtime.onInstalled.addListener(() => {
-  void injectBridgeIntoOpenAppTabs()
+  runExtensionTask(injectBridgeIntoOpenAppTabs)
+})
+
+chrome.runtime.onStartup.addListener(() => {
+  runExtensionTask(injectBridgeIntoOpenAppTabs)
+})
+
+chrome.windows.onRemoved.addListener((windowId) => {
+  if (windowId === assessmentAssistantWindowId) assessmentAssistantWindowId = null
+})
+
+chrome.action.onClicked.addListener((tab) => {
+  if (!tab?.id || !Number.isInteger(tab.windowId)) return
+  runExtensionTask(
+    async () => {
+      const capture = await captureAssessmentTab(tab.id, tab.windowId)
+      const launchId = await storeAssessmentLaunch(tab, capture)
+      await openAssessmentAssistant(launchId)
+      await settleExtensionCalls([
+        () => chrome.action.setBadgeText({ text: '', tabId: tab.id }),
+        () => chrome.action.setTitle({ title: '识别当前线上笔试题目', tabId: tab.id })
+      ])
+    },
+    async (error) => {
+      const message = error instanceof Error ? error.message : '题面识别失败，请重试。'
+      await settleExtensionCalls([
+        () => chrome.action.setBadgeBackgroundColor({ color: '#c2413b', tabId: tab.id }),
+        () => chrome.action.setBadgeText({ text: '!', tabId: tab.id }),
+        () => chrome.action.setTitle({ title: `题面识别失败：${message}`, tabId: tab.id })
+      ])
+    }
+  )
 })

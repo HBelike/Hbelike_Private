@@ -177,7 +177,7 @@ def _generate(
     )
 
 
-@pytest.mark.parametrize("project_count", [1, 3, 6])
+@pytest.mark.parametrize("project_count", [1, 3, 6, 12])
 def test_generation_calls_each_project_then_one_global_synthesis(project_count: int) -> None:
     rankings = _build_rankings(project_count)
     provider = StubProvider(
@@ -201,6 +201,7 @@ def test_generation_calls_each_project_then_one_global_synthesis(project_count: 
         assert rankings[index].full_name in prompt
         assert "visual_spec" in prompt
         assert "summary_card" in prompt
+        assert "description 不超过 150 字" in prompt
         assert "证据不足时选择 summary_card" in prompt
         assert "禁止输出 16:9" in prompt
         assert "weekly_ranking→weekly_ranking" in prompt
@@ -210,8 +211,12 @@ def test_generation_calls_each_project_then_one_global_synthesis(project_count: 
         assert "README.md→repository_file" in prompt
         assert "每个 node 都必须包含有效 layer" in prompt
         assert "每层至少被一个 node 使用" in prompt
+        assert "layers 数量按证据中的真实分层动态确定" in prompt
+        assert "layers 为 1 到 4 项" not in prompt
+        assert "steps 数量按证据中的真实流程动态确定" in prompt
+        assert "steps 为 3 到 5 项" not in prompt
         assert all(
-            other.full_name not in prompt
+            f'"full_name": "{other.full_name}"' not in prompt
             for other_index, other in enumerate(rankings)
             if other_index != index
         )

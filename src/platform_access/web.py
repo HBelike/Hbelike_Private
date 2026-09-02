@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import os
+from collections.abc import AsyncIterator
 from datetime import datetime
 from pathlib import Path
 from threading import Lock
 from typing import Annotated, Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, StrictBool
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -541,6 +545,58 @@ def list_manual_pipeline_runs(
     return {"items": get_manual_pipeline_runner(request).list_runs(user)}
 
 
+@router.get("/api/admin/pipeline-runs/{run_id}/logs")
+def list_manual_pipeline_logs(
+    run_id: UUID,
+    request: Request,
+    user: Annotated[PlatformUser, Depends(require_admin)],
+    after_id: int = 0,
+    limit: int = 500,
+) -> dict[str, object]:
+    """返回一次手动工作流已经持久化的有序日志事件。"""
+
+    if after_id < 0:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="after_id 不能为负数")
+    if limit <= 0:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="limit 必须大于 0")
+    try:
+        return get_platform_access_service(request).list_manual_pipeline_events(
+            user,
+            str(run_id),
+            after_id=after_id,
+            limit=min(limit, 1000),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+
+@router.get("/api/admin/pipeline-runs/{run_id}/logs/stream")
+async def stream_manual_pipeline_logs(
+    run_id: UUID,
+    request: Request,
+    user: Annotated[PlatformUser, Depends(require_admin)],
+    after_id: int = 0,
+) -> StreamingResponse:
+    """按事件游标持续输出 SSE，运行进入终态后自然关闭。"""
+
+    cursor = _pipeline_stream_cursor(request, after_id)
+    service = get_platform_access_service(request)
+    try:
+        item = await asyncio.to_thread(service.get_manual_pipeline_request, user, str(run_id))
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    if item is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="未找到流水线执行请求")
+    return StreamingResponse(
+        _pipeline_event_stream(service, user, run_id, after_id=cursor),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @router.get("/api/observability/status")
 def observability_status(
     user: Annotated[PlatformUser, Depends(require_admin)],
@@ -555,6 +611,77 @@ def observability_status(
         "privacy_mode": "metadata_only",
         "role": user.role.value,
     }
+
+
+def _pipeline_stream_cursor(request: Request, after_id: int) -> int:
+    """合并首次查询游标与 EventSource 自动重连时发送的事件 ID。"""
+
+    if after_id < 0:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="after_id 不能为负数")
+    raw_last_event_id = request.headers.get("Last-Event-ID", "").strip()
+    if not raw_last_event_id:
+        return after_id
+    try:
+        last_event_id = int(raw_last_event_id)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Last-Event-ID 必须是整数",
+        ) from exc
+    if last_event_id < 0:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Last-Event-ID 不能为负数",
+        )
+    return max(after_id, last_event_id)
+
+
+async def _pipeline_event_stream(
+    service: Any,
+    user: PlatformUser,
+    run_id: UUID,
+    *,
+    after_id: int,
+    poll_seconds: float = 0.3,
+) -> AsyncIterator[str]:
+    """从持久事件游标增量输出，避免断线造成日志缺口。"""
+
+    cursor = after_id
+    terminal_statuses = {"succeeded", "failed", "cancelled"}
+    while True:
+        payload = await asyncio.to_thread(
+            service.list_manual_pipeline_events,
+            user,
+            str(run_id),
+            after_id=cursor,
+            limit=500,
+        )
+        events = payload.get("events", [])
+        if not isinstance(events, list):
+            events = []
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            event_id = int(event.get("id", cursor))
+            cursor = max(cursor, event_id)
+            yield _pipeline_sse_event(event)
+
+        item = payload.get("item", {})
+        run_status = item.get("status") if isinstance(item, dict) else None
+        if run_status in terminal_statuses and not events:
+            return
+        if not events:
+            yield ": heartbeat\n\n"
+        await asyncio.sleep(max(0, poll_seconds))
+
+
+def _pipeline_sse_event(event: dict[str, object]) -> str:
+    """序列化一条带稳定游标的工作流 SSE 事件。"""
+
+    event_id = int(event["id"])
+    event_type = str(event.get("event_type") or "log")
+    data = json.dumps(event, ensure_ascii=False)
+    return f"id: {event_id}\nevent: {event_type}\ndata: {data}\n\n"
 
 
 def _load_github_snapshot_status(project_root: Path) -> dict[str, Any] | None:

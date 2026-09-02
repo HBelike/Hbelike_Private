@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -10,6 +11,7 @@ from typing import Any
 
 from src.app.application import Application
 from src.platform_access.contracts import PlatformUser
+from src.platform_access.pipeline_logs import PipelineExecutionLogHandler
 from src.platform_access.service import PlatformAccessService
 from src.tasks.task_result import TaskResult
 
@@ -84,15 +86,38 @@ class ManualPipelineRunner:
     def _run(self, user: PlatformUser, request_id: str, runtime_config: object) -> None:
         """在线程内执行真实流水线，并把每个 Task 的结果收敛为审计摘要。"""
 
+        handler = PipelineExecutionLogHandler(
+            append_event=lambda **event: self._access_service.append_manual_pipeline_event(
+                user,
+                request_id,
+                **event,
+            ),
+        )
         try:
             if not isinstance(runtime_config, dict):
                 raise ValueError("运行配置快照无效")
 
+            self._append_event_safely(
+                user,
+                request_id,
+                event_type="run_started",
+                level="INFO",
+                message="手动工作流开始执行",
+            )
+
             results = Application(
                 self._project_root,
                 runtime_config=runtime_config,
+                extra_log_handlers=(handler,),
             ).run_manual_pipeline()
             payload = {"tasks": [_serialize_task_result(item) for item in results]}
+            self._append_event_safely(
+                user,
+                request_id,
+                event_type="run_succeeded",
+                level="INFO",
+                message=f"手动工作流执行完成，共完成 {len(results)} 个任务",
+            )
             self._access_service.update_manual_pipeline_request(
                 user,
                 request_id,
@@ -100,6 +125,13 @@ class ManualPipelineRunner:
                 metadata=payload,
             )
         except Exception as exc:  # 后台任务必须把故障回写，而不是静默丢失。
+            self._append_event_safely(
+                user,
+                request_id,
+                event_type="run_failed",
+                level="ERROR",
+                message=f"手动工作流执行失败：{_safe_error_message(exc)}",
+            )
             self._access_service.update_manual_pipeline_request(
                 user,
                 request_id,
@@ -107,8 +139,27 @@ class ManualPipelineRunner:
                 error_message=_safe_error_message(exc),
             )
         finally:
+            logging.getLogger().removeHandler(handler)
+            handler.close()
             with self._lock:
                 self._active_request_ids.discard(request_id)
+
+    def _append_event_safely(
+        self,
+        user: PlatformUser,
+        request_id: str,
+        **event: object,
+    ) -> None:
+        """观测事件写入失败时保留真实流水线执行能力。"""
+
+        try:
+            self._access_service.append_manual_pipeline_event(
+                user,
+                request_id,
+                **event,
+            )
+        except Exception:
+            logging.getLogger(__name__).exception("工作流实时日志事件写入失败：request_id=%s", request_id)
 
     def _recover_orphaned_queued_runs(self, user: PlatformUser) -> None:
         """清理已超过短暂接管窗口的 queued 记录。

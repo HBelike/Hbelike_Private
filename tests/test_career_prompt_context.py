@@ -22,3 +22,11 @@ def test_current_input_and_corrections_are_pinned() -> None:
     assert 'PromptComponent.pinned(\n                "current_input"' in source
     assert "limit=6" not in source
     assert "1_600" not in source
+
+
+def test_prompt_context_recalculates_runtime_output_around_compaction() -> None:
+    source = Path("src/career_assistant/prompt_context.py").read_text(encoding="utf-8")
+    assert "system_max_output_tokens" in source
+    assert source.count("runtime_policy(") >= 2
+    assert "MINIMUM_VIABLE_OUTPUT_TOKENS" in source
+    assert "desired_output_tokens" in source

@@ -20,6 +20,7 @@ def test_deepseek_v4_uses_verified_one_mebi_token_context() -> None:
     policy = infer_model_context_policy("deepseek", "deepseek-v4-flash")
 
     assert policy.context_window_tokens == 1_048_576
+    assert policy.reserved_output_tokens == 384_000
     assert policy.context_window_source == "built_in"
 
 
@@ -94,14 +95,19 @@ def test_policy_rejects_target_not_below_trigger() -> None:
         policy.validate()
 
 
-def test_policy_rejects_output_larger_than_half_context() -> None:
-    policy = ModelContextPolicy(
-        context_window_tokens=8_192,
-        reserved_output_tokens=4_097,
-    )
+def test_policy_allows_model_output_above_half_context() -> None:
+    ModelContextPolicy(
+        context_window_tokens=128_000,
+        reserved_output_tokens=96_000,
+    ).validate()
 
-    with pytest.raises(ValueError, match="预留输出"):
-        policy.validate()
+
+def test_policy_rejects_model_output_above_context() -> None:
+    with pytest.raises(ValueError, match="模型最大输出"):
+        ModelContextPolicy(
+            context_window_tokens=128_000,
+            reserved_output_tokens=128_001,
+        ).validate()
 
 
 def test_record_reads_context_policy_with_backward_compatible_defaults() -> None:

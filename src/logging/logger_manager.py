@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 from src.config.config_manager import AppConfig
@@ -14,7 +15,7 @@ class LoggerManager:
         self.project_root = project_root
         self.config = config
 
-    def initialize(self) -> None:
+    def initialize(self, *, extra_handlers: Sequence[logging.Handler] = ()) -> None:
         """根据配置初始化 Python 标准 logging。"""
         log_dir = self.config.log_dir
         log_dir.mkdir(parents=True, exist_ok=True)
@@ -40,6 +41,8 @@ class LoggerManager:
         root_logger.setLevel(log_level)
         root_logger.addHandler(console_handler)
         root_logger.addHandler(file_handler)
+        for handler in extra_handlers:
+            root_logger.addHandler(handler)
 
         logging.getLogger(__name__).info("日志初始化完成：%s", log_path)
 

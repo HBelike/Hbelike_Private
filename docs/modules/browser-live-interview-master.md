@@ -11,7 +11,8 @@
 - 支持桌面版 Chrome、Edge 和 Firefox，继续拒绝 Safari、Opera 与移动端。采集使用标准 `getDisplayMedia({ audio: true, systemAudio: "include" })`，必须由用户手势触发；Chrome、Edge 可优先选择“整个屏幕”并开启系统音频，Firefox 使用其授权窗口实际提供的音频来源。页面取得流后还会验证 audio track，避免仅凭 UA 误报可用。网页不能绕过或代替授权步骤。
 - 不开发插件。入口与实时界面均属于现有 Vue SPA，路由为 `/career/interview-master`；采用固定命名浏览器窗口，重复点击优先聚焦同一窗口，弹窗被拦截时降级为普通新标签页。
 - `AudioWorklet` 将音轨转为 24 kHz 单声道 PCM16，并按 100 ms 合并发送，避免 10 ms 小帧造成过多 WebSocket 消息。
-- 浏览器通过同源 `wss://<domain>/api/career/live-interviews/{id}/stream` 连接 FastAPI。音频只从浏览器发往服务端，DashScope API Key 和回答模型凭据始终保留在服务端。
+- 浏览器通过同源 `wss://<domain>/api/career/live-interviews/{id}/stream` 连接 FastAPI；本地开发页对应使用同源 `ws://127.0.0.1:5173` 并由 Vite 代理到后端。音频只从浏览器发往服务端，DashScope API Key 和回答模型凭据始终保留在服务端。
+- 启动状态以服务端 `session.ready` 为唯一就绪信号。页面在该事件到达前保持“正在连接”，不启动计时、不允许打开置顶小窗或隐藏视口；首次握手在就绪前中断时保留已授权的音频流，创建新会话自动重试一次。WebSocket 回调绑定当前连接实例，启动流程还使用单调递增代次；旧连接迟到的关闭事件不能暂停新连接，暂停或结束后的异步结果也不能复活会话。
 - 实时转写使用阿里云百炼 `qwen-audio-3.0-asr-flash-streaming`；回答继续使用现有求职助手中配置的文本模型。ASR 负责语音转文字，普通 LLM 负责把识别出的面试官问题生成为中文答案。
 - 回答上下文以当前问题为主。只有识别到明显追问时，才使用内存中的最近两轮帮助补全指代；浏览器端应试者转写不写入数据库，原始 PCM、partial 转写和 Provider 原始错误正文均不持久化。
 - 页面支持当前转写、当前问题、30 秒要点、完整流式答案、本次会话历史、暂停、重新选择分享源、手动生成、重新生成、结束面试，以及 Chrome Document Picture-in-Picture（浏览器支持时）。
@@ -61,6 +62,8 @@
 - 2026-08-24 增加结束面试后的可选面经归档：结束动作立即清理媒体资源，弹窗显示后端完整题数与前 5 题，公司和职位手填；“本次不保存”直接关闭。归档服务聚合暂停/恢复产生的多个会话，只读取 `original_question`，同公司、职位、日期执行追加去重，保存后可直接打开对应面经。后端完整测试 `197 passed`，前端完整测试 `59 passed`，Vite 构建通过；本地真实 API/数据库验证了首次 1 题入库、第二次归并为 2 题、同一面经 ID、重复题不重复且正文不含答案。未部署生产。
 - 2026-08-24 已将系统音频优先、转写侧栏滚动和结束面试归档发布到生产代码提交 `ad9df71`。发布前后端 `197 passed`、前端 `59 passed`、Vite 构建和生产 Compose 展开通过；线上 API、Web、PostgreSQL 均健康，归档预览接口匿名请求返回 401，生产 JS 包包含“保存到面经库”和“本次不保存”。同时修复 `career-agent-worker` 过期租约 SQL 的 `EXISTS` 括号错误，发布后 Worker 为 `running`、重启次数为 0。
 - 2026-08-27 浏览器能力门禁扩展到桌面版 Chrome、Edge 和 Firefox：修正 Edge UA 被 `Edg/` 显式排除的问题，Firefox 通过浏览器族与标准 API 双重检测后进入授权流程；Safari、Opera 和移动端仍不放行。授权结果没有 audio track 时在创建付费 ASR 会话前终止，并提示更换带声音的共享来源或 Chrome/Edge。前端完整测试 `167 passed`、实时面试后端测试 `16 passed`、Vite 生产构建通过；仅本地验证，未部署生产。
+- 2026-08-31 修复隐藏视口加入后暴露的实时连接启动时序：此前页面创建 WebSocket 后立即进入“采集中”，连接尚未收到 `session.ready` 即可开启隐藏视口；初始连接关闭时又丢弃关闭码和原因，直接停止音频并要求重新授权。现改为等待真实就绪、首次失败保留声音来源自动重试一次、忽略旧连接迟到回调，并把关闭原因反馈给页面。此次修复只调整浏览器启动与隐藏视口门禁，不改变音频采集、ASR Provider 或回答链路。前端完整测试 `216 passed`、Vite 生产构建通过；使用修复后的 `LiveInterviewSocket` 经本地 Vite 代理完成真实 Qwen ASR 握手，状态依次为 `connecting → connected → ready`，会话正常结束为 `completed`。仅本地验证，未部署生产。
+- 2026-08-31 最终定位本地登录状态下的 `1006` 为 HTTP 与 WebSocket 身份解析不一致：本地关闭 `PLATFORM_AUTH_REQUIRED` 时，HTTP 中间件仍会把有效 Cookie 解析为真实用户，但 WebSocket 旧逻辑无条件退回默认 Actor，导致真实用户创建的会话按默认 Actor 查询不到，并在 `accept()` 前以 4404 拒绝；Chrome 只能显示 1006。现 WebSocket 与 HTTP 规则统一：有效 Cookie 始终使用真实用户，本地无 Cookie 或 Cookie 无效才回退默认 Actor，生产强制登录下无效会话继续返回 4401。上一轮基于错误判断加入的本地 18080 直连绕路已移除，恢复生产一致的同源连接。真实本地登录 Actor 经 5173 完成 Qwen 握手并收到 `session.ready`，数据库写入 `started_at`；实时面试相关后端测试 `51 passed`、后端完整测试 `559 passed`、前端完整测试 `216 passed`、Vite 生产构建通过。仅本地验证，未部署生产。
 
 ## 尚未伪报通过的边界
 

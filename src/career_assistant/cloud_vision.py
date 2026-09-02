@@ -91,7 +91,7 @@ class OpenAICompatibleCloudVisionClient:
         return trace_operation(
             run_name="career.vision.provider_call",
             run_type="llm",
-            execute=lambda: self._analyze_image(media_type, image_bytes),
+            execute=lambda: self._analyze_image(media_type, image_bytes, self._PROMPT),
             summarize=lambda result: {
                 "provider": result.provider_key,
                 "model": result.model_id,
@@ -108,7 +108,17 @@ class OpenAICompatibleCloudVisionClient:
             tags=("career", "vision", "provider", "privacy:metadata-only"),
         )
 
-    def _analyze_image(self, media_type: str, image_bytes: bytes) -> CloudVisionResult:
+    def analyze_image_with_prompt(
+        self,
+        media_type: str,
+        image_bytes: bytes,
+        prompt: str,
+    ) -> CloudVisionResult:
+        """使用业务限定提示理解图片，不改变连接、重试与隐私边界。"""
+
+        return self._analyze_image(media_type, image_bytes, prompt)
+
+    def _analyze_image(self, media_type: str, image_bytes: bytes, prompt: str) -> CloudVisionResult:
         """调用当前连接对应的视觉模型并返回可送入文本模型的结果。"""
 
         if not self._settings.enabled:
@@ -142,7 +152,7 @@ class OpenAICompatibleCloudVisionClient:
                         {
                             "role": "user",
                             "content": [
-                                {"type": "text", "text": self._PROMPT},
+                                {"type": "text", "text": prompt},
                                 {
                                     "type": "image_url",
                                     "image_url": {"url": image_data_url},
@@ -277,6 +287,32 @@ class CloudVisionRouter:
             },
             tags=("career", "vision", "router", "privacy:metadata-only"),
         )
+
+    def analyze_image_with_prompt(
+        self,
+        media_type: str,
+        image_bytes: bytes,
+        prompt: str,
+    ) -> CloudVisionResult:
+        """供笔试等业务使用专用提取提示，并沿用同一连接回退策略。"""
+
+        last_error: CloudVisionError | None = None
+        for index, client in enumerate(self._clients):
+            for attempt in range(1, self._settings.max_attempts + 1):
+                try:
+                    return client.analyze_image_with_prompt(media_type, image_bytes, prompt)
+                except CloudVisionError as exc:
+                    last_error = exc
+                    if not exc.retryable:
+                        raise
+                    if attempt < self._settings.max_attempts:
+                        time.sleep(self._settings.retry_backoff_seconds)
+                        continue
+                    if index >= len(self._clients) - 1:
+                        raise
+        if last_error is not None:
+            raise last_error
+        raise CloudVisionError("平台图片理解服务未配置可用连接")
 
     def _analyze_image(self, media_type: str, image_bytes: bytes) -> CloudVisionResult:
         """优先主模型；只有可恢复错误才转向管理员指定的下一条连接。"""

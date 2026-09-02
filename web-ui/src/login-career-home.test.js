@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs'
 const appVue = readFileSync(new URL('./App.vue', import.meta.url), 'utf8')
 const loginPageVue = readFileSync(new URL('./components/LoginPage.vue', import.meta.url), 'utf8')
 const stylesCss = readFileSync(new URL('./styles.css', import.meta.url), 'utf8')
+const themeCss = readFileSync(new URL('./theme.css', import.meta.url), 'utf8')
 
 test('未登录入口不展示主题切换，登录后的账户菜单继续保留主题设置', () => {
   const guestBranch = appVue.match(/<template v-if="!authReady \|\| !authUser">([\s\S]*?)<\/template>\s*<section v-else-if="!navigationReady"/)?.[1]
@@ -65,4 +66,27 @@ test('PC 登录页保持左右同屏并为缩放后的笔记本设置安全断�
   assert.match(stylesCss, /@media \(max-width:\s*1023\.98px\)[\s\S]*\.login-career-panel\s*\{\s*display:\s*none;/)
   assert.match(stylesCss, /@media \(min-width:\s*1024px\) and \(max-width:\s*1279px\)/)
   assert.match(stylesCss, /@media \(max-height:\s*720px\) and \(min-width:\s*1024px\)/)
+})
+
+test('蓝白主题覆盖登录验证码阶段和成功反馈，不沿用浅绿色状态样式', () => {
+  assert.match(
+    themeCss,
+    /html\[data-ui-theme="blue"\] \.verification-flow\s*\{[^}]*border-color:\s*var\(--ui-line\);[^}]*background:\s*var\(--ui-surface-soft\);/s
+  )
+  assert.match(
+    themeCss,
+    /html\[data-ui-theme="blue"\] \.verification-flow-mark\s*\{[^}]*background:\s*var\(--ui-accent\);/s
+  )
+  assert.match(
+    themeCss,
+    /html\[data-ui-theme="blue"\] :is\(\.verification-flow strong, \.verification-flow b\)\s*\{[^}]*color:\s*var\(--ui-accent-ink\);/s
+  )
+  assert.match(
+    themeCss,
+    /html\[data-ui-theme="blue"\] \.login-success\s*\{[^}]*border-color:\s*var\(--ui-line-strong\);[^}]*background:\s*var\(--ui-surface-active\);[^}]*color:\s*var\(--ui-accent-ink\);/s
+  )
+  assert.match(
+    themeCss,
+    /html\[data-ui-theme="blue"\] \.login-form input:focus\s*\{[^}]*border-color:\s*var\(--ui-accent\);[^}]*box-shadow:\s*0 0 0 4px var\(--ui-focus\);/s
+  )
 })

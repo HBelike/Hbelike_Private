@@ -18,6 +18,8 @@ PACKAGE_FILES = (
     "boss-greeting.js",
     "xiaohongshu-data.js",
     "xiaohongshu-page.js",
+    "assessment-capture.js",
+    "extension-lifecycle.js",
 )
 
 

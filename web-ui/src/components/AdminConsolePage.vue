@@ -51,7 +51,9 @@ const routeConfigLoading = ref(true)
 const routeConfigSaving = ref(false)
 const routeConfigError = ref('')
 const routeConfigSuccess = ref('')
-const enabledRouteModuleCount = computed(() => routeModules.value.filter((item) => item.enabled).length)
+const topLevelRouteModules = computed(() => routeModules.value.filter((item) => item.scope !== 'feature'))
+const careerFeatureModules = computed(() => routeModules.value.filter((item) => item.scope === 'feature'))
+const enabledRouteModuleCount = computed(() => topLevelRouteModules.value.filter((item) => item.enabled).length)
 
 const form = reactive({
   top_n: 5,
@@ -66,7 +68,7 @@ const form = reactive({
 
 const sectionStatus = computed(() => {
   if (activeSection.value.path === '/admin/modules') {
-    return `${enabledRouteModuleCount.value}/${routeModules.value.length || 9} 已启用`
+    return `${enabledRouteModuleCount.value}/${topLevelRouteModules.value.length || 9} 已启用`
   }
   return version.value ? `当前版本 v${version.value}` : '尚未保存版本'
 })
@@ -275,34 +277,55 @@ async function responseError(response, fallback) {
       <div class="admin-card-heading">
         <div>
           <h3>用户可见模块</h3>
-          <p>模块开关只影响普通用户；平台管理员始终可以访问全部页面。</p>
+          <p>顶级模块开关只影响普通用户；求职助手子功能开关对所有用户生效，包括管理员。</p>
         </div>
       </div>
 
       <p v-if="routeConfigError" class="admin-console-alert danger">{{ routeConfigError }}</p>
       <p v-if="routeConfigSuccess" class="admin-console-alert success">{{ routeConfigSuccess }}</p>
       <div v-if="routeConfigLoading" class="admin-route-state">正在读取路由模块…</div>
-      <div v-else class="admin-route-list" role="list" aria-label="顶级路由模块配置">
-        <article v-for="item in routeModules" :key="item.key" class="admin-route-item" role="listitem">
-          <div class="admin-route-copy">
-            <div>
-              <strong>{{ item.label }}</strong>
-              <span v-if="item.admin_only">仅管理员</span>
-              <span v-if="item.locked" class="locked">固定开启</span>
+      <template v-else>
+        <div class="admin-route-list" role="list" aria-label="顶级路由模块配置">
+          <article v-for="item in topLevelRouteModules" :key="item.key" class="admin-route-item" role="listitem">
+            <div class="admin-route-copy">
+              <div>
+                <strong>{{ item.label }}</strong>
+                <span v-if="item.admin_only">仅管理员</span>
+                <span v-if="item.locked" class="locked">固定开启</span>
+              </div>
+              <p>{{ item.description }}</p>
+              <code>{{ item.path }}</code>
             </div>
-            <p>{{ item.description }}</p>
-            <code>{{ item.path }}</code>
-          </div>
-          <label class="admin-route-switch" :class="{ disabled: item.locked }">
-            <input v-model="item.enabled" type="checkbox" :disabled="item.locked" :aria-label="`${item.label}模块`" />
-            <span aria-hidden="true"></span>
-            <em>{{ item.enabled ? '已启用' : '已隐藏' }}</em>
-          </label>
-        </article>
-      </div>
+            <label class="admin-route-switch" :class="{ disabled: item.locked }">
+              <input v-model="item.enabled" type="checkbox" :disabled="item.locked" :aria-label="`${item.label}模块`" />
+              <span aria-hidden="true"></span>
+              <em>{{ item.enabled ? '已启用' : '已隐藏' }}</em>
+            </label>
+          </article>
+        </div>
 
-      <footer class="admin-route-footer">
-        <p>保存后，普通用户的导航和直接地址访问会同步更新，不影响管理员当前访问。</p>
+        <div v-if="careerFeatureModules.length" class="admin-route-group-heading">
+          <strong>求职助手子功能</strong>
+          <span>两个开关分别控制对应入口，对所有用户生效</span>
+        </div>
+        <div v-if="careerFeatureModules.length" class="admin-route-list feature-list" role="list" aria-label="求职助手子功能配置">
+          <article v-for="item in careerFeatureModules" :key="item.key" class="admin-route-item" role="listitem">
+            <div class="admin-route-copy">
+              <div><strong>{{ item.label }}</strong><span>子功能</span></div>
+              <p>{{ item.description }}</p>
+              <code>{{ item.path }}</code>
+            </div>
+            <label class="admin-route-switch">
+              <input v-model="item.enabled" type="checkbox" :aria-label="`${item.label}展示`" />
+              <span aria-hidden="true"></span>
+              <em>{{ item.enabled ? '已展示' : '已隐藏' }}</em>
+            </label>
+          </article>
+        </div>
+      </template>
+
+          <footer class="admin-route-footer">
+            <p>保存后，顶级模块同步影响普通用户；两个求职子功能同步影响包括管理员在内的所有用户。</p>
         <button class="refresh-button" type="button" :disabled="routeConfigLoading || routeConfigSaving" @click="saveRouteModules">
           {{ routeConfigSaving ? '正在保存…' : '保存模块配置' }}
         </button>

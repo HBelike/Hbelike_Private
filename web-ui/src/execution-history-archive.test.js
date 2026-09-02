@@ -24,6 +24,13 @@ test('历史文章路由按 content_id 读取详情并保持只读', () => {
   assert.match(appVue, /contentIdFromLocation\(\) \? '← 返回本次归档'/)
 })
 
+test('文章头部以生成时间为主并单独标注周榜数据周期', () => {
+  assert.match(appVue, /class="article-generated-time"\s*:datetime="content\?\.created_at"/)
+  assert.match(appVue, /formatArchiveTimestamp\(content\?\.created_at\)/)
+  assert.match(appVue, /周榜数据周期：.*formatWeekRange\(content\?\.week_end\)/)
+  assert.doesNotMatch(appVue, /<header class="wechat-article-header">\s*<span>\{\{ content\?\.week_end/)
+})
+
 test('每张历史卡片左下角显示生成时间', () => {
   assert.match(appVue, /class="history-item-time"\s*:datetime="item\.created_at"/)
   assert.match(appVue, /formatArchiveTimestamp\(item\.created_at\)/)

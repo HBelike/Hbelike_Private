@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import CareerAssistantPage from './components/CareerAssistantPage.vue'
 import BrowserInterviewMasterPage from './components/BrowserInterviewMasterPage.vue'
+import OnlineAssessmentAssistantPage from './components/OnlineAssessmentAssistantPage.vue'
 import ResumeAssistantPage from './components/ResumeAssistantPage.vue'
 import InterviewLibraryPage from './components/InterviewLibraryPage.vue'
 import JobSearchWorkspace from './components/JobSearchWorkspace.vue'
@@ -13,6 +14,7 @@ import ManualPipelinePanel from './components/ManualPipelinePanel.vue'
 import ThemeSwitcher from './components/ThemeSwitcher.vue'
 import ImagePreviewDialog from './components/ImagePreviewDialog.vue'
 import { decorateOpenableImages, resolveImagePreviewRequest } from './image-preview.js'
+import { formatWeekRange } from './article-time.js'
 import {
   figureRoleLabel,
   visualSpecSummary,
@@ -21,6 +23,7 @@ import {
 import {
   DEFAULT_APP_ROUTE,
   buildNavigationFallback,
+  canAccessConfiguredFeature,
   canAccessNavigationItem,
   normalizeAppRoute,
   resolveAuthenticatedRoute
@@ -97,6 +100,14 @@ const accountIdentifier = computed(() => authUser.value?.email || '未绑定')
 const accountRoleLabel = computed(() => authUser.value?.role === 'admin' ? '管理员' : '普通用户')
 const accountInitial = computed(() => accountDisplayName.value.trim().slice(0, 1).toUpperCase() || 'U')
 const navigationModuleMap = computed(() => new Map(navigationModules.value.map((item) => [item.key, item])))
+const careerInterviewMasterVisible = computed(() => canAccessConfiguredFeature(
+  navigationModuleMap.value.get('career_interview_master'),
+  authUser.value?.role
+))
+const careerOnlineAssessmentVisible = computed(() => canAccessConfiguredFeature(
+  navigationModuleMap.value.get('career_online_assessment'),
+  authUser.value?.role
+))
 
 function setUiTheme(theme) {
   const nextTheme = theme === 'green' ? 'green' : 'blue'
@@ -229,9 +240,11 @@ const videoAssets = computed(() =>
 const overviewImageAssets = computed(() => imageAssets.value.slice(0, requiredImageCount.value))
 const articleExcerpt = computed(() => buildArticleExcerpt(content.value?.article_markdown ?? content.value?.digest ?? ''))
 const wechatTitle = computed(() => {
-  return articleLayout.value?.wechat_title
+  return articleLayout.value?.title
+    ?? content.value?.title
+    ?? articleLayout.value?.wechat_title
     ?? content.value?.wechat_title
-    ?? compactWechatTitle(articleLayout.value?.title ?? content.value?.title ?? '')
+    ?? 'GitHub 技术周报'
 })
 
 const activeRoute = computed(() => {
@@ -240,6 +253,9 @@ const activeRoute = computed(() => {
   }
   if (currentRoute.value === '/career') {
     return { path: '/career', label: '求职助手', description: '简历匹配与职业咨询' }
+  }
+  if (currentRoute.value === '/career/online-assessment') {
+    return { path: '/career/online-assessment', label: '线上笔试助手', description: '识别题面、生成代码并运行可见测试' }
   }
   if (currentRoute.value === '/resume-assistant') {
     return { path: '/resume-assistant', label: '简历助手', description: '按目标岗位生成可审核的简历优化版本' }
@@ -499,6 +515,7 @@ function canAccessNavItem(item) {
 function navItemForRoute(route) {
   if (route.startsWith('/review')) return appNavItems.find((item) => item.moduleKey === 'workbench')
   if (route === '/career/interview-master') return appNavItems.find((item) => item.moduleKey === 'career_assistant')
+  if (route === '/career/online-assessment') return appNavItems.find((item) => item.moduleKey === 'career_assistant')
   if (route === '/interviews/jobs') return appNavItems.find((item) => item.moduleKey === 'job_library')
   if (route === '/interviews') return appNavItems.find((item) => item.moduleKey === 'interview_library')
   if (route.startsWith('/admin/')) return appNavItems.find((item) => item.moduleKey === 'admin_console')
@@ -508,7 +525,10 @@ function navItemForRoute(route) {
 function canAccessRoute(route) {
   if (isAuthRoute(route)) return true
   const navItem = navItemForRoute(route)
-  return Boolean(navItem && canAccessNavItem(navItem))
+  if (!navItem || !canAccessNavItem(navItem)) return false
+  if (route === '/career/interview-master') return careerInterviewMasterVisible.value
+  if (route === '/career/online-assessment') return careerOnlineAssessmentVisible.value
+  return true
 }
 
 function ensureCurrentRouteAccess() {
@@ -1078,23 +1098,6 @@ function buildArticleExcerpt(value) {
   return shortText(plainText || '等待文章内容生成', 132)
 }
 
-function compactWechatTitle(value, maxLength = 28) {
-  const title = String(value ?? '').replace(/\s+/g, ' ').trim()
-  if (!title) return 'GitHub 技术周报'
-  if (title.length <= maxLength) return title
-
-  let candidate = title.slice(0, maxLength)
-  for (const separator of ['｜', '—', '-', '，', '。']) {
-    const index = candidate.lastIndexOf(separator)
-    if (index >= Math.max(6, Math.floor(maxLength / 3))) {
-      candidate = candidate.slice(0, index)
-      break
-    }
-  }
-  candidate = candidate.replace(/[：:｜—\-，。；、\s]+$/g, '') || title.slice(0, maxLength - 1)
-  return `${candidate}…`
-}
-
 function promptPreviewText(prompt) {
   if (prompt?.prompt_stage === 'deterministic_rendered') {
     return shortText(visualSpecSummary(prompt.visual_spec), 82)
@@ -1308,7 +1311,9 @@ onBeforeUnmount(() => {
     <button type="button" class="secondary-button" @click="retryNavigationConfig">重新加载模块</button>
   </section>
 
-  <BrowserInterviewMasterPage v-else-if="currentRoute === '/career/interview-master'" />
+  <BrowserInterviewMasterPage v-else-if="currentRoute === '/career/interview-master' && canAccessCurrentRoute" />
+
+  <OnlineAssessmentAssistantPage v-else-if="currentRoute === '/career/online-assessment' && canAccessCurrentRoute" />
 
   <div v-else class="shell" :class="{ 'mobile-nav-open': mobileNavOpen }">
     <button
@@ -1325,10 +1330,18 @@ onBeforeUnmount(() => {
       :inert="isMobileViewport && !mobileNavOpen"
     >
       <div class="brand">
-        <div class="brand-icon">AI</div>
-        <div>
-          <strong>Find Job</strong>
-          <span>Agent 内容工坊</span>
+        <div class="brand-icon" aria-hidden="true">
+          <svg viewBox="0 0 48 48" fill="none">
+            <circle cx="13" cy="33" r="3.2" fill="currentColor" />
+            <circle cx="24" cy="25" r="3.2" fill="currentColor" />
+            <path d="M13 33c3.3-6.8 7.2-7.2 11-8 5-1.2 6.3-7.2 12-11" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" />
+            <path d="m31.5 12.5 5 1-1 5" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round" />
+            <path d="M12 39h25" stroke="currentColor" stroke-width="2" stroke-linecap="round" opacity=".35" />
+          </svg>
+        </div>
+        <div class="brand-copy">
+          <strong>求职助手</strong>
+          <span>让机会更近一步</span>
         </div>
       </div>
 
@@ -1451,7 +1464,12 @@ onBeforeUnmount(() => {
         <button v-if="firstAccessibleRoute" type="button" class="secondary-button" @click="navigateTo(firstAccessibleRoute)">前往可用模块</button>
       </section>
 
-      <CareerAssistantPage v-else-if="currentRoute === '/career'" @navigate="navigateTo" />
+      <CareerAssistantPage
+        v-else-if="currentRoute === '/career'"
+        :interview-master-visible="careerInterviewMasterVisible"
+        :online-assessment-visible="careerOnlineAssessmentVisible"
+        @navigate="navigateTo"
+      />
 
       <ResumeAssistantPage
         v-else-if="currentRoute === '/resume-assistant'"
@@ -1789,12 +1807,15 @@ onBeforeUnmount(() => {
 
         <article class="detail-card article-detail" :class="{ 'is-archive-article': contentIdFromLocation() }">
           <header class="wechat-article-header">
-            <span>{{ content?.week_end ?? '技术周报' }}</span>
+            <time class="article-generated-time" :datetime="content?.created_at">
+              {{ formatArchiveTimestamp(content?.created_at) }}
+            </time>
             <h2>{{ wechatTitle }}</h2>
             <small>
+              周榜数据周期：{{ formatWeekRange(content?.week_end) }}
               {{ contentIdFromLocation()
-                ? `${formatArchiveTimestamp(content?.created_at)} · 本页只读展示该次生成时保存的原文`
-                : '审核预览与微信公众号草稿使用同一篇排版正文' }}
+                ? ' · 本页只读展示该次生成时保存的原文'
+                : ' · 审核预览与微信公众号草稿使用同一篇排版正文' }}
             </small>
           </header>
           <div class="panel-header">

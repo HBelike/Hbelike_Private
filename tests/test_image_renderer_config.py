@@ -24,7 +24,7 @@ def test_deterministic_image_renderer_config_is_complete(
     assert config.image_renderer_max_attempts == 5
     assert config.image_canvas_width == 2048
     assert config.image_canvas_height == 1152
-    assert config.image_template_version == "article_visual_v1"
+    assert config.image_template_version == "article_visual_v2"
     assert config.image_renderer_version == "gotenberg_html_v1"
     assert config.image_font_path.name == "NotoSansSC-VF.ttf"
     assert config.image_font_path.is_file()

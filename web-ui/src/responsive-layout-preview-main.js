@@ -68,8 +68,12 @@ const navLabels = ['求职助手', '工作台', '简历助手', '面经库', '�
 function renderSidebar() {
   return h('aside', { id: 'app-navigation', class: 'sidebar' }, [
     h('div', { class: 'brand' }, [
-      h('div', { class: 'brand-icon' }, '职'),
-      h('div', [h('strong', 'Find Job'), h('span', '响应式验收')])
+      h('div', {
+        class: 'brand-icon',
+        'aria-hidden': 'true',
+        innerHTML: '<svg viewBox="0 0 48 48" fill="none"><circle cx="13" cy="33" r="3.2" fill="currentColor"/><circle cx="24" cy="25" r="3.2" fill="currentColor"/><path d="M13 33c3.3-6.8 7.2-7.2 11-8 5-1.2 6.3-7.2 12-11" stroke="currentColor" stroke-width="2.8" stroke-linecap="round"/><path d="m31.5 12.5 5 1-1 5" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M12 39h25" stroke="currentColor" stroke-width="2" stroke-linecap="round" opacity=".35"/></svg>'
+      }),
+      h('div', { class: 'brand-copy' }, [h('strong', '求职助手'), h('span', '让机会更近一步')])
     ]),
     h('nav', { class: 'nav-list', 'aria-label': '应用主导航' }, navLabels.map((label, index) => (
       h('button', { class: ['nav-item', index === 0 ? 'active' : ''], type: 'button' }, [

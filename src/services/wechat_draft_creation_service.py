@@ -11,7 +11,7 @@ from src.providers.wechat_client import WechatClient, WechatDraft, WechatMateria
 from src.repositories.article_layout_repository import ArticleLayoutRecord
 from src.repositories.media_asset_repository import MediaAssetRecord
 from src.services.article_layout_service import LOCAL_WECHAT_IMAGE_SCHEME, resolve_expected_project_image_count
-from src.services.wechat_title_service import compact_wechat_title
+from src.services.wechat_title_service import validate_wechat_title
 
 
 @dataclass(frozen=True)
@@ -310,13 +310,10 @@ class WechatDraftCreationService:
         return raw_wechat_config
 
     def _draft_title(self, config: AppConfig, title: str) -> str:
-        """读取配置并生成公众号草稿使用的紧凑标题。"""
+        """保留完整标题，并在提交前执行微信字段长度校验。"""
 
-        draft_config = self._wechat_config(config).get("draft", {})
-        if not isinstance(draft_config, dict):
-            draft_config = {}
-        max_chars = draft_config.get("title_max_chars", 28)
-        return self._truncate(compact_wechat_title(title, max_chars=max_chars), 64)
+        del config
+        return validate_wechat_title(title)
 
     def _truncate(self, text: str, max_length: int) -> str:
         """按微信字段长度做 UTF-8 字节安全截断。"""

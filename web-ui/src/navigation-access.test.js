@@ -5,6 +5,7 @@ import { readFile } from 'node:fs/promises'
 import {
   DEFAULT_APP_ROUTE,
   buildNavigationFallback,
+  canAccessConfiguredFeature,
   canAccessNavigationItem,
   normalizeAppRoute,
   resolveAuthenticatedRoute
@@ -77,6 +78,15 @@ test('普通用户继续服从管理员保存的模块开关', () => {
     canAccessNavigationItem(careerItem, { key: 'career_assistant', enabled: true, accessible: true }, 'user'),
     true
   )
+})
+
+test('求职助手子功能开关对普通用户和管理员都生效', () => {
+  const hiddenFeature = { key: 'career_interview_tools', enabled: false, accessible: false }
+
+  assert.equal(canAccessConfiguredFeature(hiddenFeature, 'user'), false)
+  assert.equal(canAccessConfiguredFeature(hiddenFeature, 'admin'), false)
+  assert.equal(canAccessConfiguredFeature({ ...hiddenFeature, enabled: true, accessible: true }, 'user'), true)
+  assert.equal(canAccessConfiguredFeature({ ...hiddenFeature, enabled: true, accessible: true }, 'admin'), true)
 })
 
 test('配置读取失败时管理员保留全部页面，普通用户保持拒绝访问', () => {

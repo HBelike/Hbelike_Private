@@ -10,7 +10,9 @@ from src.career_assistant.agent_loop import ActiveAgentTurn
 from src.career_assistant.context_budget import (
     ContextBudgetService,
     ContextFitResult,
+    ContextHardLimitError,
     ContextUsageSnapshot,
+    MINIMUM_VIABLE_OUTPUT_TOKENS,
     PromptComponent,
     estimate_text_tokens,
 )
@@ -25,6 +27,7 @@ from src.career_assistant.intake_graph import ModelTurnContext
 from src.career_assistant.model_clients import ChatMessage
 from src.career_assistant.model_gateway import ModelResolution
 from src.career_assistant.persistence.conversation_repository import CareerConversationRepository
+from src.career_assistant.persistence.model_profile_repository import ModelContextPolicy
 from src.career_assistant.skill_tools import SkillToolRegistry
 
 
@@ -73,11 +76,20 @@ class PromptContextService:
         conversation_memory: ConversationMemoryService,
         budget: ContextBudgetService | None = None,
         skill_tool_registry: SkillToolRegistry | None = None,
+        *,
+        system_max_output_tokens: int = 100_000,
     ) -> None:
+        if (
+            isinstance(system_max_output_tokens, bool)
+            or not isinstance(system_max_output_tokens, int)
+            or system_max_output_tokens <= 0
+        ):
+            raise ValueError("系统最大输出必须为正整数")
         self._conversations = conversation_repository
         self._conversation_memory = conversation_memory
         self._budget = budget or ContextBudgetService()
         self._skill_tool_registry = skill_tool_registry
+        self._system_max_output_tokens = system_max_output_tokens
 
     def prepare(
         self,
@@ -86,9 +98,16 @@ class PromptContextService:
         resolution: ModelResolution,
     ) -> PreparedPromptContext:
         components = self._build_components(active_turn, context, resolution)
-        policy = resolution.profile.context_policy
-        initial = self._budget.measure(components, policy)
-        compression_triggered = initial.used_percent >= policy.compression_trigger_percent
+        source_policy = resolution.profile.context_policy
+        desired_output_tokens = min(
+            source_policy.reserved_output_tokens,
+            self._system_max_output_tokens,
+        )
+        runtime_policy = self._runtime_policy(components, source_policy)
+        initial = self._budget.measure(components, runtime_policy)
+        compression_triggered = (
+            initial.used_percent >= source_policy.compression_trigger_percent
+        )
         if compression_triggered:
             self._conversation_memory.enqueue_if_required(
                 organization_id=active_turn.conversation.organization_id,
@@ -107,20 +126,27 @@ class PromptContextService:
                 target_prompt_tokens=max(
                     1,
                     math.floor(
-                        policy.context_window_tokens
-                        * policy.compression_target_percent
+                        source_policy.context_window_tokens
+                        * source_policy.compression_target_percent
                         / 100,
                     )
-                    - policy.reserved_output_tokens,
+                    - desired_output_tokens,
                 ),
             )
             components = self._build_components(active_turn, context, resolution)
+            runtime_policy = self._runtime_policy(components, source_policy)
 
         fitted = self._budget.fit(
             components,
-            policy,
-            target_percent=(policy.compression_target_percent if compression_triggered else None),
+            runtime_policy,
+            target_percent=(
+                source_policy.compression_target_percent
+                if compression_triggered
+                else None
+            ),
         )
+        if fitted.usage.reserved_output_tokens < MINIMUM_VIABLE_OUTPUT_TOKENS:
+            raise ContextHardLimitError(fitted.usage)
         return self._prepared(fitted)
 
     def snapshot_for_conversation(
@@ -139,25 +165,27 @@ class PromptContextService:
             received_attachment_kinds=(),
             pdf_without_extractable_text_count=0,
         )
+        components = self._build_components(active_turn, empty_context, resolution)
         fitted = self._budget.fit(
-            self._build_components(active_turn, empty_context, resolution),
-            resolution.profile.context_policy,
+            components,
+            self._runtime_policy(components, resolution.profile.context_policy),
         )
         return self._prepared(fitted)
 
     def empty_snapshot(self, resolution: ModelResolution) -> PreparedPromptContext:
         """新会话尚无 Turn 时只核算固定系统开销和输出预留。"""
 
-        fitted = self._budget.fit(
-            (
-                PromptComponent.pinned(
-                    "system",
-                    (ChatMessage("system", SYSTEM_RULES),),
-                ),
-                PromptComponent.pinned("skills", ()),
-                PromptComponent.pinned("current_input", ()),
+        components = (
+            PromptComponent.pinned(
+                "system",
+                (ChatMessage("system", SYSTEM_RULES),),
             ),
-            resolution.profile.context_policy,
+            PromptComponent.pinned("skills", ()),
+            PromptComponent.pinned("current_input", ()),
+        )
+        fitted = self._budget.fit(
+            components,
+            self._runtime_policy(components, resolution.profile.context_policy),
         )
         return self._prepared(fitted)
 
@@ -168,7 +196,10 @@ class PromptContextService:
         resolution: ModelResolution,
     ) -> PreparedPromptContext:
         components = self._build_components(active_turn, context, resolution)
-        usage = self._budget.measure(components, resolution.profile.context_policy)
+        usage = self._budget.measure(
+            components,
+            self._runtime_policy(components, resolution.profile.context_policy),
+        )
         return PreparedPromptContext(
             messages=tuple(
                 message for component in components for message in component.messages
@@ -176,6 +207,19 @@ class PromptContextService:
             context_usage=usage,
             component_keys=tuple(component.key for component in components),
             dropped_component_keys=(),
+        )
+
+    def _runtime_policy(
+        self,
+        components: tuple[PromptComponent, ...],
+        source_policy: ModelContextPolicy,
+    ) -> ModelContextPolicy:
+        """将持久模型能力收敛为当前 Prompt 可安全使用的临时预算。"""
+
+        return self._budget.runtime_policy(
+            components,
+            source_policy,
+            system_max_output_tokens=self._system_max_output_tokens,
         )
 
     def enqueue_post_turn_if_required(

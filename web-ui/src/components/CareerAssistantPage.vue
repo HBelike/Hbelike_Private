@@ -13,6 +13,7 @@ import CareerContextMeter from './CareerContextMeter.vue'
 import { toTargetRolePayload } from '../job-library-target-role.js'
 import { isAssessmentPending } from '../career-assessment-view.js'
 import { openBrowserInterviewMaster } from '../browser-interview-launcher.js'
+import { openOnlineAssessmentAssistant } from '../online-assessment/launcher.js'
 import {
   buildComposerHighlightSegments,
   composerReferencePresent,
@@ -52,6 +53,17 @@ import {
   getPanelAfterLayoutChange
 } from '../career-responsive-layout.js'
 import { createChatAutoScroller } from '../career-chat-auto-scroll.js'
+
+defineProps({
+  interviewMasterVisible: {
+    type: Boolean,
+    default: true
+  },
+  onlineAssessmentVisible: {
+    type: Boolean,
+    default: true
+  }
+})
 
 const emit = defineEmits(['navigate'])
 
@@ -146,6 +158,7 @@ const CONTEXT_RAIL_WIDTH_STORAGE_KEY = 'career-assistant-context-rail-width'
 const CONTEXT_RAIL_MIN_WIDTH = 360
 const CONTEXT_RAIL_MAX_WIDTH = 760
 const CONTEXT_RAIL_DEFAULT_WIDTH = 620
+const CONTEXT_USAGE_DEBOUNCE_MS = 250
 const historyTotalPages = computed(() => Math.max(1, Math.ceil(historyTotal.value / historyPageSize.value)))
 const composerHighlightSegments = computed(() => buildComposerHighlightSegments(
   composerDisplayText.value,
@@ -198,6 +211,8 @@ let interviewMentionRequestId = 0
 let skillMentionDebounceTimer = null
 let skillMentionRequestId = 0
 let contextUsageRequestId = 0
+let contextUsageDebounceTimer = null
+let contextUsageAbortController = null
 let careerResizeObserver = null
 const turnObservationCoordinator = createTurnObservationCoordinator()
 const chatAutoScroller = createChatAutoScroller({
@@ -235,6 +250,7 @@ onBeforeUnmount(() => {
   if (errorToastTimer) clearTimeout(errorToastTimer)
   if (interviewMentionDebounceTimer) clearTimeout(interviewMentionDebounceTimer)
   if (skillMentionDebounceTimer) clearTimeout(skillMentionDebounceTimer)
+  cancelContextUsageRequest()
   document.removeEventListener('pointerdown', handleConversationActionPointerDown)
   document.removeEventListener('keydown', handleCareerPanelKeydown)
   careerResizeObserver?.disconnect()
@@ -900,6 +916,18 @@ async function restoreServerQueue(conversationId) {
   }
 }
 
+function restoreServerQueueSafely(conversationId) {
+  return restoreServerQueue(conversationId).catch(() => {
+    if (selectedConversation.value?.id !== conversationId) return
+    if (isActiveTurn(lastTurn.value)) {
+      sending.value = true
+      scheduleTurnRecoveryPolling()
+      return
+    }
+    syncSendingState()
+  })
+}
+
 async function refreshActiveConversationTurn() {
   const conversationId = selectedConversation.value?.id
   if (!conversationId || pendingTurns.value.length > 0 || activeObservedTurnId.value) return
@@ -959,34 +987,61 @@ watch(
     resolvedSelectedProfileId.value,
     contextUsageRevision.value,
   ],
-  () => {
-    contextUsage.value = null
-    void loadContextUsage()
-  },
+  scheduleContextUsageLoad,
 )
 
-async function loadContextUsage() {
+function cancelContextUsageRequest() {
+  if (contextUsageDebounceTimer) clearTimeout(contextUsageDebounceTimer)
+  contextUsageDebounceTimer = null
+  contextUsageAbortController?.abort()
+  contextUsageAbortController = null
+  contextUsageRequestId += 1
+}
+
+function scheduleContextUsageLoad() {
+  cancelContextUsageRequest()
+  contextUsage.value = null
   const conversationId = selectedConversation.value?.id
   const profileId = resolvedSelectedProfileId.value
-  const requestId = ++contextUsageRequestId
   if (!conversationId || !profileId) {
-    contextUsage.value = null
     contextUsageLoading.value = false
     return
   }
+  const request = {
+    id: contextUsageRequestId,
+    conversationId,
+    profileId,
+    controller: new AbortController()
+  }
+  contextUsageAbortController = request.controller
   contextUsageLoading.value = true
+  contextUsageDebounceTimer = setTimeout(() => {
+    contextUsageDebounceTimer = null
+    void loadContextUsage(request)
+  }, CONTEXT_USAGE_DEBOUNCE_MS)
+}
+
+async function loadContextUsage(request) {
   try {
     const payload = await requestJson(
-      `/api/career/conversations/${conversationId}/context-usage?model_profile_id=${encodeURIComponent(profileId)}`
+      `/api/career/conversations/${request.conversationId}/context-usage?model_profile_id=${encodeURIComponent(request.profileId)}`,
+      { signal: request.controller.signal }
     )
-    if (requestId === contextUsageRequestId) {
+    if (request.id === contextUsageRequestId) {
       contextUsage.value = payload.context_usage ?? null
       turnLimit.value = normalizeTurnLimit(payload.turn_limit)
     }
-  } catch {
-    if (requestId === contextUsageRequestId) contextUsage.value = null
+  } catch (error) {
+    if (request.id === contextUsageRequestId && error?.name !== 'AbortError') {
+      contextUsage.value = null
+    }
   } finally {
-    if (requestId === contextUsageRequestId) contextUsageLoading.value = false
+    if (request.id === contextUsageRequestId) {
+      contextUsageLoading.value = false
+      if (contextUsageAbortController === request.controller) {
+        contextUsageAbortController = null
+      }
+    }
   }
 }
 
@@ -1165,6 +1220,9 @@ async function selectConversation(conversationId, clearFeedback = true) {
   if (clearFeedback) feedback.value = ''
   stopTurnRecoveryPolling()
   stopAssessmentPolling()
+  cancelContextUsageRequest()
+  contextUsage.value = null
+  contextUsageLoading.value = false
   resetConversationDraft()
   conversationContext.value = null
   useFreeQuotaFirstSelection()
@@ -1177,7 +1235,8 @@ async function selectConversation(conversationId, clearFeedback = true) {
     messages.value = payload.messages ?? []
     restoreConversationModelSelection(payload.last_model_selection)
     lastTurn.value = payload.latest_turn ?? null
-    await restoreServerQueue(conversationId)
+    sending.value = isActiveTurn(lastTurn.value)
+    void restoreServerQueueSafely(conversationId)
   } catch (error) {
     if (requestId !== conversationSelectionRequestId) return
     errorMessage.value = error instanceof Error ? error.message : '会话读取失败'
@@ -1268,7 +1327,12 @@ function launchInterviewMaster() {
   const opened = openBrowserInterviewMaster({
     answerModelProfileId: selected === 'free_quota_first' ? '' : selected
   })
-  feedback.value = opened ? '面试大师已在独立浏览器窗口打开。' : '弹窗被拦截，已改为在新标签页打开。'
+  feedback.value = opened ? '' : '弹窗被拦截，已改为在新标签页打开。'
+}
+
+function launchOnlineAssessment() {
+  const opened = openOnlineAssessmentAssistant()
+  feedback.value = opened ? '' : '弹窗被拦截，请允许本站打开窗口后重试。'
 }
 
 function openGreetingDialog() {
@@ -1552,6 +1616,7 @@ function syncSendingState() {
     submittingTurnCount.value > 0
     || activeObservedTurnId.value
     || pendingTurns.value.length > 0
+    || isActiveTurn(lastTurn.value)
   )
 }
 
@@ -2272,6 +2337,17 @@ onMounted(() => {
         </div>
         <div v-if="selectedConversation" class="chat-material-actions" aria-label="求职资料快捷操作">
           <button
+            v-if="onlineAssessmentVisible"
+            type="button"
+            class="chat-material-button online-assessment"
+            title="从当前在线笔试题目页识别题面，生成代码并执行可见测试"
+            @click="launchOnlineAssessment"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 7-4 5 4 5M16 7l4 5-4 5M14 4l-4 16"/></svg>
+            <span>线上笔试</span>
+          </button>
+          <button
+            v-if="interviewMasterVisible"
             type="button"
             class="chat-material-button interview-master"
             title="选择面试标签页音频，实时识别问题并生成中文回答建议"
@@ -2621,6 +2697,7 @@ onMounted(() => {
 .career-chat-panel { display:flex; height:100%; min-height:0; flex-direction:column; overflow:hidden; }.chat-header { display:flex; min-height:68px; align-items:center; border-bottom:1px solid #e3ebf5; padding:10px 14px 10px 20px; background:#fbfdff; }.chat-header>div:first-child{min-width:0}.chat-header h2,.model-settings h3,.empty-state h2 { margin:3px 0 0; color:#10294c; }.active-context-line{display:flex;align-items:center;gap:7px;margin:5px 0 0;color:#6d7f98;font-size:11px;font-weight:750}.active-context-line span{max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.active-context-line i{color:#0a67db;font-style:normal}.eyebrow { margin:0; }
 .chat-material-actions{display:flex;flex:none;align-items:center;gap:7px}.chat-material-button{position:relative;display:inline-flex;min-height:38px;align-items:center;justify-content:center;gap:7px;border:1px solid var(--ui-line-strong,#bfd2ea);border-radius:9px;background:var(--ui-surface,#fff);color:var(--ui-text-secondary,#526078);padding:8px 12px;font:800 12px/1 var(--ui-font-body,"Segoe UI",sans-serif);white-space:nowrap;cursor:pointer;transition:border-color .15s ease,background .15s ease,color .15s ease,box-shadow .15s ease}.chat-material-button svg{width:16px;height:16px;flex:none;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}.chat-material-button:hover:not(:disabled),.chat-material-button:focus-visible{border-color:var(--ui-accent,#0869d8);background:var(--ui-surface-active,#eaf3ff);color:var(--ui-accent-ink,#004aa8);box-shadow:0 0 0 3px var(--ui-focus,rgba(8,105,216,.14));outline:0}.chat-material-button.primary{border-color:var(--ui-accent,#0869d8);background:var(--ui-accent,#0869d8);color:#fff;padding-right:14px;padding-left:14px}.chat-material-button.primary:hover:not(:disabled),.chat-material-button.primary:focus-visible{background:var(--ui-accent-strong,#0056bd);color:#fff}.chat-material-button:disabled{cursor:wait;opacity:.58}.material-state-dot{width:6px;height:6px;flex:none;border-radius:50%;background:var(--ui-success,#21855b);box-shadow:0 0 0 2px var(--ui-success-soft,#e8f7f0)}
 .chat-material-button.interview-master{border-color:#9fc4f0;background:#edf6ff;color:#075dbd}.chat-material-button.interview-master:hover:not(:disabled),.chat-material-button.interview-master:focus-visible{border-color:#0869d8;background:#deedff;color:#004da8}
+.chat-material-button.online-assessment{border-color:#a8c5ea;background:#f1f6fd;color:#165aab}.chat-material-button.online-assessment:hover:not(:disabled),.chat-material-button.online-assessment:focus-visible{border-color:#176fe5;background:#e6f1ff;color:#0d4fa8}
 .chat-material-button.greeting{border-color:var(--ui-accent,#0869d8);background:var(--ui-surface-active,#eaf3ff);color:var(--ui-accent-ink,#004aa8)}
 .quiet-button,.chip-button { border:1px solid #dfe8d0; border-radius:10px; background:#f8fbf1; color:#61764b; padding:8px 11px; font-size:12px; font-weight:800; }.quiet-button.danger { border-color:#f0d5d5; background:#fff8f8; color:#ad5a5a; }
 .notice { margin:14px 22px 0; border-radius:12px; padding:10px 13px; font-size:13px; }.notice.success { border:1px solid #d7eabe; background:#f5faec; color:#5c7a2c; }

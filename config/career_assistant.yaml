@@ -10,16 +10,16 @@ career_assistant:
     lease_seconds: 120
     worker_concurrency: 1
 
-  # 适用于长篇简历分析、岗位匹配与面试方案；如模型供应商的上限更低时，
-  # 仍会以供应商限制为准；修改本文件会由开发态服务自动重载。
+  # 系统级单次最终正文保护上限；真实请求还会按模型最大输出能力与上下文
+  # 剩余安全空间自动收紧。修改本文件会由开发态服务自动重载。
   response_generation:
-    max_completion_tokens: 4096
+    max_completion_tokens: 100000
     request_timeout_seconds: 90
     # 仅在尚未收到正文、且服务端/网络暂时故障时重试一次。
     # 已开始输出后绝不重放请求，避免重复回答或额外消耗额度。
     max_attempts: 2
     retry_backoff_seconds: 0.8
-    max_persisted_response_characters: 30000
+    max_persisted_response_characters: 500000
 
   persistence:
     database_url_env: CAREER_DATABASE_URL
@@ -157,3 +157,12 @@ career_assistant:
     judge_profile_key: deepseek-deepseek-v4-flash
     prompt_version: career-job-judge-v2
     max_attempts: 3
+
+  online_assessment:
+    # 两项均引用管理台已有模型档案，不在此处保存模型 API Key。
+    problem_extractor_profile_key: deepseek-deepseek-v4-flash
+    answer_profile_key: deepseek-deepseek-v4-flash
+    piston_base_url: ${CAREER_PISTON_BASE_URL:-http://127.0.0.1:2000}
+    request_timeout_seconds: 12
+    max_test_cases: 20
+    max_repair_rounds: 2

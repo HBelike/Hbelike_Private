@@ -20,6 +20,7 @@ from src.services.article_skill_prompt_loader import ArticleSkillPromptLoader
 from src.services.article_visual_planning_service import ArticleVisualPlanningService
 from src.services.media_creative_brief_service import MediaCreativeBriefService
 from src.services.skill_library_service import SkillLibraryService
+from src.services.wechat_title_service import validate_wechat_title
 from src.tasks.base_task import BaseTask
 from src.tasks.task_context import TaskContext
 
@@ -431,9 +432,9 @@ visual_spec 公共字段必须严格为：
 按以下顺序选择 figure_role：证据不足时选择 summary_card；有明确连续步骤才选择 flow；有明确模块和依赖关系才选择 architecture；有两种方案及同维度差异才选择 comparison；有明确阶段或版本演进才选择 timeline。不得为了画图虚构模块、边、时间或比较项。
 
 figure_role 专属字段：
-- summary_card：positioning 不超过 180 字；capabilities 为 2 到 4 项，每项只含 label、description
-- flow：steps 为 3 到 5 项，每项只含 id、label、description；edges 必须且只能按 steps 相邻顺序连接，每项只含 from、to，可选 label
-- architecture：nodes 为 3 到 7 项，每项只含 id、label、description，可选 layer；edges 为 2 到 12 项；可选 layers 为 1 到 4 项，每项只含 id、label。若提供 layers，每个 node 都必须包含有效 layer，且每层至少被一个 node 使用
+- summary_card：positioning 不超过 180 字；capabilities 为 2 到 4 项，每项只含 label、description，其中 description 不超过 150 字
+- flow：steps 数量按证据中的真实流程动态确定，不设置固定数量范围，每项只含 id、label、description；edges 数量随 steps 动态确定，必须且只能按相邻顺序连接，每项只含 from、to，可选 label
+- architecture：nodes 为 3 到 7 项，每项只含 id、label、description，可选 layer；edges 为 2 到 12 项；可选 layers 数量按证据中的真实分层动态确定，每项只含 id、label。若提供 layers，每个 node 都必须包含有效 layer，且每层至少被一个 node 使用
 - comparison：left 和 right 各只含 label、description；dimensions 为 2 到 4 项，每项只含 label、left、right
 - timeline：events 为 3 到 6 项，每项只含 id、time、label、description
 
@@ -638,7 +639,7 @@ figure_role 专属字段：
 {repair_section}
 
 只输出一个 JSON 对象，字段必须严格为：
-title: 有明确技术判断，不写“全面解析、终极、革命性”等营销词
+title: 有明确技术判断，不写“全面解析、终极、革命性”等营销词，总长度不超过 32 个字
 digest: 用一句主线概括共同变化、关注原因和读者能获得的判断
 opening_markdown: 用具体 stars 数字、明确问题或有证据的共同变化开篇，不写标题
 weekly_theme_markdown: 解释项目之间有证据的联系、分类或技术路线差异
@@ -676,6 +677,7 @@ stars 数量最多项目: {highest_star_repository.full_name}
             if not value:
                 raise ValueError(f"全局综合字段 {field} 不能为空")
             normalized[field] = value
+        normalized["title"] = validate_wechat_title(normalized["title"])
         return normalized
 
     def _normalize_generated_prose(self, text: str) -> str:

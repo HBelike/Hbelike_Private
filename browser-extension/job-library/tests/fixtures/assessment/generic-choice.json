@@ -1,0 +1,7 @@
+{
+  "hostname": "exam.example.com",
+  "expectedAdapter": null,
+  "expectedDeep": false,
+  "visibleText": "以下哪项是 HTTP 状态码？\nA. 200\nB. TCP\nC. JSON\nD. DNS",
+  "expectedQuestionType": "choice"
+}

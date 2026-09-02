@@ -181,6 +181,36 @@ def test_flow_is_a_strict_left_to_right_chain() -> None:
     assert len(positions) == 3
 
 
+@pytest.mark.parametrize("step_count", [6, 12])
+def test_dynamic_flow_uses_multiple_rows_without_dropping_steps(step_count: int) -> None:
+    steps = [
+        {
+            "id": f"step{index}",
+            "label": f"阶段{index}",
+            "description": f"处理第{index}阶段",
+        }
+        for index in range(1, step_count + 1)
+    ]
+    edges = [
+        {"from": f"step{index}", "to": f"step{index + 1}"}
+        for index in range(1, step_count)
+    ]
+
+    document = ArticleVisualTemplateService().render(
+        _validated("flow", steps=steps, edges=edges)
+    )
+    row_indexes = {
+        int(value)
+        for value in re.findall(
+            r'data-node-id="step\d+"[^>]*data-row="(\d+)"', document.html
+        )
+    }
+
+    assert len(row_indexes) >= 2
+    assert document.html.count('class="flow-node node-card') == step_count
+    assert document.html.count('marker-end="url(#arrowhead)"') == step_count - 1
+
+
 def test_architecture_nodes_are_partitioned_by_declared_layer() -> None:
     document = ArticleVisualTemplateService().render(_validated("architecture"))
 
@@ -191,6 +221,97 @@ def test_architecture_nodes_are_partitioned_by_declared_layer() -> None:
     assert 'data-node-id="renderer" data-layer="core"' in document.html
 
 
+@pytest.mark.parametrize("layer_count", [5, 7])
+def test_architecture_compacts_dynamic_layers_without_dropping_content(
+    layer_count: int,
+) -> None:
+    layers = [
+        {"id": f"layer{index}", "label": f"第{index}层"}
+        for index in range(1, layer_count + 1)
+    ]
+    nodes = [
+        {
+            "id": f"node{index}",
+            "label": f"模块{index}",
+            "description": f"负责第{index}层能力",
+            "layer": f"layer{index}",
+        }
+        for index in range(1, layer_count + 1)
+    ]
+    edges = [
+        {"from": f"node{index}", "to": f"node{index + 1}"}
+        for index in range(1, layer_count)
+    ]
+
+    document = ArticleVisualTemplateService().render(
+        _validated("architecture", layers=layers, nodes=nodes, edges=edges)
+    )
+
+    assert f"architecture-layer-count-{layer_count}" in document.html
+    assert document.html.count('class="architecture-layer"') == layer_count
+    assert document.html.count('class="architecture-node node-card"') == layer_count
+    assert all(
+        f'data-layer-id="layer{index}"' in document.html
+        and f'data-node-id="node{index}"' in document.html
+        for index in range(1, layer_count + 1)
+    )
+
+
+def test_four_layer_architecture_with_long_copy_uses_compact_density() -> None:
+    layers = [
+        {"id": "input", "label": "输入与创建"},
+        {"id": "standard", "label": "标准层"},
+        {"id": "implementation", "label": "实现层"},
+        {"id": "runtime", "label": "运行时"},
+    ]
+    nodes = [
+        {
+            "id": "template",
+            "label": "模板目录",
+            "description": "提供创建新技能的起点，包含技能所需的基础文件结构。",
+            "layer": "input",
+        },
+        {
+            "id": "spec",
+            "label": "规范目录",
+            "description": "定义 Agent Skills 的标准，约束技能的组织和元数据格式。",
+            "layer": "standard",
+        },
+        {
+            "id": "skills",
+            "label": "示例技能目录",
+            "description": "按场景分类的技能实例，每个技能自包含 SKILL.md、脚本和资源。",
+            "layer": "implementation",
+        },
+        {
+            "id": "skill_md",
+            "label": "SKILL.md",
+            "description": "每个技能的核心文件，承载指令和元数据，是 Claude 读取的入口。",
+            "layer": "implementation",
+        },
+        {
+            "id": "claude",
+            "label": "Claude 运行时",
+            "description": "根据任务上下文动态加载技能，执行指令并调用脚本或资源。",
+            "layer": "runtime",
+        },
+    ]
+    edges = [
+        {"from": "template", "to": "skills", "label": "生成实例"},
+        {"from": "spec", "to": "skill_md", "label": "约束格式"},
+        {"from": "skills", "to": "skill_md", "label": "包含"},
+        {"from": "skill_md", "to": "claude", "label": "动态加载"},
+    ]
+
+    document = ArticleVisualTemplateService().render(
+        _validated("architecture", layers=layers, nodes=nodes, edges=edges)
+    )
+
+    assert "architecture-density-compact" in document.html
+    assert document.html.count('class="architecture-node node-card"') == 5
+    assert all(node["description"] in document.html for node in nodes)
+
+
 def test_document_exposes_exact_expected_text_entries() -> None:
     spec = _validated("comparison")
     document = ArticleVisualTemplateService().render(spec)
@@ -199,3 +320,49 @@ def test_document_exposes_exact_expected_text_entries() -> None:
     assert set(dict(document.expected_texts).values()) == set(spec.visible_texts)
     for key, _text in document.expected_texts:
         assert document.html.count(f'data-text-key="{key}"') == 1
+
+
+def test_three_card_summary_compacts_80_character_descriptions() -> None:
+    descriptions = [
+        "可核验的项目能力描述" * 8,
+        "可追踪的项目机制说明" * 8,
+        "可落地的项目工程结论" * 8,
+    ]
+    assert all(len(item) == 80 for item in descriptions)
+    document = ArticleVisualTemplateService().render(
+        _validated(
+            "summary_card",
+            capabilities=[
+                {"label": "技术特点", "description": descriptions[0]},
+                {"label": "机制拆解", "description": descriptions[1]},
+                {"label": "工程启发", "description": descriptions[2]},
+            ],
+        )
+    )
+
+    assert 'class="capability-grid capability-count-3 capability-copy-compact"' in document.html
+    for description in descriptions:
+        assert description in document.html
+
+
+def test_four_card_summary_uses_dense_layout_for_150_character_descriptions() -> None:
+    descriptions = [
+        "可核验的项目能力描述" * 15,
+        "可追踪的项目机制说明" * 15,
+        "可落地的项目工程结论" * 15,
+        "可复用的项目实践经验" * 15,
+    ]
+    assert all(len(item) == 150 for item in descriptions)
+    document = ArticleVisualTemplateService().render(
+        _validated(
+            "summary_card",
+            capabilities=[
+                {"label": f"能力{index}", "description": description}
+                for index, description in enumerate(descriptions, start=1)
+            ],
+        )
+    )
+
+    assert 'class="capability-grid capability-count-4 capability-copy-dense"' in document.html
+    for description in descriptions:
+        assert description in document.html

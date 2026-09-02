@@ -18,10 +18,10 @@ router = APIRouter(prefix="/api/admin/career", tags=["career-admin-context"])
 
 
 class UpdateModelContextPolicyRequest(BaseModel):
-    """管理员提交的精确模型上下文预算。"""
+    """管理员提交的精确模型上下文能力与压缩策略。"""
 
     context_window_tokens: int = Field(ge=4_096, le=2_000_000)
-    reserved_output_tokens: int = Field(ge=1, le=32_768)
+    reserved_output_tokens: int = Field(ge=1, le=2_000_000)
     compression_trigger_percent: int = Field(ge=50, le=90)
     compression_target_percent: int = Field(ge=30, le=75)
     context_window_source: Literal["built_in", "admin"] = "admin"

@@ -244,6 +244,58 @@ class PlatformAccessService:
         self._require_role(user, PlatformRole.ADMIN)
         return self._repository.list_pipeline_execution_requests(user.organization_id)
 
+    def get_manual_pipeline_request(self, user: PlatformUser, request_id: str) -> dict[str, object] | None:
+        """读取当前管理员 organization 内的一次运行。"""
+
+        self._require_role(user, PlatformRole.ADMIN)
+        return self._repository.get_pipeline_execution_request(user.organization_id, UUID(request_id))
+
+    def append_manual_pipeline_event(
+        self,
+        user: PlatformUser,
+        request_id: str,
+        *,
+        event_type: str,
+        level: str,
+        message: str,
+        task_name: str | None = None,
+        task_run_id: str | None = None,
+    ) -> dict[str, object]:
+        """为后台执行线程追加一条可实时查看的事件。"""
+
+        self._require_role(user, PlatformRole.ADMIN)
+        return self._repository.append_pipeline_execution_event(
+            UUID(request_id),
+            event_type=event_type,
+            level=level,
+            message=message,
+            task_name=task_name,
+            task_run_id=task_run_id,
+        )
+
+    def list_manual_pipeline_events(
+        self,
+        user: PlatformUser,
+        request_id: str,
+        *,
+        after_id: int = 0,
+        limit: int = 500,
+    ) -> dict[str, object]:
+        """返回运行状态及 after_id 之后的有序事件。"""
+
+        self._require_role(user, PlatformRole.ADMIN)
+        normalized_id = UUID(request_id)
+        item = self._repository.get_pipeline_execution_request(user.organization_id, normalized_id)
+        if item is None:
+            raise ValueError("未找到流水线执行请求")
+        events = self._repository.list_pipeline_execution_events(
+            user.organization_id,
+            normalized_id,
+            after_id=after_id,
+            limit=limit,
+        )
+        return {"item": item, "events": events}
+
     def _send_challenge(self, *, email: str, purpose: str, payload: dict[str, object]) -> dict[str, object]:
         if not self._verification_secret:
             raise RuntimeError("账号邮件服务尚未配置 PLATFORM_EMAIL_CODE_SECRET")

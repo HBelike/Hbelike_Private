@@ -67,7 +67,7 @@ function validatePolicy(row) {
   const trigger = Number(row.compression_trigger_percent)
   const target = Number(row.compression_target_percent)
   if (!Number.isInteger(windowTokens) || windowTokens < 4096) return '上下文容量不能小于 4096 Token。'
-  if (!Number.isInteger(outputTokens) || outputTokens < 1 || outputTokens * 2 > windowTokens) return '预留输出必须为正数且不能超过上下文容量的一半。'
+  if (!Number.isInteger(outputTokens) || outputTokens < 1 || outputTokens > windowTokens) return '模型最大输出必须为正数且不能超过上下文容量。'
   if (!Number.isInteger(trigger) || trigger < 50 || trigger > 90) return '压缩触发比例需要在 50% 到 90% 之间。'
   if (!Number.isInteger(target) || target < 30 || target > 75 || target >= trigger) return '压缩目标比例必须低于触发比例。'
   return ''
@@ -97,14 +97,14 @@ async function responseError(response, fallback) {
         </header>
         <div class="context-field-grid">
           <label><span>上下文容量</span><input v-model.number="row.context_window_tokens" type="number" min="4096" /><small>Token</small></label>
-          <label><span>预留输出</span><input v-model.number="row.reserved_output_tokens" type="number" min="1" /><small>Token</small></label>
+          <label><span>模型最大输出</span><input v-model.number="row.reserved_output_tokens" type="number" min="1" /><small>Token</small></label>
           <label><span>压缩触发比例</span><input v-model.number="row.compression_trigger_percent" type="number" min="50" max="90" /><small>%</small></label>
           <label><span>压缩目标比例</span><input v-model.number="row.compression_target_percent" type="number" min="30" max="75" /><small>%</small></label>
         </div>
         <footer>
           <p v-if="row.error" class="context-row-error">{{ row.error }}</p>
           <p v-else-if="row.message" class="context-row-success">{{ row.message }}</p>
-          <span v-else>硬限制固定为 95%</span>
+          <span v-else>硬限制固定为 95%，单次回答仍受系统 100000 Token 上限约束</span>
           <button type="button" :disabled="row.saving" @click="savePolicy(row)">{{ row.saving ? '正在保存…' : '保存策略' }}</button>
         </footer>
       </article>

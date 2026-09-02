@@ -1,0 +1,7 @@
+{
+  "hostname": "www.hackerrank.com",
+  "expectedAdapter": "hackerrank",
+  "expectedDeep": true,
+  "visibleText": "Given an array of integers, return the maximum value.",
+  "expectedQuestionType": "algorithm"
+}

@@ -17,7 +17,7 @@ test('上下文余量圆环位于发送按钮左侧并提供无障碍状态', as
   assert.match(meter, /正在整理上下文|正在估算上下文/)
 })
 
-test('页面切换会话与模型时使用递增请求号重新估算', async () => {
+test('页面切换会话与模型时取消旧请求并延迟重新估算', async () => {
   const page = await readFile(new URL('./components/CareerAssistantPage.vue', import.meta.url), 'utf8')
   assert.match(page, /contextUsageRequestId/)
   assert.match(page, /contextUsageRevision/)
@@ -25,7 +25,10 @@ test('页面切换会话与模型时使用递增请求号重新估算', async ()
     page,
     /selectedConversation\.value\?\.id,\s*resolvedSelectedProfileId\.value,\s*contextUsageRevision\.value/,
   )
-  assert.match(page, /contextUsage\.value = null\s+void loadContextUsage\(\)/)
+  assert.match(page, /scheduleContextUsageLoad/)
+  assert.match(page, /contextUsageRequestId \+= 1/)
+  assert.match(page, /contextUsageAbortController\?\.abort\(\)/)
+  assert.match(page, /CONTEXT_USAGE_DEBOUNCE_MS/)
   assert.match(page, /contextUsageRevision\.value \+= 1/)
   assert.match(page, /loadContextUsage/)
   assert.match(page, /model_profile_id=/)

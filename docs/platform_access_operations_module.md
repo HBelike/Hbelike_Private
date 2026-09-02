@@ -13,8 +13,9 @@
 - **发件域名**：`resend.dev` 仅可用于向 Resend 账户自身的登录邮箱做测试，不能向 QQ 等其他邮箱投递。正式运行需在 Resend 验证自己的域名，并把 `RESEND_FROM_ADDRESS` 配为该域名下的地址；失败时系统会删除未投递挑战，用户可在修复配置后立即重新发送。
 - **注册开关**：生产环境的 `PLATFORM_PUBLIC_REGISTRATION_ENABLED=true` 时，用户先通过邮箱验证码完成注册，再以邮箱和密码登录；设为 `false` 时仅保留已有账号登录、绑定邮箱与密码找回。首个管理员仍由服务器 CLI 初始化，避免首账号被公网抢注。
 - **运行配置**：每一次保存会形成 JSONB 版本快照。手动/定时流水线读取已激活版本并将版本号写入执行记录，避免编辑中的参数影响运行中的任务。
-- **路由模块配置**：管理台以固定顺序维护求职助手、工作台、简历助手、面经库、职位库、技能库、评测中心、LangSmith、管理台九个顶级模块。配置按组织保存；模块开关只控制普通用户的侧栏导航和直接地址访问，平台管理员始终可以访问全部页面。管理台固定开启，评测中心、LangSmith、管理台仍需 `admin` 角色，模块开关不会提升普通用户权限。管理台按单页单任务拆分为 `/admin/modules`、`/admin/github`、`/admin/prompts` 三个子路由，旧地址 `/admin` 自动进入可见模块页。
+- **路由模块配置**：管理台以固定顺序维护求职助手、工作台、简历助手、面经库、职位库、技能库、评测中心、LangSmith、管理台九个顶级模块，并在“求职助手子功能”中分别维护 `career_interview_master` 与 `career_online_assessment`。两个开关默认开启，可独立控制面试大师和线上笔试助手的按钮与直达路由，并对包括管理员在内的所有用户生效。旧共享键 `career_interview_tools` 读取时会继承到两个新键。配置继续按组织保存到现有 `route_module_settings`，不新增表。管理台固定开启，评测中心、LangSmith、管理台仍需 `admin` 角色，模块开关不会提升普通用户权限。管理台按单页单任务拆分为 `/admin/modules`、`/admin/github`、`/admin/prompts` 三个子路由，旧地址 `/admin` 自动进入可见模块页。
 - **观测**：LangSmith 是平台一级路由。LangChain 调用使用 `run_name`，非 LangChain 调用使用轻量 trace/span；默认只记录脱敏元数据、状态和用量，不上传简历、图片、Cookie、密码或 API Key。页面优先 iframe 嵌入，遇到 CSP、X-Frame-Options 或第三方 Cookie 限制时提供新窗口打开。
+- **工作流实时日志**：管理员手动工作流把当前执行线程的 `INFO` 及以上日志和 Task 生命周期写入 PostgreSQL 事件表。工作台先读取历史事件，再通过 SSE 按游标续传；浏览器断线不会取消后台工作流，已完成运行仍可回看完整链路。
 
 ## 调用链
 
@@ -38,11 +39,28 @@ AdminConsolePage
   -> PlatformAccessService.save_route_modules
   -> PlatformAccessRepository.save_route_module_settings
   -> career_assistant.route_module_settings
+
+career_interview_master
+  -> App.vue 校验父模块与面试大师开关
+  -> CareerAssistantPage 隐藏面试大师入口
+  -> /career/interview-master 直达守卫
+
+career_online_assessment
+  -> App.vue 校验父模块与线上笔试开关
+  -> CareerAssistantPage 隐藏线上笔试入口
+  -> /career/online-assessment 直达守卫
+
+ManualPipelinePanel
+  -> GET /api/admin/pipeline-runs/{id}/logs（历史事件）
+  -> GET /api/admin/pipeline-runs/{id}/logs/stream（SSE 增量事件）
+  -> PlatformAccessService.list_manual_pipeline_events
+  -> PlatformAccessRepository.list_pipeline_execution_events
+  -> career_assistant.pipeline_execution_events
 ```
 
 ## 数据边界与部署
 
-- 新表位于 `career_assistant` schema：`platform_users`、`platform_sessions`、`platform_email_challenges`、`pipeline_config_versions`、`pipeline_execution_requests`、`route_module_settings`。
+- 新表位于 `career_assistant` schema：`platform_users`、`platform_sessions`、`platform_email_challenges`、`pipeline_config_versions`、`pipeline_execution_requests`、`pipeline_execution_events`、`route_module_settings`。
 - `20260825_20` 将旧 `viewer/operator` 归一化为 `user`，把 `2963613812@qq.com` 提升或保持为 `admin`，并通过角色检查、管理员邮箱检查与 `uq_platform_users_single_admin` 部分唯一索引共同固定管理员边界。
 - migration 只修改平台账号角色及其约束，不修改现有会话、面经、技能库或微信公众号表；会话解析实时读取账号角色，因此无需重建会话。
 - 生产环境必须通过 `CAREER_DATABASE_URL` 连接 PostgreSQL，并以 HTTPS 部署 Cookie；本地开发可通过 HTTP 使用同一代码路径。
@@ -59,6 +77,32 @@ AdminConsolePage
 7. 求职助手位于导航首位，并作为根路径、登录成功和未知地址的默认入口；若普通用户的求职助手被关闭，则跳转到其首个可访问模块。
 8. 路由模块默认全部启用；非管理员保存配置返回 403；关闭模块后普通用户侧栏不再展示，直接输入对应地址会跳转到首个可访问模块。
 9. 管理员始终可访问全部模块，包括开关关闭或配置读取失败时；关闭评测中心或 LangSmith 不会改变其他模块，启用管理员专属模块也不会让普通用户获得访问权限。
+10. 手动工作流运行中打开日志弹窗可持续收到事件；刷新或断线后按最后事件 ID 补发；运行结束后 SSE 关闭且历史日志仍可读取。
+11. 面试大师和线上笔试助手可以分别关闭；关闭项对普通用户和管理员都隐藏入口并阻止直达，未关闭项保持可用；管理员始终可从管理台恢复配置。
+
+## 2026-09-02：面试大师与线上笔试独立开关
+
+- **设计目标**：把原先的共享开关拆成两个独立开关，并让子功能开关对包括管理员在内的所有用户生效。
+- **技术取舍**：继续复用 `route_module_settings` JSONB，不新增迁移或数据表；新键为 `career_interview_master`、`career_online_assessment`，读取旧键 `career_interview_tools` 时将其布尔值继承给两个新键，显式新键优先。
+- **调用链**：管理台分别保存两个布尔值 → 后端按角色返回同一子功能可访问状态 → `App.vue` 分别控制直达路由 → `CareerAssistantPage` 分别控制两个按钮。
+- **权限边界**：顶级模块仍保留管理员豁免；两个求职子功能没有管理员豁免。管理台本身固定开启，管理员不会因关闭子功能而失去恢复入口。
+- **验证结果**：覆盖默认目录、旧键继承、独立开关、管理员关闭状态、按钮属性和直达路由消费键；前后端定向测试通过。
+
+## 2026-09-01：求职助手子功能展示开关（初版，已由双开关替代）
+
+- **设计目标**：用一个管理台开关同时控制面试大师与线上笔试助手的普通用户展示。
+- **技术取舍**：复用路由模块 JSONB 配置，在固定目录中增加 `scope=feature` 的 `career_interview_tools`，不新增表、接口或独立管理页面。
+- **调用链**：管理台保存完整布尔映射 → `/api/admin/navigation-modules` → `route_module_settings` → 普通用户加载 `/api/navigation/modules` → 求职助手入口和两个直达路由共同消费 `accessible`。
+- **权限边界**：开关只影响普通用户；管理员继续无视展示开关，业务 API 的原有身份校验不变。
+
+## 2026-08-30：手动工作流实时日志
+
+- **设计目标**：在工作台每条手动运行记录中提供“查看日志”按钮，动态展示工作流与 Task 链路，并支持运行结束后的历史回看。
+- **技术取舍**：不解析混合多个请求的全局 `app.log`，新增 `pipeline_execution_events` 保存结构化事件；实时传输使用现有 FastAPI `StreamingResponse` SSE 模式，不引入 WebSocket 或新依赖。
+- **调用链**：`ManualPipelineRunner` 创建专属 `PipelineExecutionLogHandler` → `Application/LoggerManager` 附加到当前工作流线程 → `BaseTask` 输出结构化生命周期字段 → PostgreSQL 持久化 → 历史 JSON 接口 + SSE 游标接口 → `PipelineLogDialog.vue` 合并去重并自动滚动。
+- **数据边界**：接口继续受 `require_admin` 保护，并按 `organization_id` 联表校验运行归属；单条消息限制 8000 字符，默认不新增 Prompt、模型原始响应、Cookie、密码或 API Key 的采集。
+- **验证结果**：本地 PostgreSQL 已升级至 `20260830_31`；日志 Handler、SSE 游标与终态测试通过；PC 弹窗完成本地实际渲染检查；Alembic 保持单 head，前端生产构建通过。
+- **后续边界**：本次不实现日志搜索、下载、删除、远程归档和手机端专项适配；未执行生产迁移或部署。
 
 ## 2026-08-28：面经管理员身份与会话透传修复
 

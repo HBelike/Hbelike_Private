@@ -2,6 +2,29 @@
 
 本文档记录本项目使用 `$find-skills` 查询生图类 skill 后，沉淀到 `ImageTask` 和 `ShortVideoPromptTask` 的规则。
 
+## 2026-08-28 最终技术结论
+
+旧方案把精确中文、节点排版和箭头方向同时交给 Seedream，实际产生元文字、残缺标签、重复节点和错误拓扑。继续缩短或堆叠 Prompt 不能从根本上解决，因为概率式位图模型无法证明逐字中文和关系方向正确。
+
+当前静态技术总结图已切换为：
+
+```text
+SummaryTask
+  -> evidence-bound ArticleVisualSpec v1
+  -> summary_card / flow / architecture / comparison / timeline
+  -> fixed HTML/CSS/inline SVG
+  -> Gotenberg + Noto Sans SC
+  -> DOM validation + PNG validation
+```
+
+项目已安装 `baoyu-article-illustrator`。采用的是它的 Type × Style × Palette 规划方法：先分析文章结构和传播目的，再选图型；整篇保持 `notion` 风格和 `editorial_blue` 色板；内容超容量时重选完整句或关闭式失败，不缩字、不截残句。baoyu 不作为后端运行时依赖，也不直接生成最终技术图，因为 Agent Skill 不是稳定渲染 API，常规生图路径仍不能保证中文与拓扑。
+
+Seedream 只保留两类边界：旧链路兼容；未来可选的无文字概念背景。它不再绘制中文标签、模块框、比较表或流程箭头。旧 `visual_brief` 仅为视频兼容保留，静态图不会消费其中的截断节点。
+
+真实验证使用本地 `content_id=20` 的 6 个历史项目：旧内容全部安全降级为 `summary_card`，首轮真实 Gotenberg 渲染 6 张、第二轮复用 6 张；全部为 `2048×1152` PNG。逐图确认无方框、裁切、重叠、重复节点和禁用元文字。验收中真实发现并修复两项质量缺陷：冒号被误判为句末导致“核心取舍是：”残句；legacy takeaway 直接复制能力卡导致信息重复。
+
+以下 skill 调研和 Prompt 方案保留为历史决策依据；其中 `visual_brief → Seedream` 不再代表当前静态图主路径。
+
 ## 已查询并安装的 skill
 
 1. `skills-collective/skills@ai-image-generation`

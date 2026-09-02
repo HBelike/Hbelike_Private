@@ -76,6 +76,25 @@ test('interview master view explains the supported desktop browsers', () => {
   assert.doesNotMatch(interviewMasterPage, /Chrome 电脑声音实时辅助/)
 })
 
+test('interview master exposes the hidden viewport V1 browser isolation contract', () => {
+  for (const copy of [
+    '隐藏视口V1',
+    '仅分享指定标签页或窗口时生效',
+    '分享整个屏幕时仍会显示',
+    '回答与问题已移至独立小窗',
+    '面试开始且实时连接就绪后可开启'
+  ]) {
+    assert.match(interviewMasterPage, new RegExp(copy))
+  }
+  assert.match(interviewMasterPage, /hiddenViewportEnabled/)
+  assert.match(interviewMasterPage, /toggleHiddenViewport/)
+  assert.match(interviewMasterPage, /hidden-viewport-stage/)
+  assert.match(interviewMasterPage, /connectionState\.value === 'ready'/)
+  assert.match(interviewMasterPage, /await createAndConnectLiveSession/)
+  assert.match(interviewMasterPage, /正在保留声音来源并自动重试/)
+  assert.match(interviewMasterPage, /generation === startGeneration/)
+})
+
 test('interview master view formats duration and Qwen estimate', () => {
   assert.equal(formatDuration(125), '02:05')
   assert.equal(estimateAsrCost(3600, 1), 1.188)

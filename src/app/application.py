@@ -42,9 +42,16 @@ from src.tasks.video_visual_quality_task import VideoVisualQualityTask
 class Application:
     """应用生命周期对象，负责串起配置、日志、数据库、调度和任务。"""
 
-    def __init__(self, project_root: Path, *, runtime_config: dict[str, object] | None = None) -> None:
+    def __init__(
+        self,
+        project_root: Path,
+        *,
+        runtime_config: dict[str, object] | None = None,
+        extra_log_handlers: tuple[logging.Handler, ...] = (),
+    ) -> None:
         self.project_root = project_root
         self.runtime_config = runtime_config
+        self.extra_log_handlers = extra_log_handlers
         self.config: AppConfig | None = None
         self.logger: logging.Logger | None = None
         self.database_manager: DatabaseManager | None = None
@@ -57,7 +64,9 @@ class Application:
         self.config = ConfigManager(project_root=self.project_root).load()
         if self.runtime_config is not None:
             self.config = apply_pipeline_config(self.config, self.runtime_config)
-        LoggerManager(project_root=self.project_root, config=self.config).initialize()
+        LoggerManager(project_root=self.project_root, config=self.config).initialize(
+            extra_handlers=self.extra_log_handlers,
+        )
         self.logger = logging.getLogger(__name__)
         self.database_manager = DatabaseManager(config=self.config)
         self.database_manager.initialize()
@@ -96,7 +105,7 @@ class Application:
                 self.logger.info("应用退出")
 
     def run_manual_pipeline(self) -> list[TaskResult]:
-        """手动消费最近 GitHub 快照并生成内容，不在每次运行时重复搜索 GitHub。"""
+        """手动刷新 GitHub 周榜后生成内容，避免使用过期快照。"""
 
         self.initialize()
         self._run_startup_self_check()
@@ -116,7 +125,7 @@ class Application:
         return results[0]
 
     def _run_once_pipeline(self) -> list[TaskResult]:
-        """手动执行一次内容流水线，复用最近一次 GitHub 周榜快照。"""
+        """手动执行一次内容流水线，并在生成前刷新 GitHub 周榜。"""
 
         return self._run_exclusive_pipeline(
             owner="once_pipeline",
@@ -124,7 +133,7 @@ class Application:
         )
 
     def _run_once_pipeline_unlocked(self) -> list[TaskResult]:
-        """在已持有流水线锁时从 SummaryTask 开始消费现有周榜快照。"""
+        """在已持有流水线锁时生成本周内容与预览，等待人工审核。"""
 
         assert self.config is not None
         task_classes = self._once_pipeline_task_classes(self.config)
@@ -135,9 +144,9 @@ class Application:
 
     @staticmethod
     def _once_pipeline_task_classes(config: AppConfig) -> tuple[type[BaseTask], ...]:
-        """根据媒体开关构建一次性流水线，关闭时不进入对应任务阶段。"""
+        """构建止于审核预览的一次性生成流水线。"""
 
-        task_classes: list[type[BaseTask]] = [SummaryTask]
+        task_classes: list[type[BaseTask]] = [SearchTask, SummaryTask]
         if config.video_submit_enabled:
             task_classes.append(ShortVideoPromptTask)
         task_classes.append(ImageTask)
@@ -158,7 +167,7 @@ class Application:
                     VideoAssemblyTask,
                 ]
             )
-        task_classes.extend([StorageTask, PreviewTask, ArticleLayoutTask, DeliverTask, CatTask])
+        task_classes.extend([StorageTask, PreviewTask, CatTask])
         return tuple(task_classes)
 
     def _run_weekly_content_production_job(self) -> None:

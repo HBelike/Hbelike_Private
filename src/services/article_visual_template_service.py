@@ -24,7 +24,7 @@ class ArticleVisualTemplateService:
 
     CANVAS_WIDTH = 2048
     CANVAS_HEIGHT = 1152
-    TEMPLATE_VERSION = "article_visual_v1"
+    TEMPLATE_VERSION = "article_visual_v2"
     FONT_FILE_NAME = "NotoSansSC-VF.ttf"
 
     _body_width = 1856
@@ -99,6 +99,15 @@ class ArticleVisualTemplateService:
             class_name="positioning-text",
         )
         capabilities = []
+        max_description_length = max(
+            len(str(item["description"])) for item in value["capabilities"]
+        )
+        if max_description_length > 80:
+            compact_copy_class = " capability-copy-dense"
+        elif max_description_length > 60:
+            compact_copy_class = " capability-copy-compact"
+        else:
+            compact_copy_class = ""
         for index, capability in enumerate(value["capabilities"]):
             label = self._text(
                 "h2", f"capability-{index}-label", capability["label"], expected
@@ -118,7 +127,8 @@ class ArticleVisualTemplateService:
             '<section class="positioning-card" data-layout-box="positioning">'
             '<span class="section-accent" aria-hidden="true"></span>'
             f"{positioning}</section>"
-            '<section class="capability-grid">'
+            '<section class="capability-grid '
+            f'capability-count-{len(capabilities)}{compact_copy_class}">'
             f'{"".join(capabilities)}</section></main>'
         )
 
@@ -129,17 +139,45 @@ class ArticleVisualTemplateService:
     ) -> str:
         steps = value["steps"]
         count = len(steps)
-        gap = 72
-        card_width = min(360, (self._body_width - gap * (count - 1)) // count)
-        total_width = card_width * count + gap * (count - 1)
-        start_x = (self._body_width - total_width) // 2
-        card_y = 52
-        card_height = 546
+        if count <= 5:
+            columns = count
+            rows = 1
+            horizontal_gap = 72
+            vertical_gap = 0
+            card_width = min(
+                360,
+                (self._body_width - horizontal_gap * (columns - 1)) // columns,
+            )
+            card_height = 546
+            start_y = 52
+            density_class = ""
+        else:
+            rows = math.ceil(count / 4)
+            columns = math.ceil(count / rows)
+            horizontal_gap = 40
+            vertical_gap = 28
+            card_width = (
+                self._body_width - horizontal_gap * (columns - 1)
+            ) // columns
+            card_height = (
+                self._body_height - vertical_gap * (rows - 1)
+            ) // rows
+            start_y = 0
+            density_class = " flow-node-compact" if rows == 2 else " flow-node-dense"
         positions: dict[str, tuple[int, int, int, int]] = {}
         cards = []
         for index, step in enumerate(steps):
-            x = start_x + index * (card_width + gap)
-            positions[step["id"]] = (x, card_y, card_width, card_height)
+            row = index // columns
+            local_column = index % columns
+            row_count = min(columns, count - row * columns)
+            display_column = (
+                local_column if row % 2 == 0 else row_count - local_column - 1
+            )
+            row_width = card_width * row_count + horizontal_gap * (row_count - 1)
+            row_start_x = (self._body_width - row_width) // 2
+            x = row_start_x + display_column * (card_width + horizontal_gap)
+            y = start_y + row * (card_height + vertical_gap)
+            positions[step["id"]] = (x, y, card_width, card_height)
             label = self._text(
                 "h2", f"flow-step-{index}-label", step["label"], expected
             )
@@ -150,10 +188,11 @@ class ArticleVisualTemplateService:
                 expected,
             )
             cards.append(
-                '<article class="flow-node node-card" '
-                f'data-node-id="{html.escape(step["id"], quote=True)}" data-x="{x}" '
+                f'<article class="flow-node node-card{density_class}" '
+                f'data-node-id="{html.escape(step["id"], quote=True)}" '
+                f'data-x="{x}" data-row="{row}" data-column="{display_column}" '
                 f'data-layout-box="flow-node-{index}" '
-                f'style="left:{x}px;top:{card_y}px;width:{card_width}px;height:{card_height}px">'
+                f'style="left:{x}px;top:{y}px;width:{card_width}px;height:{card_height}px">'
                 f'<span class="step-number">{index + 1:02d}</span>{label}{description}</article>'
             )
         edges = self._render_edges(value["edges"], positions, expected, "flow")
@@ -181,7 +220,14 @@ class ArticleVisualTemplateService:
             layer_id = node.get("layer", layers[0][0])
             nodes_by_layer[layer_id].append(node)
 
-        layer_gap = 14
+        layer_count = len(layers)
+        layer_gap = 14 if layer_count <= 4 else 8 if layer_count == 5 else 4
+        if layer_count >= 6:
+            density_class = " architecture-density-dense"
+        elif layer_count >= 4:
+            density_class = " architecture-density-compact"
+        else:
+            density_class = ""
         layer_height = (
             self._body_height - layer_gap * (len(layers) - 1)
         ) // len(layers)
@@ -253,7 +299,8 @@ class ArticleVisualTemplateService:
             value["edges"], positions, expected, "architecture"
         )
         return (
-            '<main class="visual-body relation-layout architecture-layout">'
+            '<main class="visual-body relation-layout architecture-layout '
+            f'architecture-layer-count-{layer_count}{density_class}">'
             f"{edges}{''.join(layer_sections)}"
             "</main>"
         )
@@ -444,15 +491,22 @@ body{{font-family:'Noto Sans SC',sans-serif;color:#172033;background:#f3f6fb}}
 .takeaway{{flex:1;min-width:0;height:100%;padding:28px 32px;display:flex;align-items:center;gap:20px;border:2px solid #dbe4f1;border-radius:24px;background:rgba(255,255,255,.88);box-shadow:0 12px 34px rgba(42,66,105,.06)}}
 .takeaway i{{width:12px;height:52px;flex:none;border-radius:9px;background:#2463eb}}
 .takeaway-text{{font-size:30px;line-height:1.45;font-weight:580;color:#253550}}
-.summary-layout{{display:grid;grid-template-columns:44% 1fr;grid-template-rows:minmax(0,1fr);gap:28px;min-height:0}}
+.summary-layout{{display:grid;grid-template-columns:44% 1fr;grid-template-rows:minmax(0,1fr);gap:28px;min-height:0;height:670px}}
 .positioning-card,.capability-card,.comparison-heading,.comparison-row,.node-card{{border:2px solid #d7e1ef;background:rgba(255,255,255,.94);box-shadow:0 16px 42px rgba(41,65,104,.08)}}
 .positioning-card{{position:relative;height:100%;padding:70px 56px;border-radius:32px;display:flex;align-items:center}}
 .section-accent{{position:absolute;left:56px;top:58px;width:110px;height:8px;border-radius:8px;background:#2463eb}}
 .positioning-text{{margin:0;font-size:39px;line-height:1.65;font-weight:620;color:#23334f}}
 .capability-grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));grid-auto-rows:1fr;gap:22px}}
-.capability-card{{min-width:0;min-height:0;padding:38px 40px;border-radius:28px}}
-.capability-card h2,.node-card h2,.node-card h3{{margin:0 0 16px;font-size:38px;line-height:1.25;color:#164fbf}}
+.capability-grid.capability-count-3{{grid-template-columns:1fr;grid-template-rows:repeat(3,minmax(0,1fr));gap:16px}}
+.capability-card{{min-width:0;min-height:0;padding:28px 32px;border-radius:28px}}
+.capability-count-3 .capability-card{{padding:20px 30px}}
+.capability-card h2,.node-card h2,.node-card h3{{margin:0 0 12px;font-size:38px;line-height:1.25;color:#164fbf}}
+.capability-count-3 .capability-card h2{{margin-bottom:8px}}
 .capability-card p,.node-card p{{margin:0;font-size:30px;line-height:1.55;color:#52627b}}
+.capability-copy-compact .capability-card p{{font-size:26px;line-height:1.4}}
+.capability-copy-dense .capability-card{{padding:20px 26px}}
+.capability-copy-dense .capability-card h2{{margin-bottom:8px;font-size:32px}}
+.capability-copy-dense .capability-card p{{font-size:20px;line-height:1.28}}
 .relation-layout{{position:absolute}}
 .edge-layer{{position:absolute;inset:0;width:100%;height:100%;overflow:visible;z-index:1}}
 .relation-edge{{fill:none;stroke:#6383b6;stroke-width:5;stroke-linecap:round}}
@@ -461,12 +515,28 @@ body{{font-family:'Noto Sans SC',sans-serif;color:#172033;background:#f3f6fb}}
 .edge-label text{{font-size:24px;text-anchor:middle;dominant-baseline:middle;fill:#34527e}}
 .node-card{{position:absolute;z-index:2;border-radius:26px;padding:38px 32px}}
 .flow-node{{display:flex;flex-direction:column;justify-content:center;padding:34px 32px}}
+.flow-node-compact{{padding:24px 28px}}
+.flow-node-compact h2{{margin-bottom:8px;font-size:34px}}
+.flow-node-compact p{{font-size:26px;line-height:1.4}}
+.flow-node-dense{{padding:16px 22px}}
+.flow-node-dense h2{{margin-bottom:6px;font-size:28px;line-height:1.2}}
+.flow-node-dense p{{font-size:21px;line-height:1.3}}
 .step-number{{position:absolute;right:24px;top:20px;font-size:30px;font-weight:760;color:#b8c8df}}
+.flow-node-compact .step-number{{right:18px;top:14px;font-size:25px}}
+.flow-node-dense .step-number{{right:14px;top:10px;font-size:20px}}
 .architecture-layer{{position:absolute;left:0;width:100%;border:2px solid #dce5f1;border-radius:26px;background:rgba(238,244,252,.6);z-index:2}}
 .layer-label{{position:absolute;left:24px;top:50%;width:108px;margin:0;transform:translateY(-50%);font-size:32px;line-height:1.35;color:#34527e;text-align:center}}
 .architecture-node{{padding:24px 28px;display:flex;flex-direction:column;justify-content:center}}
 .architecture-node h3{{font-size:34px;margin-bottom:10px}}
 .architecture-node p{{font-size:27px;line-height:1.42}}
+.architecture-density-compact .layer-label{{font-size:24px}}
+.architecture-density-compact .architecture-node{{padding:10px 16px}}
+.architecture-density-compact .architecture-node h3{{font-size:24px;line-height:1.2;margin-bottom:4px}}
+.architecture-density-compact .architecture-node p{{font-size:18px;line-height:1.2}}
+.architecture-density-dense .layer-label{{font-size:16px;line-height:1.15}}
+.architecture-density-dense .architecture-node{{padding:4px 10px}}
+.architecture-density-dense .architecture-node h3{{font-size:18px;line-height:1.15;margin-bottom:1px}}
+.architecture-density-dense .architecture-node p{{font-size:14px;line-height:1.15}}
 .architecture-layout .edge-layer{{z-index:3}}
 .architecture-layout .architecture-node{{z-index:4}}
 .comparison-layout{{display:grid;grid-template-columns:1fr 6px 1fr;grid-template-rows:250px 1fr;gap:22px 28px}}

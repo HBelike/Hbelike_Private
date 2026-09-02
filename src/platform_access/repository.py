@@ -762,6 +762,100 @@ class PlatformAccessRepository:
             ).mappings().all()
         return [self._execution_payload(row) for row in rows]
 
+    def get_pipeline_execution_request(
+        self,
+        organization_id: UUID,
+        request_id: UUID,
+    ) -> dict[str, object] | None:
+        """读取当前 organization 内的一次工作流运行。"""
+
+        with self._database.transaction() as connection:
+            row = connection.execute(
+                text(
+                    """
+                    SELECT id, status, error_message, metadata_json, created_at, updated_at
+                    FROM career_assistant.pipeline_execution_requests
+                    WHERE id = :id AND organization_id = :organization_id
+                    """
+                ),
+                {"id": request_id, "organization_id": organization_id},
+            ).mappings().one_or_none()
+        return None if row is None else self._execution_payload(row)
+
+    def append_pipeline_execution_event(
+        self,
+        request_id: UUID,
+        *,
+        event_type: str,
+        level: str,
+        message: str,
+        task_name: str | None = None,
+        task_run_id: str | None = None,
+    ) -> dict[str, object]:
+        """追加一条结构化运行事件，数据库 ID 作为全局稳定游标。"""
+
+        normalized_type = event_type.strip()
+        normalized_message = message.strip()
+        if not normalized_type or not normalized_message:
+            raise ValueError("工作流日志事件类型和内容不能为空")
+        with self._database.transaction() as connection:
+            row = connection.execute(
+                text(
+                    """
+                    INSERT INTO career_assistant.pipeline_execution_events
+                        (execution_request_id, event_type, level, task_name, task_run_id, message)
+                    VALUES
+                        (:request_id, :event_type, :level, :task_name, :task_run_id, :message)
+                    RETURNING id, event_type, level, task_name, task_run_id, message, created_at
+                    """
+                ),
+                {
+                    "request_id": request_id,
+                    "event_type": normalized_type[:80],
+                    "level": (level.strip() or "INFO")[:20],
+                    "task_name": None if task_name is None else task_name[:240],
+                    "task_run_id": None if task_run_id is None else task_run_id[:240],
+                    "message": normalized_message[:8000],
+                },
+            ).mappings().one()
+        return self._pipeline_event_payload(row)
+
+    def list_pipeline_execution_events(
+        self,
+        organization_id: UUID,
+        request_id: UUID,
+        *,
+        after_id: int = 0,
+        limit: int = 500,
+    ) -> list[dict[str, object]]:
+        """按递增游标读取当前 organization 可见的工作流事件。"""
+
+        safe_limit = max(1, min(limit, 1000))
+        with self._database.transaction() as connection:
+            rows = connection.execute(
+                text(
+                    """
+                    SELECT event.id, event.event_type, event.level, event.task_name,
+                           event.task_run_id, event.message, event.created_at
+                    FROM career_assistant.pipeline_execution_events AS event
+                    JOIN career_assistant.pipeline_execution_requests AS request
+                      ON request.id = event.execution_request_id
+                    WHERE event.execution_request_id = :request_id
+                      AND request.organization_id = :organization_id
+                      AND event.id > :after_id
+                    ORDER BY event.id ASC
+                    LIMIT :limit
+                    """
+                ),
+                {
+                    "request_id": request_id,
+                    "organization_id": organization_id,
+                    "after_id": max(0, after_id),
+                    "limit": safe_limit,
+                },
+            ).mappings().all()
+        return [self._pipeline_event_payload(row) for row in rows]
+
     @staticmethod
     def _execution_payload(row: object) -> dict[str, object]:
         """将执行记录映射为不携带内部连接对象的 API 数据。"""
@@ -776,6 +870,20 @@ class PlatformAccessRepository:
             "metadata": metadata if isinstance(metadata, dict) else {},
             "created_at": row["created_at"].isoformat(),
             "updated_at": row["updated_at"].isoformat(),
+        }
+
+    @staticmethod
+    def _pipeline_event_payload(row: object) -> dict[str, object]:
+        """将事件行转换为 JSON 可序列化数据。"""
+
+        return {
+            "id": int(row["id"]),
+            "event_type": str(row["event_type"]),
+            "level": str(row["level"]),
+            "task_name": row["task_name"],
+            "task_run_id": row["task_run_id"],
+            "message": str(row["message"]),
+            "created_at": row["created_at"].isoformat(),
         }
 
     @staticmethod

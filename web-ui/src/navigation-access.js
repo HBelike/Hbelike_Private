@@ -8,6 +8,7 @@ export function normalizeAppRoute(pathname, reviewRoutes = []) {
   if (AUTH_ROUTES.has(pathname)) return pathname
   if (pathname === '/career') return '/career'
   if (pathname === '/career/interview-master') return '/career/interview-master'
+  if (pathname === '/career/online-assessment') return '/career/online-assessment'
   if (pathname === '/resume-assistant' || pathname.startsWith('/resume-assistant/')) return '/resume-assistant'
   if (pathname === '/interviews/jobs') return '/interviews/jobs'
   if (pathname === '/interviews') return '/interviews'
@@ -32,6 +33,10 @@ export function canAccessNavigationItem(item, configuredModule, role) {
   if (!item?.enabled) return false
   if (item.requiredRole && role !== item.requiredRole) return false
   return Boolean(configuredModule?.accessible)
+}
+
+export function canAccessConfiguredFeature(configuredFeature, _role) {
+  return Boolean(configuredFeature?.enabled && configuredFeature?.accessible)
 }
 
 export function buildNavigationFallback(items, role) {

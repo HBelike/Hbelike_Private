@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import unittest
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -69,6 +70,16 @@ class FakeTurnJobRepository:
     def get_turn_limit(self, actor_id, conversation_id):
         del actor_id, conversation_id
         return ConversationTurnLimit(successful_turns=0, remaining_turns=30)
+
+    def list_active_turns(self, actor_id, conversation_id):
+        if (
+            actor_id == self.queue_status.turn.actor_id
+            and conversation_id == self.queue_status.turn.conversation_id
+            and self.queue_status.turn.status
+            in {AgentTurnStatus.QUEUED, AgentTurnStatus.RUNNING}
+        ):
+            return (self.queue_status,)
+        return ()
 
     def list_events(self, actor_id, turn_id, *, after_id=0, limit=200):
         return tuple(event for event in self.events if event.id > after_id)
@@ -159,6 +170,49 @@ class CareerTurnApiTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CareerTurnApiRouteTests(unittest.TestCase):
+    def test_active_turns_uses_lightweight_repository_without_full_services(self) -> None:
+        from src.career_assistant.web import turn_router
+
+        actor_id = uuid4()
+        conversation_id = uuid4()
+        status_record = _queue_status(
+            actor_id=actor_id,
+            conversation_id=conversation_id,
+            turn_id=uuid4(),
+        )
+        repository = FakeTurnJobRepository(status_record)
+        app = FastAPI()
+        app.include_router(turn_router.router)
+
+        def load_repository_off_event_loop(_request):
+            with self.assertRaises(RuntimeError):
+                asyncio.get_running_loop()
+            return repository
+
+        with (
+            patch.object(
+                turn_router,
+                "get_career_turn_job_repository",
+                side_effect=load_repository_off_event_loop,
+            ),
+            patch.object(
+                turn_router,
+                "get_career_services",
+                side_effect=AssertionError("查看活动 Turn 不应初始化完整 Agent 服务"),
+            ),
+            patch.object(
+                turn_router,
+                "get_request_actor",
+                return_value=SimpleNamespace(actor_id=actor_id),
+            ),
+        ):
+            response = TestClient(app).get(
+                f"/api/career/conversations/{conversation_id}/active-turns",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["items"][0]["id"], str(status_record.turn.id))
+
     def test_context_usage_resolves_explicit_model_profile(self) -> None:
         from src.career_assistant.web import turn_router
 
@@ -213,6 +267,65 @@ class CareerTurnApiRouteTests(unittest.TestCase):
         self.assertEqual(selection.mode, ModelSelectionMode.SPECIFIC_PROFILE)
         self.assertEqual(selection.profile_id, profile_id)
         self.assertEqual(response.json()["context_usage"]["remaining_percent"], 88)
+
+    def test_context_usage_initializes_full_services_outside_event_loop(self) -> None:
+        from src.career_assistant.web import turn_router
+
+        actor_id = uuid4()
+        organization_id = uuid4()
+        conversation_id = uuid4()
+        profile_id = uuid4()
+        services = SimpleNamespace(
+            conversation_repository=SimpleNamespace(
+                get_conversation=Mock(return_value=SimpleNamespace(id=conversation_id)),
+                get_latest_agent_turn=Mock(return_value=None),
+                count_successful_turns=Mock(return_value=0),
+            ),
+            model_gateway=SimpleNamespace(
+                resolve=Mock(return_value=SimpleNamespace(profile_id=profile_id)),
+            ),
+            prompt_context_service=SimpleNamespace(
+                empty_snapshot=Mock(
+                    return_value=SimpleNamespace(
+                        context_usage=SimpleNamespace(
+                            used_percent=8,
+                            remaining_percent=92,
+                            state=SimpleNamespace(value="healthy"),
+                        )
+                    )
+                )
+            ),
+        )
+
+        def load_services_off_event_loop(_request):
+            with self.assertRaises(RuntimeError):
+                asyncio.get_running_loop()
+            return services
+
+        app = FastAPI()
+        app.include_router(turn_router.router)
+        with (
+            patch.object(
+                turn_router,
+                "get_career_services",
+                side_effect=load_services_off_event_loop,
+            ),
+            patch.object(
+                turn_router,
+                "get_request_actor",
+                return_value=SimpleNamespace(
+                    actor_id=actor_id,
+                    organization_id=organization_id,
+                ),
+            ),
+        ):
+            response = TestClient(app).get(
+                f"/api/career/conversations/{conversation_id}/context-usage",
+                params={"model_profile_id": str(profile_id)},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["context_usage"]["remaining_percent"], 92)
 
     def test_text_turn_endpoint_returns_202_and_server_queue_status(self) -> None:
         from src.career_assistant.web import turn_router

@@ -1,10 +1,16 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 
 import {
   INTERVIEW_MASTER_WINDOW_NAME,
   openBrowserInterviewMaster
 } from './browser-interview-launcher.js'
+
+const careerAssistantPage = readFileSync(
+  new URL('./components/CareerAssistantPage.vue', import.meta.url),
+  'utf8'
+)
 
 test('browser interview launcher opens a named window with current model', () => {
   const calls = []
@@ -34,4 +40,9 @@ test('browser interview launcher falls back to a new tab when popup is blocked',
 
   assert.equal(result, false)
   assert.equal(new URL(fallback).pathname, '/career/interview-master')
+})
+
+test('career assistant stays quiet when interview master opens successfully', () => {
+  assert.doesNotMatch(careerAssistantPage, /面试大师已在独立浏览器窗口打开/)
+  assert.match(careerAssistantPage, /feedback\.value = opened \? '' : '弹窗被拦截，已改为在新标签页打开。'/)
 })

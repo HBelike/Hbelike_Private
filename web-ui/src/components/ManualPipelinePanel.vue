@@ -1,5 +1,6 @@
 <script setup>
 import { onBeforeUnmount, onMounted, ref } from 'vue'
+import PipelineLogDialog from './PipelineLogDialog.vue'
 
 const runningPipeline = ref(false)
 const loadingRuns = ref(true)
@@ -9,6 +10,7 @@ const pipelineRuns = ref([])
 const githubSnapshot = ref(null)
 const snapshotLoading = ref(true)
 const snapshotError = ref('')
+const selectedPipelineRun = ref(null)
 let pipelinePollTimer = null
 
 onMounted(() => {
@@ -59,7 +61,7 @@ async function loadPipelineRuns() {
 }
 
 /**
- * 使用既有管理员流水线 API 提交一次完整任务链。
+ * 使用既有管理员流水线 API 提交一次止于审核预览的生成任务链。
  * client_request_id 让重复点击或网络重试不会创建两次运行记录。
  */
 async function startPipeline() {
@@ -80,15 +82,15 @@ async function startPipeline() {
           : `manual-${Date.now()}-${Math.random().toString(16).slice(2)}`
       })
     })
-    if (!response.ok) throw new Error(await responseError(response, '无法提交完整流水线'))
+    if (!response.ok) throw new Error(await responseError(response, '无法提交生成流程'))
 
     const item = (await response.json()).item
-    successMessage.value = `已提交完整流水线${item?.id ? ` #${String(item.id).slice(0, 8)}` : ''}，任务将在后台依次执行。`
+    successMessage.value = `已提交生成流程${item?.id ? ` #${String(item.id).slice(0, 8)}` : ''}，任务将在后台依次执行。`
     await loadPipelineRuns()
     startPipelinePolling()
   } catch (error) {
     runningPipeline.value = false
-    errorMessage.value = error instanceof Error ? error.message : '无法提交完整流水线'
+    errorMessage.value = error instanceof Error ? error.message : '无法提交生成流程'
   }
 }
 
@@ -140,7 +142,7 @@ async function responseError(response, fallback) {
     <div class="manual-pipeline-heading">
       <div>
         <h2 id="manual-pipeline-title">手动运行本周工作流</h2>
-        <p>基于最近一次 GitHub 周榜快照执行总结、图片、排版和草稿创建。</p>
+        <p>运行时会先刷新 GitHub 周榜，再生成总结、图片和审核预览；审核通过后才创建公众号草稿。</p>
       </div>
       <span v-if="runningPipeline" class="manual-pipeline-badge running">任务运行中</span>
     </div>
@@ -148,14 +150,14 @@ async function responseError(response, fallback) {
     <div v-if="errorMessage" class="manual-pipeline-alert danger" role="alert">{{ errorMessage }}</div>
     <div v-if="successMessage" class="manual-pipeline-alert success" role="status">{{ successMessage }}</div>
     <div class="manual-snapshot-summary">
-      <strong>本次使用的 GitHub 快照</strong>
+      <strong>当前 GitHub 周榜快照</strong>
       <span v-if="snapshotLoading">正在读取…</span>
       <template v-else-if="githubSnapshot">
         <span>{{ githubSnapshot.week_start }} 至 {{ githubSnapshot.week_end }}</span>
         <span>{{ githubSnapshot.project_count }} 个项目</span>
         <span>更新于 {{ snapshotTime(githubSnapshot.updated_at) }}</span>
       </template>
-      <span v-else>暂无快照，请先到管理台点击“刷新 GitHub 热门项目”。</span>
+      <span v-else>暂无历史快照，运行生成流程时会自动刷新。</span>
     </div>
     <div v-if="snapshotError" class="manual-pipeline-alert danger" role="alert">{{ snapshotError }}</div>
 
@@ -163,10 +165,10 @@ async function responseError(response, fallback) {
       <button
         class="refresh-button"
         type="button"
-        :disabled="runningPipeline || snapshotLoading || !githubSnapshot"
+        :disabled="runningPipeline || snapshotLoading"
         @click="startPipeline"
       >
-        {{ runningPipeline ? '完整流程运行中…' : '运行完整流程' }}
+        {{ runningPipeline ? '生成流程运行中…' : '运行生成流程' }}
       </button>
       <button class="secondary-button" type="button" :disabled="loadingRuns" @click="loadPipelineRuns">
         {{ loadingRuns ? '读取状态中…' : '刷新运行状态' }}
@@ -180,12 +182,21 @@ async function responseError(response, fallback) {
           <strong>#{{ String(item.id).slice(0, 8) }}</strong>
           <small>{{ pipelineTime(item.started_at || item.created_at) }}</small>
         </div>
-        <span class="manual-run-status" :class="pipelineStatusClass(item.status)">{{ pipelineStatusText(item.status) }}</span>
+        <div class="manual-run-actions">
+          <span class="manual-run-status" :class="pipelineStatusClass(item.status)">{{ pipelineStatusText(item.status) }}</span>
+          <button type="button" class="pipeline-log-button" @click="selectedPipelineRun = item">查看日志</button>
+        </div>
         <p v-if="item.error_message">{{ item.error_message }}</p>
         <p v-else-if="item.metadata?.tasks?.length">已记录 {{ item.metadata.tasks.length }} 个任务结果</p>
         <p v-else>任务已登记，等待执行器更新。</p>
       </article>
     </div>
     <p v-else class="manual-pipeline-empty">暂无手动运行记录。</p>
+
+    <PipelineLogDialog
+      v-if="selectedPipelineRun"
+      :run="selectedPipelineRun"
+      @close="selectedPipelineRun = null"
+    />
   </section>
 </template>

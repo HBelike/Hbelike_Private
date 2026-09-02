@@ -20,9 +20,11 @@ def test_usage_accumulator_keeps_unknown_provider_usage_unknown() -> None:
     assert accumulator.value() == CompletionUsage(None, None)
 
 
-def test_response_uses_reserved_output_for_all_answer_paths() -> None:
+def test_response_uses_prepared_runtime_output_for_all_answer_paths() -> None:
     source = Path("src/career_assistant/response_runner.py").read_text(encoding="utf-8")
-    assert "max_tokens=resolution.profile.context_policy.reserved_output_tokens" in source
+    assert source.count("max_tokens=prepared.context_usage.reserved_output_tokens") == 2
+    assert "max_tokens=resolution.profile.context_policy.reserved_output_tokens" not in source
+    assert "TOOL_CALL_MAX_TOKENS" in source
     assert source.count("usage_callback=usage_accumulator.observe") >= 3
     assert '"context_hard_limit_reached"' in source
 

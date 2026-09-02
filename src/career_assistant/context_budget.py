@@ -15,6 +15,7 @@ from src.career_assistant.persistence.model_profile_repository import ModelConte
 TOKEN_SAFETY_FACTOR = 1.15
 HARD_LIMIT_PERCENT = 95
 PROVIDER_WRAPPER_TOKENS = 24
+MINIMUM_VIABLE_OUTPUT_TOKENS = 1_024
 
 
 class ContextUsageState(StrEnum):
@@ -136,14 +137,7 @@ class ContextBudgetService:
         state: ContextUsageState | None = None,
     ) -> ContextUsageSnapshot:
         policy.validate()
-        raw_input = PROVIDER_WRAPPER_TOKENS + sum(
-            component.extra_token_estimate for component in components
-        ) + sum(
-            self._estimator.estimate_message(message)
-            for component in components
-            for message in component.messages
-        )
-        estimated_input = math.ceil(raw_input * TOKEN_SAFETY_FACTOR)
+        estimated_input = self._estimated_input_tokens(components)
         projected = estimated_input + policy.reserved_output_tokens
         used = math.ceil(projected / policy.context_window_tokens * 100)
         resolved_state = state or self._state_for(used, policy)
@@ -155,6 +149,53 @@ class ContextBudgetService:
             used_percent=used,
             remaining_percent=max(0, 100 - used),
             state=resolved_state,
+        )
+
+    def _estimated_input_tokens(
+        self,
+        components: tuple[PromptComponent, ...],
+    ) -> int:
+        """使用同一保守公式估算实际输入，供占用与动态输出额度复用。"""
+
+        raw_input = PROVIDER_WRAPPER_TOKENS + sum(
+            component.extra_token_estimate for component in components
+        ) + sum(
+            self._estimator.estimate_message(message)
+            for component in components
+            for message in component.messages
+        )
+        return math.ceil(raw_input * TOKEN_SAFETY_FACTOR)
+
+    def runtime_policy(
+        self,
+        components: tuple[PromptComponent, ...],
+        policy: ModelContextPolicy,
+        *,
+        system_max_output_tokens: int,
+    ) -> ModelContextPolicy:
+        """按模型能力、系统上限和 95% 内剩余空间生成本轮临时策略。"""
+
+        policy.validate()
+        if (
+            isinstance(system_max_output_tokens, bool)
+            or not isinstance(system_max_output_tokens, int)
+            or system_max_output_tokens <= 0
+        ):
+            raise ValueError("系统最大输出必须为正整数")
+        safe_total = math.floor(
+            policy.context_window_tokens * HARD_LIMIT_PERCENT / 100,
+        )
+        available_output = max(
+            1,
+            safe_total - self._estimated_input_tokens(components),
+        )
+        return replace(
+            policy,
+            reserved_output_tokens=min(
+                policy.reserved_output_tokens,
+                system_max_output_tokens,
+                available_output,
+            ),
         )
 
     def fit(

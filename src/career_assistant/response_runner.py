@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import requests
 
@@ -47,6 +47,7 @@ from src.career_assistant.skill_tools import SkillToolRegistry
 
 
 LOGGER = logging.getLogger(__name__)
+TOOL_CALL_MAX_TOKENS = 4_096
 
 
 @dataclass(frozen=True)
@@ -123,9 +124,9 @@ class CareerResponseRunner:
         if (
             isinstance(max_persisted_response_characters, bool)
             or not isinstance(max_persisted_response_characters, int)
-            or not 1 <= max_persisted_response_characters <= 30_000
+            or not 1 <= max_persisted_response_characters <= 500_000
         ):
-            raise ValueError("助手回复持久化字符上限必须在 1 到 30000 之间")
+            raise ValueError("助手回复持久化字符上限必须在 1 到 500000 之间")
         if isinstance(max_attempts, bool) or not isinstance(max_attempts, int) or not 1 <= max_attempts <= 2:
             raise ValueError("模型生成最多只能尝试 1 到 2 次")
         if isinstance(retry_backoff_seconds, bool) or not isinstance(retry_backoff_seconds, int | float) or retry_backoff_seconds <= 0:
@@ -198,7 +199,7 @@ class CareerResponseRunner:
 
         usage_id, usage_accumulator = self._start_answer_usage(active_turn, resolution)
         options = CompletionRequestOptions(
-            max_tokens=resolution.profile.context_policy.reserved_output_tokens,
+            max_tokens=prepared.context_usage.reserved_output_tokens,
         )
         try:
             prompt = list(prepared.messages)
@@ -314,7 +315,7 @@ class CareerResponseRunner:
         prompt = list(prepared.messages)
         usage_id, usage_accumulator = self._start_answer_usage(active_turn, resolution)
         options = CompletionRequestOptions(
-            max_tokens=resolution.profile.context_policy.reserved_output_tokens,
+            max_tokens=prepared.context_usage.reserved_output_tokens,
         )
         try:
             skill_executions: tuple[SkillExecutionTrace, ...] = ()
@@ -504,6 +505,13 @@ class CareerResponseRunner:
             ),
         )
         traces: list[SkillExecutionTrace] = []
+        tool_options = replace(
+            options or CompletionRequestOptions(),
+            max_tokens=min(
+                (options.max_tokens if options else None) or TOOL_CALL_MAX_TOKENS,
+                TOOL_CALL_MAX_TOKENS,
+            ),
+        )
         for _round in range(6):
             response = self._chat_client.complete_with_tools(
                 resolution.profile,
@@ -512,7 +520,7 @@ class CareerResponseRunner:
                 definitions,
                 tool_choice="auto",
                 api_key=resolution.credential,
-                options=options,
+                options=tool_options,
                 usage_callback=usage_callback,
             )
             if not response.tool_calls:

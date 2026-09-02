@@ -76,23 +76,32 @@ test('browser live interview derives same-origin WebSocket URL', () => {
   )
 })
 
-test('browser live interview socket waits for ready and applies backpressure', () => {
-  class FakeWebSocket {
+function createFakeWebSocketClass() {
+  return class FakeWebSocket {
     static OPEN = 1
+    static instances = []
 
     constructor(url) {
       this.url = url
       this.readyState = 1
       this.bufferedAmount = 0
       this.sent = []
+      this.constructor.instances.push(this)
     }
 
     send(payload) {
       this.sent.push(JSON.parse(payload))
     }
 
-    close() {}
+    close(code = 1000, reason = '') {
+      this.readyState = 3
+      this.onclose?.({ code, reason })
+    }
   }
+}
+
+test('browser live interview socket waits for ready and applies backpressure', async () => {
+  const FakeWebSocket = createFakeWebSocketClass()
 
   const states = []
   const socket = new LiveInterviewSocket({
@@ -102,13 +111,61 @@ test('browser live interview socket waits for ready and applies backpressure', (
     onEvent: () => {},
     onStateChange: (value) => states.push(value)
   })
-  socket.connect()
+  const ready = socket.connect()
   socket.socket.onopen()
   assert.equal(socket.sendAudio('interviewer', 0, new Int16Array([1])), false)
   socket.socket.onmessage({ data: JSON.stringify({ type: 'session.ready', active_channels: ['interviewer'] }) })
+  await ready
   assert.equal(socket.sendAudio('interviewer', 0, new Int16Array([1])), true)
   socket.socket.bufferedAmount = 1_000_001
   assert.equal(socket.sendAudio('interviewer', 1, new Int16Array([2])), false)
   assert.ok(states.includes('ready'))
+  socket.close()
+})
+
+test('browser live interview socket reports a close before session ready', async () => {
+  const FakeWebSocket = createFakeWebSocketClass()
+  const states = []
+  const socket = new LiveInterviewSocket({
+    sessionId: 'session-close-before-ready',
+    location: { protocol: 'http:', host: 'localhost:5173' },
+    WebSocketImpl: FakeWebSocket,
+    onEvent: () => {},
+    onStateChange: (value, detail) => states.push({ value, detail })
+  })
+
+  const ready = socket.connect({ readyTimeoutMs: 100 })
+  socket.socket.onclose({ code: 1011, reason: 'asr unavailable' })
+
+  await assert.rejects(ready, /asr unavailable/)
+  assert.deepEqual(states.at(-1), {
+    value: 'disconnected',
+    detail: { code: 1011, reason: 'asr unavailable', wasReady: false }
+  })
+})
+
+test('browser live interview socket ignores a stale close after reconnecting', async () => {
+  const FakeWebSocket = createFakeWebSocketClass()
+  const states = []
+  const socket = new LiveInterviewSocket({
+    sessionId: 'session-reconnect',
+    location: { protocol: 'http:', host: 'localhost:5173' },
+    WebSocketImpl: FakeWebSocket,
+    onEvent: () => {},
+    onStateChange: (value) => states.push(value)
+  })
+
+  const firstReady = socket.connect({ readyTimeoutMs: 100 })
+  const firstSocket = socket.socket
+  const firstRejected = assert.rejects(firstReady, /已取消/)
+  const secondReady = socket.connect({ readyTimeoutMs: 100 })
+  await firstRejected
+  const secondSocket = socket.socket
+  firstSocket.onclose?.({ code: 1006, reason: '' })
+  secondSocket.onmessage({ data: JSON.stringify({ type: 'session.ready', active_channels: ['interviewer'] }) })
+  await secondReady
+
+  assert.equal(socket.ready, true)
+  assert.equal(states.filter((value) => value === 'disconnected').length, 0)
   socket.close()
 })

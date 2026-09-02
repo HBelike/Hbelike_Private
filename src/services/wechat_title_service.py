@@ -3,38 +3,28 @@ from __future__ import annotations
 import re
 
 
-DEFAULT_WECHAT_TITLE_MAX_CHARS = 28
+DEFAULT_WECHAT_TITLE = "GitHub 技术周报"
+WECHAT_TITLE_MAX_CHARS = 32
 
 
-def compact_wechat_title(title: str, max_chars: int = DEFAULT_WECHAT_TITLE_MAX_CHARS) -> str:
-    """生成适合公众号草稿标题栏展示的紧凑标题。
-
-    正文标题保持完整；该函数仅供公众号草稿标题和审核台预览使用，避免
-    64 字符的长标题在公众号编辑器中显得拥挤或被截断得难以理解。
-    """
+def normalize_wechat_title(title: str) -> str:
+    """清理标题空白，但不改变标题内容。"""
 
     normalized = re.sub(r"\s+", " ", str(title or "")).strip()
-    if not normalized:
-        return "GitHub 技术周报"
+    return normalized or DEFAULT_WECHAT_TITLE
 
-    try:
-        limit = int(max_chars)
-    except (TypeError, ValueError):
-        limit = DEFAULT_WECHAT_TITLE_MAX_CHARS
-    limit = max(8, limit)
 
-    if len(normalized) <= limit:
-        return normalized
+def validate_wechat_title(
+    title: str,
+    max_chars: int = WECHAT_TITLE_MAX_CHARS,
+) -> str:
+    """按微信 ``draft/add`` 的字段合同校验标题，不做静默截断。"""
 
-    # 尽量在自然分隔符处截断，避免标题以半句话结束。
-    candidate = normalized[:limit]
-    for separator in ("｜", "—", "-", "，", "。"):
-        separator_index = candidate.rfind(separator)
-        if separator_index >= max(6, limit // 3):
-            candidate = candidate[:separator_index]
-            break
+    normalized = normalize_wechat_title(title)
+    if len(normalized) > max_chars:
+        raise ValueError(
+            f"微信公众号草稿标题不能超过 {max_chars} 个字："
+            f"当前 {len(normalized)} 个字"
+        )
 
-    candidate = candidate.rstrip("：:｜—-，。；、 ")
-    if not candidate:
-        candidate = normalized[: limit - 1].rstrip()
-    return f"{candidate}…"
+    return normalized

@@ -30,7 +30,11 @@ class ModelCostTier(StrEnum):
 
 @dataclass(frozen=True)
 class ModelContextPolicy:
-    """单个模型的保守上下文预算策略。"""
+    """单个模型的上下文能力与压缩策略。
+
+    ``reserved_output_tokens`` 为兼容既有数据库和 API 保留字段名，当前语义是
+    管理员核对的模型最大输出能力；运行时还会受系统上限与上下文剩余空间约束。
+    """
 
     context_window_tokens: int = 1_000_000
     reserved_output_tokens: int = 4_096
@@ -41,8 +45,8 @@ class ModelContextPolicy:
     def validate(self) -> None:
         if not 4_096 <= self.context_window_tokens <= 2_000_000:
             raise ValueError("上下文容量必须在 4096 到 2000000 Token 之间")
-        if not 0 < self.reserved_output_tokens * 2 <= self.context_window_tokens:
-            raise ValueError("预留输出必须为正数且不超过上下文容量的一半")
+        if not 0 < self.reserved_output_tokens <= self.context_window_tokens:
+            raise ValueError("模型最大输出必须为正数且不能超过上下文容量")
         if not 50 <= self.compression_trigger_percent <= 90:
             raise ValueError("压缩触发比例必须在 50 到 90 之间")
         if not 30 <= self.compression_target_percent <= 75:
@@ -53,10 +57,10 @@ class ModelContextPolicy:
             raise ValueError("上下文容量来源无效")
 
 
-_MODEL_CONTEXT_WINDOWS = {
-    ("deepseek", "deepseek-v4-flash"): 1_048_576,
-    ("deepseek", "deepseek-v4-pro"): 1_048_576,
-    ("deepseek", "deepseek-v4-flash-vision-exp"): 1_048_576,
+_MODEL_CONTEXT_LIMITS = {
+    ("deepseek", "deepseek-v4-flash"): (1_048_576, 384_000),
+    ("deepseek", "deepseek-v4-pro"): (1_048_576, 384_000),
+    ("deepseek", "deepseek-v4-flash-vision-exp"): (1_048_576, 384_000),
 }
 
 
@@ -64,13 +68,13 @@ def infer_model_context_policy(provider_key: str, model_id: str) -> ModelContext
     """按 Provider 与 Model ID 推导上下文策略，未知模型统一按 1M 处理。"""
 
     normalized_key = (provider_key.strip().lower(), model_id.strip().lower())
-    context_window = _MODEL_CONTEXT_WINDOWS.get(normalized_key)
+    limits = _MODEL_CONTEXT_LIMITS.get(normalized_key)
     return ModelContextPolicy(
-        context_window_tokens=context_window or 1_000_000,
-        reserved_output_tokens=4_096,
+        context_window_tokens=limits[0] if limits is not None else 1_000_000,
+        reserved_output_tokens=limits[1] if limits is not None else 4_096,
         compression_trigger_percent=80,
         compression_target_percent=60,
-        context_window_source="built_in" if context_window is not None else "fallback",
+        context_window_source="built_in" if limits is not None else "fallback",
     )
 
 

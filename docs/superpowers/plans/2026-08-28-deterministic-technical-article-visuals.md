@@ -245,7 +245,7 @@ canonical JSON 使用 `json.dumps(..., ensure_ascii=False, sort_keys=True, separ
 2. 要求 `version == article_visual_spec_v1`、仓库名一致、1–3 条 takeaways、至少一条 evidence ref。
 3. 当 `allowed_evidence_paths` 非空时，要求每个 ref 的 `path` 属于集合。
 4. 递归扫描所有可见文字中的禁词和空占位符。
-5. 按 role 验证数量：summary capabilities 2–4；flow steps 3–5；architecture nodes 3–7；comparison dimensions 2–4；timeline events 3–6。
+5. 按 role 验证数量：summary capabilities 2–4；flow steps 按实际证据动态确定且 edges 始终为相邻顺序链；architecture nodes 3–7；comparison dimensions 2–4；timeline events 3–6。
 6. 校验 Unicode 标签长度与模板容量，不修改原文字。
 7. 产出节点、边和可见文字清单。
 
@@ -482,7 +482,7 @@ class ArticleVisualTemplateService:
         return self._build_document(spec, body)
 ```
 
-模板位置固定：summary 为定位 + 能力卡 + 结论；flow 为 3–5 个横向步骤；architecture 为 2–3 层网格；comparison 为双列共同维度；timeline 为横向时间轴。所有文本使用 `html.escape(..., quote=True)`。
+模板位置固定：summary 为定位 + 能力卡 + 结论；flow 按实际步骤数动态使用单行或蛇形多行布局；architecture 为 2–3 层网格；comparison 为双列共同维度；timeline 为横向时间轴。所有文本使用 `html.escape(..., quote=True)`。
 
 - [ ] **Step 4: 实现浏览器内验证脚本**
 

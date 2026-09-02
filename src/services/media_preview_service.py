@@ -11,7 +11,7 @@ from src.repositories.content_approval_repository import ContentApprovalReposito
 from src.repositories.generated_content_repository import GeneratedContentRepository
 from src.repositories.media_asset_repository import MediaAssetRecord, MediaAssetRepository
 from src.services.article_layout_service import ArticleLayoutService, LOCAL_WECHAT_IMAGE_SCHEME
-from src.services.wechat_title_service import compact_wechat_title
+from src.services.wechat_title_service import normalize_wechat_title
 from src.repositories.video_clip_plan_repository import VideoClipPlanRepository
 from src.repositories.video_storyboard_repository import VideoStoryboardRepository
 
@@ -82,7 +82,7 @@ class MediaPreviewService:
                 "id": content.id,
                 "week_end": content.week_end,
                 "title": content.title,
-                "wechat_title": compact_wechat_title(content.title),
+                "wechat_title": normalize_wechat_title(content.title),
                 "digest": content.digest,
                 "article_markdown": content.article_markdown,
                 "video_script": content.video_script,
@@ -101,7 +101,7 @@ class MediaPreviewService:
                 "id": article_layout.id,
                 "content_id": article_layout.content_id,
                 "title": article_layout.title,
-                "wechat_title": compact_wechat_title(article_layout.title),
+                "wechat_title": normalize_wechat_title(article_layout.title),
                 "digest": article_layout.digest,
                 # 已落库的正式排版同样含有仅供 DeliverTask 处理的占位符；
                 # 返回给浏览器前转换，但绝不回写数据库或影响公众号发布链路。
@@ -528,7 +528,7 @@ class MediaPreviewService:
             "id": None,
             "content_id": content.id,
             "title": content.title,
-            "wechat_title": compact_wechat_title(content.title),
+            "wechat_title": normalize_wechat_title(content.title),
             "digest": content.digest,
             # 正式公众号排版保留 wechat-image-asset:// 占位符，后续由 DeliverTask 上传并替换；
             # 审核台则必须使用本地媒体接口，避免浏览器尝试加载一个非 HTTP 协议而显示破图。

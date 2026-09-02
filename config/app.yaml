@@ -92,7 +92,7 @@ image:
     max_attempts: 5
     width: 2048
     height: 1152
-    template_version: article_visual_v1
+    template_version: article_visual_v2
     renderer_version: gotenberg_html_v1
     font_path: assets/fonts/NotoSansSC-VF.ttf
     font_version: noto-cjk-2.004-523d033d
@@ -252,8 +252,6 @@ wechat:
   need_open_comment: false
   only_fans_can_comment: false
   draft:
-    # 正文标题保持完整；此值仅控制微信公众号草稿栏和审核预览的紧凑展示标题。
-    title_max_chars: 28
     token_endpoint: /cgi-bin/token
     add_endpoint: /cgi-bin/draft/add
     upload_image_endpoint: /cgi-bin/media/uploadimg

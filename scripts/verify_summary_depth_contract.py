@@ -3,7 +3,7 @@
 本脚本不读取 API Key、不调用 GitHub 或 DeepSeek。它只验证：
 1. 动态 N 次项目生成后只执行 1 次全局综合；
 2. 每个项目包含概述、三个教学分点、精确 stars 和一份架构加数据流简报；
-3. 标题、摘要、正文和分点不设置长度合同，Skill 会挂载到每次模型请求；
+3. 标题遵守微信 32 字合同，摘要、正文和分点不设置额外长度合同；
 4. 最终 N 份 ContentBrief 能继续进入图片、排版和短视频链路。
 """
 
@@ -143,29 +143,42 @@ def build_article(rankings: list[WeeklyRankingRecord]) -> str:
 
 
 def build_project_briefs(rankings: list[WeeklyRankingRecord]) -> list[dict[str, object]]:
-    """构造与文章事实一致的项目摘要和结构关系。"""
+    """构造与文章事实一致、可验证的项目摘要和视觉规格。"""
 
     return [
         {
             "repository_full_name": item.full_name,
             "summary_text": "该项目减少人工复制成本，通过职责分层组织证据、编排与校验；生产接入仍需人工确认。",
-            "visual_brief": {
-                "diagram_type": "linear_progression",
-                "teaching_goal": "解释证据如何经过编排和校验形成可交付结果",
-                "visual_thesis": "职责分层让代理流程可检查、可修正",
-                "nodes": [
-                    {"id": "evidence", "label": "证据卡", "role": "事实来源"},
-                    {"id": "orchestrator", "label": "编排器", "role": "组织步骤"},
-                    {"id": "gate", "label": "校验门", "role": "人工确认"},
-                    {"id": "artifact", "label": "交付物", "role": "输出结果"},
+            "visual_spec": {
+                "version": "article_visual_spec_v1",
+                "repository_full_name": item.full_name,
+                "figure_role": "flow",
+                "purpose": "解释证据如何经过编排和校验形成交付物",
+                "headline": "从证据到交付物",
+                "evidence_refs": [
+                    {
+                        "kind": "repository_file",
+                        "path": "README.md",
+                        "claim": "README 给出四个阶段的先后顺序",
+                    }
                 ],
-                "relationships": [
-                    {"from": "evidence", "to": "orchestrator", "label": "数据流"},
-                    {"from": "orchestrator", "to": "gate", "label": "同步调用"},
-                    {"from": "gate", "to": "artifact", "label": "事件推送"},
+                "steps": [
+                    {"id": "evidence", "label": "证据卡", "description": "准备事实来源"},
+                    {"id": "orchestrator", "label": "编排器", "description": "组织执行步骤"},
+                    {"id": "gate", "label": "校验门", "description": "完成人工确认"},
+                    {"id": "artifact", "label": "交付物", "description": "保存验收结果"},
                 ],
-                "reading_order": ["evidence", "orchestrator", "gate", "artifact"],
-                "chinese_labels": ["证据卡", "编排器", "校验门", "交付物"],
+                "edges": [
+                    {"from": "evidence", "to": "orchestrator"},
+                    {"from": "orchestrator", "to": "gate"},
+                    {"from": "gate", "to": "artifact"},
+                ],
+                "takeaways": ["职责分层让流程可检查"],
+                "art_direction": {
+                    "style": "notion",
+                    "palette": "editorial_blue",
+                    "density": "medium",
+                },
             },
         }
         for item in rankings
@@ -191,7 +204,7 @@ def build_project_output(item: WeeklyRankingRecord) -> dict[str, Any]:
         ),
         "project_brief": {
             "summary_text": brief["summary_text"],
-            "visual_brief": brief["visual_brief"],
+            "visual_spec": brief["visual_spec"],
         },
     }
 
@@ -257,13 +270,24 @@ def main() -> None:
     assert len(long_sections) == len(rankings)
     long_project_output = build_project_output(first_item)
     long_project_output["technical_features_markdown"] += "补充模块说明" * 2_000
-    normalized_long_project = task._normalize_project_output(long_project_output, first_item)
+    normalized_long_project = task._normalize_project_output(
+        long_project_output,
+        first_item,
+        evidence[first_item.full_name],
+    )
     assert len(normalized_long_project["technical_features_markdown"]) > 2_000
     long_global_output = build_global_output()
     long_global_output["title"] = "标题" * 1_000
     long_global_output["digest"] = "摘要" * 1_000
+    try:
+        task._normalize_global_output(long_global_output, rankings)
+    except ValueError as exc:
+        assert "不能超过 32 个字" in str(exc)
+    else:
+        raise AssertionError("超长微信标题应被全局内容合同拒绝")
+
+    long_global_output["title"] = "有效标题"
     normalized_long_global = task._normalize_global_output(long_global_output, rankings)
-    assert normalized_long_global["title"] == long_global_output["title"]
     assert normalized_long_global["digest"] == long_global_output["digest"]
 
     # 工作台可配置任意 Top N；用非默认数量验证标题、章节和校验器都不依赖 5。
@@ -324,7 +348,8 @@ def main() -> None:
     assert "technical_features_markdown" in main_prompt
     assert "mechanism_breakdown_markdown" in main_prompt
     assert "engineering_insights_markdown" in main_prompt
-    assert "至少一条 label 为数据流" in main_prompt
+    assert "flow：steps 为 3 到 5 项" in main_prompt
+    assert "edges 必须且只能按 steps 相邻顺序连接" in main_prompt
     assert "video_script 必须" not in main_prompt
     assert "image_prompts 必须" not in main_prompt
     assert all(item.full_name not in main_prompt for item in rankings[1:])
@@ -384,10 +409,8 @@ def main() -> None:
         assert generated["article_markdown"].count("**机制拆解**") == count
         assert generated["article_markdown"].count("**工程启发**") == count
         assert all(
-            any(
-                relation["label"] == "数据流"
-                for relation in item["visual_brief"]["relationships"]
-            )
+            item["visual_spec"]["figure_role"] == "flow"
+            and len(item["visual_spec"]["edges"]) == 3
             for item in generated["image_prompts"]
         )
         if count == len(rankings):
@@ -396,7 +419,10 @@ def main() -> None:
     assert normalized is not None
     assert set(normalized) == {"title", "digest", "article_markdown", "image_prompts"}
     assert len(normalized["image_prompts"]) == len(rankings)
-    assert all(item["prompt_stage"] == "content_brief_v2" for item in normalized["image_prompts"])
+    assert all(
+        item["prompt_stage"] == "article_visual_spec_v1"
+        for item in normalized["image_prompts"]
+    )
     assert all(item["project_analysis_markdown"] for item in normalized["image_prompts"])
 
     content = GeneratedContentForStoryboard(

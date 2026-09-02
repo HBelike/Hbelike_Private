@@ -1,11 +1,13 @@
 {
   "manifest_version": 3,
-  "name": "Find Job 职位库助手",
-  "version": "0.2.9",
-  "description": "通过用户已登录的招聘与内容页面读取职位、小红书公开面经，并执行用户确认的岗位操作。",
+  "name": "Find Job 求职浏览器助手",
+  "version": "0.4.0",
+  "description": "读取用户主动选择的职位、公开面经或当前笔试题面；线上笔试功能仅分析，不自动填写或提交。",
   "permissions": [
     "tabs",
-    "scripting"
+    "scripting",
+    "activeTab",
+    "storage"
   ],
   "host_permissions": [
     "https://www.zhipin.com/*",
@@ -34,6 +36,6 @@
     }
   ],
   "action": {
-    "default_title": "Find Job 职位库助手"
+    "default_title": "识别当前线上笔试题目"
   }
 }

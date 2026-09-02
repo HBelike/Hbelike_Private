@@ -48,7 +48,10 @@ test('模型上下文页面移除重复说明并只用档案键作为卡片标�
 
 test('策略面板在浏览器和服务端同时校验核心大小关系', async () => {
   const panel = await readFile(new URL('./components/AdminModelContextPanel.vue', import.meta.url), 'utf8')
-  assert.match(panel, /outputTokens \* 2 > windowTokens/)
+  assert.match(panel, /outputTokens > windowTokens/)
+  assert.match(panel, /模型最大输出/)
+  assert.doesNotMatch(panel, /<span>预留输出<\/span>/)
+  assert.match(panel, /系统 100000 Token 上限/)
   assert.match(panel, /target >= trigger/)
   assert.match(panel, /context_window_source: 'admin'/)
 })

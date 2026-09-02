@@ -1,0 +1,7 @@
+{
+  "hostname": "leetcode.cn",
+  "expectedAdapter": "leetcode",
+  "expectedDeep": true,
+  "visibleText": "35. 搜索插入位置\n给定排序数组 nums 和目标值 target，返回索引。",
+  "expectedQuestionType": "algorithm"
+}

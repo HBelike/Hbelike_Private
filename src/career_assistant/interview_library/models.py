@@ -17,6 +17,7 @@ class InterviewSourceType(StrEnum):
     PUBLIC_URL = "public_url"
     AUTHENTICATED_SESSION = "authenticated_session"
     OFFICIAL_API = "official_api"
+    ONLINE_ASSESSMENT = "online_assessment"
 
 
 class InterviewExperienceStatus(StrEnum):

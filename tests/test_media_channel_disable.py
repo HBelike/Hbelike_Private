@@ -12,6 +12,7 @@ from src.services.wechat_draft_creation_service import WechatDraftCreationServic
 from src.tasks.audio_task import AudioTask
 from src.tasks.cat_task import CatTask
 from src.tasks.segmented_audio_task import SegmentedAudioTask
+from src.tasks.search_task import SearchTask
 from src.tasks.storage_task import StorageTask
 
 
@@ -65,17 +66,23 @@ class AudioCallGateTests(unittest.TestCase):
 
 
 class PipelineChannelSelectionTests(unittest.TestCase):
-    def test_manual_pipeline_excludes_all_audio_and_video_tasks_when_disabled(self) -> None:
+    def test_manual_generation_pipeline_stops_before_review_and_delivery(self) -> None:
         config = SimpleNamespace(audio_enabled=False, video_submit_enabled=False)
 
-        task_names = {
+        task_names = [
             task_class.task_name
             for task_class in Application._once_pipeline_task_classes(config)
-        }
+        ]
 
-        self.assertTrue({"SummaryTask", "ImageTask", "ArticleLayoutTask", "DeliverTask"} <= task_names)
+        self.assertEqual("SearchTask", task_names[0])
+        self.assertTrue(
+            {"SummaryTask", "ImageTask", "StorageTask", "PreviewTask", "CatTask"}
+            <= set(task_names)
+        )
         self.assertTrue(
             {
+                "ArticleLayoutTask",
+                "DeliverTask",
                 "AudioTask",
                 "SegmentedAudioTask",
                 "ShortVideoPromptTask",
@@ -86,8 +93,22 @@ class PipelineChannelSelectionTests(unittest.TestCase):
                 "VideoNarrationTimelineTask",
                 "VideoAssemblyTask",
                 "VideoStatusTask",
-            }.isdisjoint(task_names)
+            }.isdisjoint(set(task_names))
         )
+
+    def test_manual_generation_stops_when_snapshot_refresh_fails(self) -> None:
+        application = Application(PROJECT_ROOT)
+        application.config = SimpleNamespace(
+            audio_enabled=False,
+            video_submit_enabled=False,
+        )
+        application.logger = Mock()
+        application._run_task = Mock(side_effect=RuntimeError("GitHub 刷新失败"))
+
+        with self.assertRaisesRegex(RuntimeError, "GitHub 刷新失败"):
+            application._run_once_pipeline_unlocked()
+
+        application._run_task.assert_called_once_with(SearchTask)
 
     def test_storage_only_keeps_enabled_media_types(self) -> None:
         config = SimpleNamespace(

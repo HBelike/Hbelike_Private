@@ -274,7 +274,7 @@ class AppConfig:
 
     @property
     def image_template_version(self) -> str:
-        return str(self._image_renderer_raw().get("template_version", "article_visual_v1"))
+        return str(self._image_renderer_raw().get("template_version", "article_visual_v2"))
 
     @property
     def image_renderer_version(self) -> str:

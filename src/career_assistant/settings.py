@@ -36,6 +36,59 @@ class JobAssessmentSettings:
 
 
 @dataclass(frozen=True)
+class OnlineAssessmentSettings:
+    """线上笔试题目理解、答案生成与隔离执行配置。"""
+
+    problem_extractor_profile_key: str
+    answer_profile_key: str
+    piston_base_url: str
+    request_timeout_seconds: float
+    max_test_cases: int
+    max_repair_rounds: int
+
+
+def load_online_assessment_settings(
+    config_path: Path = DEFAULT_CONFIG_PATH,
+) -> OnlineAssessmentSettings:
+    """读取线上笔试固定模型与执行器边界，不读取或保存任何 API Key。"""
+
+    root_config = _load_career_root_config(config_path)
+    config = root_config.get("online_assessment")
+    if not isinstance(config, dict):
+        raise ValueError("career_assistant.yaml 缺少 online_assessment 配置段")
+
+    def profile_key(name: str) -> str:
+        value = config.get(name)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"online_assessment.{name} 必须是非空模型档案键")
+        normalized = value.strip().lower()
+        if len(normalized) > 64 or not all(
+            character.isalnum() or character in {"-", "_"} for character in normalized
+        ):
+            raise ValueError(f"online_assessment.{name} 格式无效")
+        return normalized
+
+    piston_base_url = _read_optional_url(config, "piston_base_url")
+    if piston_base_url is None or not piston_base_url.startswith(("http://", "https://")):
+        raise ValueError("online_assessment.piston_base_url 必须是 http 或 https 地址")
+    max_test_cases = config.get("max_test_cases")
+    if isinstance(max_test_cases, bool) or not isinstance(max_test_cases, int) or not 1 <= max_test_cases <= 20:
+        raise ValueError("online_assessment.max_test_cases 必须是 1 到 20 之间的整数")
+    max_repair_rounds = config.get("max_repair_rounds")
+    if isinstance(max_repair_rounds, bool) or not isinstance(max_repair_rounds, int) or not 0 <= max_repair_rounds <= 2:
+        raise ValueError("online_assessment.max_repair_rounds 必须是 0 到 2 之间的整数")
+
+    return OnlineAssessmentSettings(
+        problem_extractor_profile_key=profile_key("problem_extractor_profile_key"),
+        answer_profile_key=profile_key("answer_profile_key"),
+        piston_base_url=piston_base_url.rstrip("/"),
+        request_timeout_seconds=_read_positive_number(config, "request_timeout_seconds"),
+        max_test_cases=max_test_cases,
+        max_repair_rounds=max_repair_rounds,
+    )
+
+
+@dataclass(frozen=True)
 class CareerRuntimeSettings:
     """Web 进程处理求职 Turn 的运行时边界。
 
@@ -251,8 +304,8 @@ class LegacyOfficeConversionSettings:
 class ResponseGenerationSettings:
     """模型回复的时长与持久化边界。
 
-    单次输出上限、HTTP 超时和历史回复长度从 YAML 统一读取，避免不同
-    Provider 因为代码内的固定短上限而过早截断。API Key 不属于该配置。
+    系统输出保护上限、HTTP 超时和历史回复长度从 YAML 统一读取；单轮真实
+    上限还会按模型能力和上下文剩余空间收紧。API Key 不属于该配置。
     """
 
     max_completion_tokens: int
@@ -653,10 +706,10 @@ def load_response_generation_settings(
     if (
         isinstance(max_completion_tokens, bool)
         or not isinstance(max_completion_tokens, int)
-        or not 1 <= max_completion_tokens <= 32_768
+        or not 1 <= max_completion_tokens <= 100_000
     ):
         raise ValueError(
-            "response_generation.max_completion_tokens 必须是 1 到 32768 之间的整数",
+            "response_generation.max_completion_tokens 必须是 1 到 100000 之间的整数",
         )
 
     max_persisted_response_characters = response_generation.get(
@@ -665,10 +718,10 @@ def load_response_generation_settings(
     if (
         isinstance(max_persisted_response_characters, bool)
         or not isinstance(max_persisted_response_characters, int)
-        or not 1 <= max_persisted_response_characters <= 30_000
+        or not 1 <= max_persisted_response_characters <= 500_000
     ):
         raise ValueError(
-            "response_generation.max_persisted_response_characters 必须是 1 到 30000 之间的整数",
+            "response_generation.max_persisted_response_characters 必须是 1 到 500000 之间的整数",
         )
 
     return ResponseGenerationSettings(

@@ -155,3 +155,32 @@ def test_admin_updates_valid_policy() -> None:
     assert response.status_code == 200
     written_policy = repository.update_context_policy.call_args.args[2]
     assert written_policy.context_window_tokens == 128_000
+
+
+def test_admin_accepts_verified_large_model_output_capability() -> None:
+    repository = Mock()
+    repository.update_context_policy.return_value = profile(
+        ModelContextPolicy(
+            context_window_tokens=1_048_576,
+            reserved_output_tokens=384_000,
+            context_window_source="admin",
+        ),
+    )
+    client = make_client(PlatformRole.ADMIN, repository)
+    try:
+        response = client.put(
+            "/api/admin/career/model-profiles/deepseek-v4/context-policy",
+            json={
+                "context_window_tokens": 1_048_576,
+                "reserved_output_tokens": 384_000,
+                "compression_trigger_percent": 80,
+                "compression_target_percent": 60,
+                "context_window_source": "admin",
+            },
+        )
+    finally:
+        close_client(client)
+
+    assert response.status_code == 200
+    written_policy = repository.update_context_policy.call_args.args[2]
+    assert written_policy.reserved_output_tokens == 384_000

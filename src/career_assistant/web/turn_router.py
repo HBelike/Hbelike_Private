@@ -33,6 +33,7 @@ from src.career_assistant.web.router import (
     _resolve_conversation_skill_activation,
     _upload_kind,
     get_career_services,
+    get_career_turn_job_repository,
     get_request_actor,
 )
 
@@ -221,9 +222,9 @@ async def list_active_turns(
     request: Request,
 ) -> dict[str, object]:
     actor = get_request_actor()
-    services = get_career_services(request)
+    repository = await asyncio.to_thread(get_career_turn_job_repository, request)
     items = await asyncio.to_thread(
-        services.turn_job_repository.list_active_turns,
+        repository.list_active_turns,
         actor.actor_id,
         conversation_id,
     )
@@ -239,7 +240,9 @@ async def get_context_usage(
     """返回普通用户可见的近似余量，不泄露准确容量和阈值。"""
 
     actor = get_request_actor()
-    services = get_career_services(request)
+    # 完整服务首次初始化包含多个解析器和外部客户端。放入工作线程，避免历史会话
+    # 切换期间占用 asyncio 事件循环，使后续详情请求无法及时返回。
+    services = await asyncio.to_thread(get_career_services, request)
     conversation = await asyncio.to_thread(
         services.conversation_repository.get_conversation,
         actor.actor_id,

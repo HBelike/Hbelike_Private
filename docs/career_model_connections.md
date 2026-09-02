@@ -133,3 +133,11 @@ DeepSeek、腾讯云 TokenHub、腾讯混元、百度千帆、火山方舟与 Mi
 科大讯飞 Spark Lite 使用 WebSocket 鉴权（AppID、APIKey、APISecret），不属于当前统一的 OpenAI-compatible 调用器；在专用 Spark 客户端完成前，不会把它伪装成可用的通用模型连接。
 
 GitHub Models 不在目录中：GitHub 已于 2026-07-30 停止其模型目录和推理 API，现有 GitHub Token 仅继续服务于 GitHub 项目检索。
+
+## 2026-08-30：模型最大输出与动态回答额度
+
+- 管理台原“预留输出”字段现显示为“模型最大输出”。数据库和 API 暂时继续使用兼容字段名 `reserved_output_tokens`，其值代表具体 `Provider + Model ID` 的最大输出能力，不再代表每轮固定请求额度。
+- 求职助手每轮真实 `max_tokens` 取模型能力、系统 `100000 Token` 上限和 95% 上下文安全边界内剩余空间三者的最小值；压缩前后都会重新估算输入。
+- 已核对的 DeepSeek V4 Flash、Pro 和实验视觉版本使用 `1,048,576 Token` 上下文、`384,000 Token` 最大输出。迁移 `20260830_32` 只回填未被管理员覆盖的档案。
+- 未识别模型仍显示“容量待核对”，管理员必须按准确 Model ID 查阅 Provider 官方资料后填写上下文容量和最大输出；系统不会从 Provider 名称猜测输出能力。
+- 达到长度上限的普通或流式正文会显示未完成提示；被截断的 Tool Calling 不会执行。本次不自动续写，也不把未知结束原因推断成长度截断。

@@ -140,3 +140,58 @@ def test_tool_schema_estimate_is_included() -> None:
     )
 
     assert usage.estimated_input_tokens == 1_178
+
+
+def test_runtime_policy_caps_output_by_safe_remaining_space() -> None:
+    service = ContextBudgetService(FixedEstimator(70_000))
+    components = (PromptComponent.pinned("input", (ChatMessage("user", "问题"),)),)
+    source = ModelContextPolicy(
+        context_window_tokens=100_000,
+        reserved_output_tokens=40_000,
+        context_window_source="admin",
+    )
+
+    runtime = service.runtime_policy(
+        components,
+        source,
+        system_max_output_tokens=100_000,
+    )
+
+    assert runtime.reserved_output_tokens == 14_472
+    assert source.reserved_output_tokens == 40_000
+
+
+def test_runtime_policy_uses_model_limit_when_it_is_lower() -> None:
+    service = ContextBudgetService(FixedEstimator(1_000))
+    components = (PromptComponent.pinned("input", (ChatMessage("user", "问题"),)),)
+    source = ModelContextPolicy(
+        context_window_tokens=100_000,
+        reserved_output_tokens=8_192,
+        context_window_source="admin",
+    )
+
+    runtime = service.runtime_policy(
+        components,
+        source,
+        system_max_output_tokens=100_000,
+    )
+
+    assert runtime.reserved_output_tokens == 8_192
+
+
+def test_runtime_policy_uses_system_limit_when_it_is_lower() -> None:
+    service = ContextBudgetService(FixedEstimator(1_000))
+    components = (PromptComponent.pinned("input", (ChatMessage("user", "问题"),)),)
+    source = ModelContextPolicy(
+        context_window_tokens=1_000_000,
+        reserved_output_tokens=384_000,
+        context_window_source="admin",
+    )
+
+    runtime = service.runtime_policy(
+        components,
+        source,
+        system_max_output_tokens=100_000,
+    )
+
+    assert runtime.reserved_output_tokens == 100_000

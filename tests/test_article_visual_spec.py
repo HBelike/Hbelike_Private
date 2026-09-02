@@ -119,6 +119,33 @@ def test_flow_spec_keeps_complete_chinese_labels_and_edges(
     assert spec.node_ids == ("spec", "adapter", "output")
 
 
+@pytest.mark.parametrize("step_count", [1, 6, 12])
+def test_flow_accepts_dynamic_step_count_and_derives_adjacent_edge_count(
+    validator: ArticleVisualSpecValidator,
+    step_count: int,
+) -> None:
+    raw = {
+        **_common("flow"),
+        "steps": [
+            {
+                "id": f"step{index}",
+                "label": f"阶段{index}",
+                "description": f"处理第{index}阶段",
+            }
+            for index in range(1, step_count + 1)
+        ],
+        "edges": [
+            {"from": f"step{index}", "to": f"step{index + 1}"}
+            for index in range(1, step_count)
+        ],
+    }
+
+    spec = validator.validate(raw, "owner/project", {"README.md"})
+
+    assert len(spec.value["steps"]) == step_count
+    assert len(spec.value["edges"]) == max(0, step_count - 1)
+
+
 @pytest.mark.parametrize(
     "phrase", ["16:9", "16：9", "16.9", "工程架构", "无标题", "流程图"]
 )
@@ -235,6 +262,37 @@ def test_summary_card_accepts_positioning_up_to_180_characters(
     assert spec.value["positioning"] == positioning
 
 
+def test_summary_card_accepts_capability_description_up_to_150_characters(
+    validator: ArticleVisualSpecValidator,
+) -> None:
+    description = "可核验的项目能力描述" * 15
+    assert len(description) == 150
+    raw = summary_spec()
+    raw["capabilities"][0]["description"] = description
+
+    spec = validator.validate(raw, "owner/project")
+
+    assert spec.value["capabilities"][0]["description"] == description
+
+
+def test_summary_card_maximum_fields_fit_total_visible_capacity(
+    validator: ArticleVisualSpecValidator,
+) -> None:
+    raw = summary_spec()
+    raw["purpose"] = "目" * 80
+    raw["headline"] = "题" * 30
+    raw["positioning"] = "定" * 180
+    raw["takeaways"] = ["甲" * 50, "乙" * 50, "丙" * 50]
+    raw["capabilities"] = [
+        {"label": f"能力{index}", "description": character * 150}
+        for index, character in enumerate(("一", "二", "三", "四"), start=1)
+    ]
+
+    spec = validator.validate(raw, "owner/project")
+
+    assert len(spec.value["capabilities"]) == 4
+
+
 def test_flow_rejects_duplicate_visible_node_labels_with_different_ids(
     validator: ArticleVisualSpecValidator,
 ) -> None:
@@ -294,6 +352,40 @@ def test_architecture_layers_require_complete_assignment_and_usage(
     unused["layers"].append({"id": "output", "label": "输出层"})
     with pytest.raises(ArticleVisualSpecError, match="没有节点使用"):
         validator.validate(unused, "owner/project")
+
+
+def test_architecture_accepts_dynamic_layer_count(
+    validator: ArticleVisualSpecValidator,
+) -> None:
+    raw = architecture_spec()
+    raw["layers"] = [
+        {"id": f"layer{index}", "label": f"第{index}层"}
+        for index in range(1, 6)
+    ]
+    raw["nodes"] = [
+        {
+            "id": f"node{index}",
+            "label": f"模块{index}",
+            "description": f"负责第{index}层能力",
+            "layer": f"layer{index}",
+        }
+        for index in range(1, 6)
+    ]
+    raw["edges"] = [
+        {"from": f"node{index}", "to": f"node{index + 1}"}
+        for index in range(1, 5)
+    ]
+
+    spec = validator.validate(raw, "owner/project", {"README.md"})
+
+    assert len(spec.value["layers"]) == 5
+    assert [item["layer"] for item in spec.value["nodes"]] == [
+        "layer1",
+        "layer2",
+        "layer3",
+        "layer4",
+        "layer5",
+    ]
 
 
 def test_summary_and_comparison_labels_must_be_unique(
@@ -389,7 +481,7 @@ def test_legacy_content_uses_complete_first_semantic_clause_without_slicing() ->
     service = ArticleVisualPlanningService()
     long_summary = (
         "该项目通过可追踪的仓库证据、稳定的结构合同和确定性渲染形成技术文章配图，"
-        "同时保留失败关闭、资产复用与来源核验等工程边界。"
+        "同时保留失败关闭、资产复用与来源核验等工程边界。最终产物可以安全复用。"
     )
     spec = service.plan_legacy_content_brief(
         {
@@ -410,15 +502,43 @@ def test_legacy_content_uses_complete_first_semantic_clause_without_slicing() ->
 
     assert spec.value["positioning"] == long_summary
     assert [item["description"] for item in spec.value["capabilities"]] == [
-        "需求规格负责定义目标与约束，",
+        "需求规格负责定义目标与约束，后续内容即使很长也不应按字符位置裁切或进入总结卡。",
         "证据先进入规划层；",
-        "先核验证据，",
+        "先核验证据，再表达结论。",
     ]
     assert spec.value["takeaways"] == [
-        "需求规格负责定义目标与约束，",
-        "证据先进入规划层；",
-        "先核验证据，",
+        "最终产物可以安全复用。",
     ]
+
+
+def test_legacy_content_does_not_treat_colon_as_a_complete_sentence() -> None:
+    service = ArticleVisualPlanningService()
+    spec = service.plan_legacy_content_brief(
+        {
+            "repository_full_name": "example/colon-project",
+            "summary_text": "该项目先判断需求，再进入实现。后续执行保留人工确认。",
+            "project_analysis_markdown": """
+**技术特点**
+项目通过阶段检查减少过度构建。
+
+**机制拆解**
+入口是：代理接到任务后，先检查是否真的需要写代码。
+
+**工程启发**
+这个项目的核心取舍是：先增加一次判断，再减少无效实现。
+""".strip(),
+        }
+    )
+
+    assert [item["description"] for item in spec.value["capabilities"]] == [
+        "项目通过阶段检查减少过度构建。",
+        "入口是：代理接到任务后，先检查是否真的需要写代码。",
+        "这个项目的核心取舍是：先增加一次判断，再减少无效实现。",
+    ]
+    assert spec.value["takeaways"] == ["该项目先判断需求，再进入实现。"]
+    assert not set(spec.value["takeaways"]) & {
+        item["description"] for item in spec.value["capabilities"]
+    }
 
 
 def test_video_brief_only_maps_explicit_flow_nodes_and_edges() -> None:

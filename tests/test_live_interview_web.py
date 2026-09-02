@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -17,6 +18,7 @@ from src.career_assistant.live_interview.persistence import session_payload
 from src.career_assistant.live_interview import web as live_web
 from src.career_assistant.live_interview.contracts import LiveInterviewStatus
 from src.career_assistant.live_interview.archive import LiveInterviewArchiveResult
+from src.platform_access.contracts import PlatformRole, PlatformUser, SessionResolution
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -25,9 +27,15 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 class FakeRepository:
     def __init__(self, record) -> None:
         self.record = record
+        self.lookups: list[tuple[object, object, object]] = []
 
     def get_session(self, organization_id, actor_id, session_id):
-        if session_id == self.record.id:
+        self.lookups.append((organization_id, actor_id, session_id))
+        if (
+            organization_id == self.record.organization_id
+            and actor_id == self.record.actor_id
+            and session_id == self.record.id
+        ):
             return self.record
         return None
 
@@ -59,15 +67,14 @@ class FakeManager:
         self.closed = True
 
 
-def _record():
-    from datetime import UTC, datetime
+def _record(*, organization_id=None, actor_id=None):
     from src.career_assistant.live_interview.persistence import LiveInterviewSessionRecord
 
     now = datetime.now(UTC)
     return LiveInterviewSessionRecord(
         id=uuid4(),
-        organization_id=live_web.DEFAULT_ORGANIZATION_ID,
-        actor_id=live_web.DEFAULT_ACTOR_ID,
+        organization_id=organization_id or live_web.DEFAULT_ORGANIZATION_ID,
+        actor_id=actor_id or live_web.DEFAULT_ACTOR_ID,
         candidate_profile_id=uuid4(),
         target_role_profile_id=uuid4(),
         interview_experience_ids=(),
@@ -81,6 +88,26 @@ def _record():
         ended_at=None,
         created_at=now,
         updated_at=now,
+    )
+
+
+def _authenticated_session() -> SessionResolution:
+    now = datetime.now(UTC)
+    return SessionResolution(
+        user=PlatformUser(
+            id=uuid4(),
+            organization_id=uuid4(),
+            username="interview-user",
+            display_name="面试测试账号",
+            email="interview@example.test",
+            email_verified_at=now,
+            role=PlatformRole.ADMIN,
+            is_active=True,
+            created_at=now,
+        ),
+        session_id=uuid4(),
+        expires_at=now + timedelta(days=7),
+        absolute_expires_at=now + timedelta(days=30),
     )
 
 
@@ -412,6 +439,84 @@ def test_websocket_accepts_ping_and_ends_cleanly_in_local_auth_mode() -> None:
             ws.send_json({"type": "session.end"})
 
     assert manager.closed
+
+
+def test_websocket_optional_auth_uses_logged_in_actor(monkeypatch) -> None:
+    monkeypatch.setenv("PLATFORM_AUTH_REQUIRED", "false")
+    session = _authenticated_session()
+    record = _record(
+        organization_id=session.user.organization_id,
+        actor_id=session.user.id,
+    )
+    repository = FakeRepository(record)
+    manager = FakeManager()
+    access_service = SimpleNamespace(resolve_session=lambda _raw_token: session)
+    app = FastAPI()
+    app.include_router(live_web.router)
+
+    with (
+        patch.object(live_web, "get_platform_access_service", return_value=access_service),
+        patch.object(live_web, "_repository_for_websocket", return_value=repository),
+        patch.object(live_web, "_build_live_manager", new=AsyncMock(return_value=manager)),
+        TestClient(app) as client,
+    ):
+        client.cookies.set(live_web.SESSION_COOKIE_NAME, "valid-session")
+        with client.websocket_connect(f"/api/career/live-interviews/{record.id}/stream") as ws:
+            assert ws.receive_json()["type"] == "session.ready"
+            ws.send_json({"type": "session.end"})
+
+    assert repository.lookups[0] == (
+        session.user.organization_id,
+        session.user.id,
+        record.id,
+    )
+
+
+def test_websocket_optional_auth_without_cookie_keeps_default_actor(monkeypatch) -> None:
+    monkeypatch.setenv("PLATFORM_AUTH_REQUIRED", "false")
+    websocket = SimpleNamespace(cookies={}, close=AsyncMock())
+
+    with patch.object(
+        live_web,
+        "get_platform_access_service",
+        side_effect=AssertionError("没有 Cookie 时不应初始化身份服务"),
+    ):
+        actor = asyncio.run(live_web._resolve_websocket_actor(websocket))
+
+    assert actor.organization_id == live_web.DEFAULT_ORGANIZATION_ID
+    assert actor.actor_id == live_web.DEFAULT_ACTOR_ID
+    websocket.close.assert_not_awaited()
+
+
+def test_websocket_optional_auth_with_invalid_cookie_keeps_default_actor(monkeypatch) -> None:
+    monkeypatch.setenv("PLATFORM_AUTH_REQUIRED", "false")
+    websocket = SimpleNamespace(
+        cookies={live_web.SESSION_COOKIE_NAME: "expired-session"},
+        close=AsyncMock(),
+    )
+    access_service = SimpleNamespace(resolve_session=lambda _raw_token: None)
+
+    with patch.object(live_web, "get_platform_access_service", return_value=access_service):
+        actor = asyncio.run(live_web._resolve_websocket_actor(websocket))
+
+    assert actor.organization_id == live_web.DEFAULT_ORGANIZATION_ID
+    assert actor.actor_id == live_web.DEFAULT_ACTOR_ID
+    websocket.close.assert_not_awaited()
+
+
+def test_websocket_required_auth_rejects_invalid_session(monkeypatch) -> None:
+    monkeypatch.setenv("PLATFORM_AUTH_REQUIRED", "true")
+    websocket = SimpleNamespace(
+        cookies={live_web.SESSION_COOKIE_NAME: "invalid-session"},
+        close=AsyncMock(),
+    )
+    access_service = SimpleNamespace(resolve_session=lambda _raw_token: None)
+
+    with patch.object(live_web, "get_platform_access_service", return_value=access_service):
+        actor = asyncio.run(live_web._resolve_websocket_actor(websocket))
+
+    assert actor is None
+    websocket.close.assert_awaited_once_with(code=4401, reason="请先登录后继续")
 
 
 def test_websocket_rejects_missing_session_with_4404() -> None:

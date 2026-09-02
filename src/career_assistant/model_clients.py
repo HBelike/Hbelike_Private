@@ -14,6 +14,21 @@ from src.career_assistant.persistence.model_profile_repository import ModelProfi
 from src.observability.langsmith_runtime import trace_operation, trace_stream
 
 
+OUTPUT_TRUNCATION_NOTICE = (
+    "\n\n> 本次回答达到模型输出上限，内容可能未完整结束；你可以回复“继续”。"
+)
+
+
+def _is_length_finish_reason(value: object) -> bool:
+    """兼容常见 OpenAI-compatible 长度结束原因。"""
+
+    return isinstance(value, str) and value.casefold() in {
+        "length",
+        "max_tokens",
+        "max_output_tokens",
+    }
+
+
 class ModelInvocationError(RuntimeError):
     """不会包含 Provider 响应正文或密钥的安全模型调用异常。"""
 
@@ -488,8 +503,14 @@ class OpenAICompatibleChatClient:
             content = message["content"]
         except (IndexError, KeyError, TypeError, ValueError) as exc:
             raise ModelInvocationError("模型服务返回格式异常") from exc
+        finish_reason = choice.get("finish_reason") if isinstance(choice, dict) else None
         if isinstance(content, str) and content.strip():
-            return content.strip()
+            normalized = content.strip()
+            return (
+                normalized + OUTPUT_TRUNCATION_NOTICE
+                if _is_length_finish_reason(finish_reason)
+                else normalized
+            )
         if isinstance(content, list):
             text_parts = [
                 item.get("text", "").strip()
@@ -498,10 +519,13 @@ class OpenAICompatibleChatClient:
             ]
             joined_text = "\n".join(part for part in text_parts if part)
             if joined_text:
-                return joined_text
+                return (
+                    joined_text + OUTPUT_TRUNCATION_NOTICE
+                    if _is_length_finish_reason(finish_reason)
+                    else joined_text
+                )
         if isinstance(message, dict) and message.get("reasoning_content"):
-            finish_reason = choice.get("finish_reason") if isinstance(choice, dict) else None
-            if finish_reason == "length":
+            if _is_length_finish_reason(finish_reason):
                 raise ModelInvocationError(
                     "模型已开始推理，但测试输出额度不足以生成最终回复。请重试；若仍出现，请更换非推理模型。",
                 )
@@ -562,9 +586,15 @@ class OpenAICompatibleChatClient:
                         provider_reported_model_id=payload.get("model"),
                     ),
                 )
-            message = payload["choices"][0]["message"]
+            choice = payload["choices"][0]
+            message = choice["message"]
         except (IndexError, KeyError, TypeError, ValueError) as exc:
             raise ModelInvocationError("模型 Tool Calling 返回格式异常") from exc
+        finish_reason = choice.get("finish_reason") if isinstance(choice, dict) else None
+        if _is_length_finish_reason(finish_reason):
+            raise ModelInvocationError(
+                "模型 Tool Calling 达到输出上限，请缩小任务范围后重试。",
+            )
         if not isinstance(message, dict):
             raise ModelInvocationError("模型 Tool Calling 返回格式异常")
         raw_calls = message.get("tool_calls") or []
@@ -601,6 +631,7 @@ class OpenAICompatibleChatClient:
 
         base_url = self._base_url_for(target)
         yielded_content = False
+        finish_reason: object = None
         try:
             with self._client.stream(
                 "POST",
@@ -641,6 +672,8 @@ class OpenAICompatibleChatClient:
                         if not choices:
                             continue
                         choice = choices[0]
+                        if choice.get("finish_reason") is not None:
+                            finish_reason = choice.get("finish_reason")
                         delta = choice.get("delta", {})
                         content = delta.get("content")
                     except (IndexError, KeyError, TypeError, ValueError) as exc:
@@ -666,6 +699,8 @@ class OpenAICompatibleChatClient:
             raise ModelInvocationError(
                 "模型没有生成可读取的流式文本，请检查模型 ID 是否支持流式 Chat Completions",
             )
+        if _is_length_finish_reason(finish_reason):
+            yield OUTPUT_TRUNCATION_NOTICE
 
     @staticmethod
     def _content_text(content: object) -> str:

@@ -20,6 +20,8 @@
   --ui-accent-hover: #0058c7;
   --ui-accent-ink: #004aa8;
   --ui-accent-mid: #6f9fdd;
+  --ui-brand-deep: #17345b;
+  --ui-brand-shadow: rgba(23, 52, 91, 0.18);
   --ui-focus: rgba(0, 100, 221, 0.16);
   --ui-danger: #b54747;
   --ui-danger-soft: #fff3f3;
@@ -45,6 +47,8 @@
   --ui-accent: #89a93e;
   --ui-accent-hover: #76952f;
   --ui-accent-ink: #5f7f23;
+  --ui-brand-deep: #395225;
+  --ui-brand-shadow: rgba(57, 82, 37, 0.18);
   --ui-focus: rgba(137, 169, 62, 0.16);
   --ui-shadow: 0 10px 30px rgba(52, 62, 39, 0.06);
 }
@@ -156,11 +160,11 @@ html[data-ui-theme="blue"] .brand {
 }
 
 html[data-ui-theme="blue"] .brand-icon {
-  width: 36px;
-  height: 36px;
-  border-radius: 10px;
-  background: var(--ui-accent);
-  font-size: 12px;
+  width: 42px;
+  height: 42px;
+  border-radius: 11px 20px 11px 20px;
+  background: linear-gradient(145deg, var(--ui-brand-deep), var(--ui-accent));
+  box-shadow: 0 7px 18px var(--ui-brand-shadow);
 }
 
 html[data-ui-theme="blue"] .brand strong {
@@ -704,6 +708,25 @@ html[data-ui-theme="blue"] :is(.observability-heading p, .admin-console-heading 
   color: var(--ui-text-muted);
 }
 
+html[data-ui-theme="blue"] :is(.pipeline-log-dialog, .pipeline-log-header, .pipeline-task-track article) {
+  border-color: var(--ui-line);
+  background: var(--ui-surface);
+}
+
+html[data-ui-theme="blue"] :is(.pipeline-log-header h2, .pipeline-log-section-title, .pipeline-task-track article strong) {
+  color: var(--ui-text);
+}
+
+html[data-ui-theme="blue"] :is(.pipeline-log-header p, .pipeline-task-track article span, .pipeline-log-waiting) {
+  color: var(--ui-text-muted);
+}
+
+html[data-ui-theme="blue"] .pipeline-log-button {
+  border-color: var(--ui-line-strong);
+  background: var(--ui-surface);
+  color: var(--ui-accent-ink);
+}
+
 html[data-ui-theme="blue"] :is(.admin-card-heading > div > p, .admin-route-copy p, .admin-route-footer p) {
   color: var(--ui-text-muted);
 }
@@ -974,6 +997,7 @@ html[data-ui-theme="blue"] .archive-article-entry-preview {
 html[data-ui-theme="blue"] .archive-article-entry-preview p,
 html[data-ui-theme="blue"] .archive-article-entry-footer,
 html[data-ui-theme="blue"] .wechat-article-header > span,
+html[data-ui-theme="blue"] .article-generated-time,
 html[data-ui-theme="blue"] .wechat-article-header small {
   color: var(--ui-text-muted);
 }
@@ -2038,6 +2062,58 @@ html[data-ui-theme="blue"] .login-form input {
   border-radius: 9px;
   background: var(--ui-surface);
   color: var(--ui-text);
+}
+
+html[data-ui-theme="blue"] .login-form input:focus {
+  border-color: var(--ui-accent);
+  box-shadow: 0 0 0 4px var(--ui-focus);
+}
+
+html[data-ui-theme="blue"] .verification-flow {
+  border-color: var(--ui-line);
+  background: var(--ui-surface-soft);
+  color: var(--ui-text-secondary);
+}
+
+html[data-ui-theme="blue"] .verification-flow-mark {
+  background: var(--ui-accent);
+  box-shadow: 0 6px 12px var(--ui-focus);
+}
+
+html[data-ui-theme="blue"] :is(.verification-flow strong, .verification-flow b) {
+  color: var(--ui-accent-ink);
+}
+
+html[data-ui-theme="blue"] .verification-flow p,
+html[data-ui-theme="blue"] :is(.login-field-hint, .login-hint, .login-footer, .login-register-entry, .login-switches) {
+  color: var(--ui-text-muted);
+}
+
+html[data-ui-theme="blue"] .login-success {
+  border-color: var(--ui-line-strong);
+  background: var(--ui-surface-active);
+  color: var(--ui-accent-ink);
+}
+
+html[data-ui-theme="blue"] .login-loading {
+  color: var(--ui-text-muted);
+}
+
+html[data-ui-theme="blue"] .login-loading-dot {
+  background: var(--ui-accent);
+  box-shadow: 0 0 0 0 var(--ui-focus);
+}
+
+html[data-ui-theme="blue"] :is(
+  .login-form input,
+  .login-submit,
+  .login-code-send,
+  .login-method-tabs button,
+  .login-register-entry button,
+  .login-switches button,
+  .login-label-row button
+):focus-visible {
+  outline-color: var(--ui-accent);
 }
 
 html[data-ui-theme="blue"] .login-cli-bootstrap {

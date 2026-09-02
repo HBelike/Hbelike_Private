@@ -550,6 +550,9 @@ def install_career_assistant_api(
     from src.career_assistant.live_interview.web import router as live_interview_router
 
     app.include_router(live_interview_router)
+    from src.career_assistant.online_assessment.web import router as online_assessment_router
+
+    app.include_router(online_assessment_router)
     app.state.career_assistant_project_root = project_root
     app.state.career_skill_runtime = CareerSkillRuntime(skill_library_service)
     app.state.career_skill_tool_registry = SkillToolRegistry(skill_library_service)
@@ -688,6 +691,9 @@ def get_career_services(request: Request) -> CareerAssistantServices:
                 conversation_memory_service,
                 ContextBudgetService(),
                 request.app.state.career_skill_tool_registry,
+                system_max_output_tokens=(
+                    response_generation_settings.max_completion_tokens
+                ),
             )
             job_assessment_repository = read_services.job_assessment_repository
             job_assessment_service = CareerJobAssessmentService(
@@ -904,6 +910,21 @@ def get_career_conversation_repository(
     """兼容会话仓储调用点，并保持首屏轻量初始化语义。"""
 
     return get_career_read_services(request).conversation_repository
+
+
+def get_career_turn_job_repository(
+    request: Request,
+) -> CareerTurnJobRepository:
+    """返回活动 Turn 查询仓储，不为历史浏览初始化完整 Agent 服务。"""
+
+    existing_services: CareerAssistantServices | None = getattr(
+        request.app.state,
+        "career_assistant_services",
+        None,
+    )
+    if existing_services is not None:
+        return existing_services.turn_job_repository
+    return CareerTurnJobRepository(get_career_read_services(request).database)
 
 
 def _load_career_environment(project_root: Path) -> None:

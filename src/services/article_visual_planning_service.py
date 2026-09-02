@@ -124,7 +124,7 @@ class ArticleVisualPlanningService:
             ],
             "positioning": summary_text,
             "capabilities": section_cards,
-            "takeaways": self._legacy_takeaways(section_cards),
+            "takeaways": self._legacy_takeaways(summary_text, section_cards),
             "art_direction": {
                 "style": "notion",
                 "palette": "editorial_blue",
@@ -142,13 +142,28 @@ class ArticleVisualPlanningService:
                     f"project_analysis_markdown 缺少“{section_name}”正文"
                 )
             cards.append(
-                {"label": section_name, "description": self._first_sentence(body)}
+                {
+                    "label": section_name,
+                    "description": self._first_sentence(body, max_length=60),
+                }
             )
         return cards
 
-    @staticmethod
-    def _legacy_takeaways(cards: list[dict[str, str]]) -> list[str]:
-        return [card["description"] for card in cards[:3]]
+    @classmethod
+    def _legacy_takeaways(
+        cls,
+        positioning: str,
+        cards: list[dict[str, str]],
+    ) -> list[str]:
+        """从项目定位提取一条完整结论，避免与三张能力卡重复。"""
+
+        capability_descriptions = {card["description"] for card in cards}
+        for sentence in cls._complete_sentences(positioning):
+            if len(sentence) <= 50 and sentence not in capability_descriptions:
+                return [sentence]
+        raise ArticleVisualSpecError(
+            "summary_text 没有不超过 50 字且不与能力卡重复的完整句；禁止静默截断"
+        )
 
     def _extract_fixed_sections(self, markdown: str) -> dict[str, str]:
         sections: dict[str, list[str]] = {name: [] for name in self._legacy_sections}
@@ -171,14 +186,34 @@ class ArticleVisualPlanningService:
                 sections[current].append(raw_line.strip())
         return {name: " ".join(lines).strip() for name, lines in sections.items()}
 
-    @staticmethod
-    def _first_sentence(text: str) -> str:
+    @classmethod
+    def _first_sentence(cls, text: str, *, max_length: int) -> str:
         cleaned = re.sub(r"^\s*(?:[-*+]\s+|\d+[.)、]\s*)", "", text).strip()
         if not cleaned:
             raise ArticleVisualSpecError("固定章节的第一句不能为空")
-        # 以自然语义标点保留完整首分句；容量仍由 validator 判断，绝不字符切片。
-        match = re.match(r"^.*?[，,；;。！？!?：:]", cleaned)
-        return (match.group(0) if match else cleaned).strip()
+        # 冒号和逗号只引出后续语义，不视为句末；过长时选择下一条完整句，
+        # 不通过字符切片制造“核心取舍是：”一类残句。
+        for sentence in cls._complete_sentences(cleaned):
+            if len(sentence) <= max_length:
+                return sentence
+        raise ArticleVisualSpecError(
+            f"固定章节没有不超过 {max_length} 字的完整句；禁止静默截断"
+        )
+
+    @staticmethod
+    def _complete_sentences(text: str) -> list[str]:
+        """按真正的句末标点切分，保留句末；尾部无标点时整体视为一句。"""
+
+        sentences = [
+            match.group(0).strip()
+            for match in re.finditer(r"[^。！？!?；;]+[。！？!?；;]", text)
+            if match.group(0).strip()
+        ]
+        consumed = sum(len(match.group(0)) for match in re.finditer(r"[^。！？!?；;]+[。！？!?；;]", text))
+        trailing = text[consumed:].strip()
+        if trailing:
+            sentences.append(trailing)
+        return sentences
 
     @staticmethod
     def _video_node(item: dict[str, str]) -> dict[str, str]:

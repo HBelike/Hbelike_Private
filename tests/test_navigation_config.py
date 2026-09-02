@@ -52,25 +52,57 @@ class NavigationConfigTests(unittest.TestCase):
         modules = route_modules_for_ui(None, PlatformRole.ADMIN)
         by_key = {item["key"]: item for item in modules}
 
-        self.assertEqual(len(modules), 9)
+        self.assertEqual(len([item for item in modules if item["scope"] == "route"]), 9)
         self.assertEqual(by_key["job_library"]["label"], "职位库")
         self.assertEqual(by_key["job_library"]["path"], "/interviews/jobs")
         self.assertFalse(by_key["job_library"]["admin_only"])
 
-    def test_default_catalog_contains_nine_enabled_modules(self) -> None:
+    def test_default_catalog_contains_nine_routes_and_two_enabled_features(self) -> None:
         modules = route_modules_for_ui(None, PlatformRole.ADMIN)
 
-        self.assertEqual(len(modules), 9)
+        self.assertEqual(len(modules), 11)
         self.assertTrue(all(item["enabled"] for item in modules))
         self.assertEqual(modules[0]["key"], "career_assistant")
         self.assertEqual(modules[1]["key"], "workbench")
         self.assertEqual(modules[-1]["key"], "admin_console")
         self.assertEqual(modules[-1]["path"], "/admin/modules")
 
-    def test_admin_accesses_every_module_even_when_switches_are_disabled(self) -> None:
+        features = [item for item in modules if item["scope"] == "feature"]
+        self.assertEqual(
+            {item["key"] for item in features},
+            {"career_interview_master", "career_online_assessment"},
+        )
+        self.assertTrue(all(item["parent_key"] == "career_assistant" for item in features))
+
+    def test_legacy_shared_switch_is_inherited_by_both_features_for_all_roles(self) -> None:
+        modules = route_modules_for_ui(
+            {"career_interview_tools": False},
+            PlatformRole.ADMIN,
+        )
+        features = [item for item in modules if item["scope"] == "feature"]
+
+        self.assertEqual(len(features), 2)
+        self.assertTrue(all(not item["enabled"] for item in features))
+        self.assertTrue(all(not item["accessible"] for item in features))
+
+    def test_career_feature_switches_are_independent_and_also_apply_to_admin(self) -> None:
+        modules = route_modules_for_ui(
+            {
+                "career_interview_master": False,
+                "career_online_assessment": True,
+            },
+            PlatformRole.ADMIN,
+        )
+        by_key = {item["key"]: item for item in modules}
+
+        self.assertFalse(by_key["career_interview_master"]["accessible"])
+        self.assertTrue(by_key["career_online_assessment"]["accessible"])
+
+    def test_admin_accesses_every_top_level_module_but_not_disabled_features(self) -> None:
         modules = route_modules_for_ui(
             {
                 "career_assistant": False,
+                "career_interview_master": False,
                 "workbench": False,
                 "evaluation_center": False,
             },
@@ -81,7 +113,8 @@ class NavigationConfigTests(unittest.TestCase):
         self.assertFalse(by_key["career_assistant"]["enabled"])
         self.assertFalse(by_key["workbench"]["enabled"])
         self.assertFalse(by_key["evaluation_center"]["enabled"])
-        self.assertTrue(all(item["accessible"] for item in modules))
+        self.assertTrue(all(item["accessible"] for item in modules if item["scope"] == "route"))
+        self.assertFalse(by_key["career_interview_master"]["accessible"])
 
     def test_user_only_accesses_enabled_non_admin_modules(self) -> None:
         modules = route_modules_for_ui(

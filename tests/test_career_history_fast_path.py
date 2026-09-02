@@ -32,6 +32,13 @@ class FakeConversationRepository:
         self.database = database
 
 
+class FakeTurnJobRepository:
+    """记录活动 Turn 仓储复用的轻量数据库。"""
+
+    def __init__(self, database: FakeDatabase) -> None:
+        self.database = database
+
+
 class FakeRepository:
     def __init__(self, database: FakeDatabase) -> None:
         self.database = database
@@ -43,6 +50,33 @@ class FakeModelGateway:
 
 
 class CareerHistoryFastPathTests(unittest.TestCase):
+    def test_active_turn_repository_reuses_read_database_without_full_services(self) -> None:
+        database = FakeDatabase("postgresql://career:test@localhost/career")
+        request = Request({"type": "http", "app": FastAPI()})
+        request.app.state.career_assistant_services = None
+
+        with (
+            patch.object(
+                career_router,
+                "get_career_read_services",
+                return_value=SimpleNamespace(database=database),
+            ),
+            patch.object(
+                career_router,
+                "CareerTurnJobRepository",
+                FakeTurnJobRepository,
+            ),
+            patch.object(
+                career_router,
+                "get_career_services",
+                side_effect=AssertionError("活动 Turn 仓储不应初始化完整 Agent 服务"),
+            ),
+        ):
+            repository = career_router.get_career_turn_job_repository(request)
+
+        self.assertIsInstance(repository, FakeTurnJobRepository)
+        self.assertIs(repository.database, database)
+
     def test_history_repository_does_not_initialize_full_career_services(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             app = FastAPI()

@@ -1,0 +1,7 @@
+{
+  "hostname": "ac.nowcoder.com",
+  "expectedAdapter": "nowcoder",
+  "expectedDeep": true,
+  "visibleText": "SQL：Employee 表中查询第二高的薪水。SELECT salary FROM Employee。",
+  "expectedQuestionType": "sql"
+}

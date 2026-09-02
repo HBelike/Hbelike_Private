@@ -63,11 +63,21 @@ class BaseTask(ABC):
 
         try:
             self.task_run_repository.mark_running(task_run.id)
-            self.logger.info("任务开始：%s run_id=%s", self.task_name, task_run.run_id)
+            self.logger.info(
+                "任务开始：%s run_id=%s",
+                self.task_name,
+                task_run.run_id,
+                extra=self._pipeline_event_extra("task_started", task_run.run_id),
+            )
 
             metadata = self.execute(context)
             self.task_run_repository.mark_succeeded(task_run.id, metadata=metadata)
-            self.logger.info("任务成功：%s run_id=%s", self.task_name, task_run.run_id)
+            self.logger.info(
+                "任务成功：%s run_id=%s",
+                self.task_name,
+                task_run.run_id,
+                extra=self._pipeline_event_extra("task_succeeded", task_run.run_id),
+            )
             return TaskResult(
                 task_name=self.task_name,
                 run_id=task_run.run_id,
@@ -75,8 +85,22 @@ class BaseTask(ABC):
             )
         except Exception as exc:
             self._record_failure(task_run_id=task_run.id, exc=exc)
-            self.logger.exception("任务失败：%s run_id=%s", self.task_name, task_run.run_id)
+            self.logger.exception(
+                "任务失败：%s run_id=%s",
+                self.task_name,
+                task_run.run_id,
+                extra=self._pipeline_event_extra("task_failed", task_run.run_id),
+            )
             raise
+
+    def _pipeline_event_extra(self, event_type: str, task_run_id: str) -> dict[str, str]:
+        """为实时日志 Handler 提供无需解析正文的 Task 关联字段。"""
+
+        return {
+            "pipeline_event_type": event_type,
+            "pipeline_task_name": self.task_name,
+            "pipeline_task_run_id": task_run_id,
+        }
 
     @abstractmethod
     def execute(self, context: TaskContext) -> dict[str, Any]:
