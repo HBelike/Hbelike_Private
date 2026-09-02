@@ -137,3 +137,15 @@ docker compose --env-file .env.production -f docker-compose.production.yml exec 
 - **确定性图稿与 Skill 持久卷**：API 镜像内字体文件和确定性渲染模块加载通过，媒体生产 readiness 无 blocker。`github-project-blog` 与 `grill-me` 的线上持久副本均与上一版种子哈希一致，确认没有线上编辑后才同步到新种子；同步后 API 与 Scheduler 读取哈希一致。
 - **公网验收**：健康接口返回 `career_runtime_revision=2026-08-28-interview-admin-permissions-v2`；首页、求职助手、面经库和审核台均返回 `200`，匿名面经树、删除面经与创建公开采集任务均返回 `401`。线上主资源 `/assets/index-M0V9WIBS.js` 已确认包含图片总结方案、实际调用模型、面经删除、维护权限与默认 10 条采集文案。
 - **生产开关与外部调用边界**：API 的 `VIDEO_SUBMIT_ENABLED`、`AUDIO_ENABLED`、`CAREER_ALLOW_PAID_PROFILES`、`PLATFORM_AUTH_REQUIRED`、`CAREER_REDACTION_ENABLED` 以及 Scheduler 的音视频开关均保持 `true`；本次只执行无付费请求的 readiness 检查，未主动调用聊天模型、Firecrawl、微信草稿、Seedream、TTS 或真人 BOSS 发送动作。
+
+## 2026-09-02 全量生产部署记录
+
+- **发布目标**：发布线上笔试助手及多平台 Capture Contract V2、面试大师末句识别与串行回答、模型动态输出上限、工作流实时日志、确定性文章图稿增强、微信标题处理、求职对话切换性能修复，以及 PC 端品牌、导航和管理台更新。
+- **发布版本**：业务代码提交 `4e39297`，生产仓库从 `284e8ce` 快进更新；本机 `data/`、本机插件目录、临时 `src/test.py` 与扩展 `0.2.8/0.3.x` 旧包未进入提交或生产镜像。
+- **发布前验证**：Python 全量 `616 passed`，WebUI 全量 `231 passed`，浏览器扩展全量 `44 passed`；Service Worker 与扩展脚本语法检查、Vite production build、API/Web Docker 镜像构建、求职助手部署设置、Alembic 单一 head、受控源码编译、暂存差异检查、常见凭据格式扫描和生产 Compose 配置均通过。
+- **部署调用链**：推送 GitHub `main` → 生产 `git pull --ff-only origin main` → 真实 `.env.production` 配置展开通过 → `docker compose --env-file .env.production -f docker-compose.production.yml up -d --build` → `skill-seed` 与 `career-migrate` 退出码均为 `0` → API、Worker、Scheduler 与 Web 全量重建完成。
+- **数据库与运行状态**：Alembic 从 `20260828_30` 连续迁移到 `20260901_33 (head)`；API、Web、PostgreSQL 均为 healthy，Worker、Scheduler、Caddy、Docling、Gotenberg 正常运行，发布后十分钟内 API、Worker、Scheduler 和 Web 日志均未出现 `ERROR`、`Traceback`、`Exception` 或 `CRITICAL`。Scheduler 已重新注册周五 08:00 内容生产和 09:00 草稿任务。
+- **公网验收**：健康接口、首页、求职助手、线上笔试助手、面经库、职位库、工作台和浏览器助手教程均返回 `200`；匿名线上笔试分析接口返回 `401`。线上主 JS 已确认包含“线上笔试助手”“查看日志”和“校正答案”。
+- **扩展验收**：`find-job-boss-helper-v0.4.0.zip` 返回 `200`，线上与本地文件均为 `29322` 字节，SHA-256 均为 `B1175D8D25BCED812FE4BAA5DBF47867B6AE63E83F243681E946F183A632F078`。
+- **生产开关与执行边界**：API 的 `VIDEO_SUBMIT_ENABLED`、`AUDIO_ENABLED`、`CAREER_ALLOW_PAID_PROFILES`、`PLATFORM_AUTH_REQUIRED`、`CAREER_REDACTION_ENABLED` 以及 Scheduler 的音视频开关均保持 `true`；媒体 readiness 无 warning 或 blocker。生产仍未配置 `CAREER_PISTON_BASE_URL`，且没有独立 Piston 执行节点，因此线上笔试的题面分析、答案生成和归档代码已上线，运行代码能力继续按设计返回执行器不可用；未在承载应用和数据库的主机上启动 privileged Piston 容器。
+- **外部调用边界**：除 Scheduler 启动时刷新 4 个公开 GitHub Star 快照外，本次未主动调用聊天模型、Firecrawl、微信草稿、Seedream、TTS 或真人 BOSS 发送动作。
