@@ -322,8 +322,10 @@ def test_dashscope_provider_waits_for_task_start_and_streams_pcm() -> None:
         )
         run_task = json.loads(str(socket.sent[0]))
         assert run_task["header"]["action"] == "run-task"
-        assert run_task["payload"]["model"] == "qwen-audio-3.0-asr-flash-streaming"
+        assert run_task["payload"]["model"] == "qwen-audio-3.1-asr-flash-streaming"
         assert run_task["payload"]["parameters"]["sample_rate"] == 24_000
+        assert run_task["payload"]["parameters"]["max_sentence_silence"] == 500
+        assert run_task["payload"]["parameters"]["vad_model"] == "near_meeting_16k"
         assert run_task["payload"]["parameters"]["language_hints"] == ["zh", "en"]
         assert run_task["payload"]["input"]["context"][0]["content"][0]["text"] == (
             "LangGraph、Kafka"
@@ -335,3 +337,12 @@ def test_dashscope_provider_waits_for_task_start_and_streams_pcm() -> None:
         assert socket.closed
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("value", (199, 6001))
+def test_dashscope_provider_rejects_invalid_sentence_silence(value: int) -> None:
+    with pytest.raises(ValueError, match="200 到 6000"):
+        DashScopeRealtimeAsrProvider(
+            "dashscope-test-key",
+            max_sentence_silence_ms=value,
+        )

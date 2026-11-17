@@ -11,8 +11,10 @@ from uuid import uuid4
 from src.career_assistant.live_interview.contracts import AudioChannel, TranscriptEvent
 
 
-DEFAULT_DASHSCOPE_ASR_MODEL = "qwen-audio-3.0-asr-flash-streaming"
+DEFAULT_DASHSCOPE_ASR_MODEL = "qwen-audio-3.1-asr-flash-streaming"
 DEFAULT_DASHSCOPE_ASR_URL = "wss://dashscope.aliyuncs.com/api-ws/v1/inference"
+DEFAULT_DASHSCOPE_MAX_SENTENCE_SILENCE_MS = 500
+DEFAULT_DASHSCOPE_VAD_MODEL = "near_meeting_16k"
 
 
 def map_dashscope_event(
@@ -111,13 +113,21 @@ class DashScopeRealtimeAsrProvider:
         model: str = DEFAULT_DASHSCOPE_ASR_MODEL,
         base_url: str = DEFAULT_DASHSCOPE_ASR_URL,
         workspace_id: str = "",
+        max_sentence_silence_ms: int = DEFAULT_DASHSCOPE_MAX_SENTENCE_SILENCE_MS,
+        vad_model: str = DEFAULT_DASHSCOPE_VAD_MODEL,
     ) -> None:
         self._api_key = api_key.strip()
         self._model = model.strip() or DEFAULT_DASHSCOPE_ASR_MODEL
         self._base_url = base_url.strip() or DEFAULT_DASHSCOPE_ASR_URL
         self._workspace_id = workspace_id.strip()
+        self._max_sentence_silence_ms = max_sentence_silence_ms
+        self._vad_model = vad_model.strip()
         if not self._api_key:
             raise ValueError("DashScope ASR API Key 不能为空")
+        if not 200 <= self._max_sentence_silence_ms <= 6_000:
+            raise ValueError("DashScope 断句静音阈值必须在 200 到 6000 毫秒之间")
+        if self._vad_model not in {"near_meeting_16k", "far_field_meeting_16k", ""}:
+            raise ValueError("DashScope VAD 模型配置无效")
 
     async def start(
         self,
@@ -143,8 +153,10 @@ class DashScopeRealtimeAsrProvider:
             "format": "pcm",
             "sample_rate": self.sample_rate,
             "heartbeat": True,
-            "max_sentence_silence": 800,
+            "max_sentence_silence": self._max_sentence_silence_ms,
         }
+        if self._model.startswith("qwen-audio-3.1-") and self._vad_model:
+            parameters["vad_model"] = self._vad_model
         parameters["language_hints"] = (
             [language_hint] if language_hint in {"zh", "en"} else ["zh", "en"]
         )

@@ -1,6 +1,6 @@
 import { pcm16ToBase64 } from './pcm-framer.js'
 
-const MAX_BUFFERED_BYTES = 1_000_000
+const MAX_BUFFERED_BYTES = 256_000
 const DEFAULT_READY_TIMEOUT_MS = 15_000
 
 export class LiveInterviewConnectionError extends Error {

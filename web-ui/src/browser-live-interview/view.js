@@ -23,7 +23,19 @@ export function estimateAsrCost(totalSeconds, trackCount = 1) {
 
 export function pickInitialAnswerModel(models, preferredId = '') {
   const ready = (models || []).filter((item) => item.readiness === 'ready')
-  return ready.some((item) => item.id === preferredId) ? preferredId : ready[0]?.id || ''
+  if (ready.some((item) => item.id === preferredId)) return preferredId
+  const flash = ready.find((item) => (
+    `${item.display_name || ''} ${item.model_id || ''}`.toLocaleLowerCase().includes('flash')
+  ))
+  return flash?.id || ready[0]?.id || ''
+}
+
+export function formatLatency(milliseconds) {
+  if (milliseconds === null || milliseconds === undefined || milliseconds === '') return '--'
+  const value = Number(milliseconds)
+  if (!Number.isFinite(value) || value < 0) return '--'
+  if (value < 1_000) return `${Math.round(value)}ms`
+  return `${(value / 1_000).toFixed(1)}s`
 }
 
 export function advanceSetupProgress(current, cap = 92) {

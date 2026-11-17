@@ -6,9 +6,15 @@ from collections.abc import AsyncIterator, Callable
 
 from src.career_assistant.live_interview.context_builder import LiveAnswerContext
 from src.career_assistant.live_interview.contracts import QuestionIntent
+from src.career_assistant.model_clients import CompletionRequestOptions
 
 
 PromptStreamer = Callable[[str], AsyncIterator[str]]
+LIVE_ANSWER_OPTIONS = CompletionRequestOptions(
+    temperature=0.2,
+    max_tokens=1_024,
+    thinking=False,
+)
 
 
 def build_answer_prompt(
@@ -32,6 +38,7 @@ def build_answer_prompt(
 {context_rule}
 3. 涉及个人经历、业绩和数字时，只提供回答结构与可替换占位提示，不得编造事实。
 4. 先输出“直接结论”和 3～5 个短要点，再给出简短表达示例与可能追问；避免冗长铺垫。
+5. 完整建议控制在 800 个中文字符以内，优先尽快输出可直接开口的第一句话。
 
 问题类型：{intent.value}
 面试官问题：{question.strip()}

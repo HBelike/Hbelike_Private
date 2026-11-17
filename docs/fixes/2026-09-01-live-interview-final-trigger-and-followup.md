@@ -118,3 +118,47 @@ Vite 仍提示既有主包超过 500 kB；本次没有修改前端代码或引�
 - 尚未使用真实会议音频执行人工验收；需验证 ASR final 分段、填充词表现和连续问题实际等待感受。
 - 首版不做语义去重、主题摘要、跨连接队列恢复或候选人文本持久化。
 - 本次仅完成本地实现、自动测试和生产构建，未部署生产。
+
+## 2026-11-17 低延迟优化
+
+### 线上只读诊断
+
+- 生产主机负载、内存、容器重启和 OOM 均正常，不是算力拥塞。
+- 最近一场真实会话中，ASR final 到回答任务启动约为 4～6ms；三次完整回答生成分别约为 3.35s、1.76s、1.54s。
+- 主要等待发生在 ASR final 之前：浏览器到香港服务的初始连接约 1.1～2.5s，香港服务到北京 DashScope 首次响应约 0.95s；原断句静音阈值为 800ms。
+- 诊断过程只读，没有修改生产配置、容器或数据。
+
+### 本地实现
+
+- DashScope 默认模型升级为 `qwen-audio-3.1-asr-flash-streaming`，默认断句阈值从 800ms 降为 500ms，并对 3.1 模型启用 `near_meeting_16k` VAD。
+- 新增 `DASHSCOPE_ASR_MAX_SENTENCE_SILENCE_MS` 与 `DASHSCOPE_ASR_VAD_MODEL` 环境变量，保留 200～6000ms 可调范围。
+- 实时回答关闭 thinking，固定 `temperature=0.2`、`max_tokens=1024`，提示词要求 800 个中文字符以内并优先输出可直接开口的第一句话。
+- WebSocket 事件新增 FIFO 排队、模型首字和完整生成耗时；页面显示端到端首字与模型首字耗时。
+- 浏览器音频发送背压从 1MB 收紧到 256KB；无显式偏好时优先选择可用的 Flash 回答模型。
+- final-only、FIFO、四条追问上下文、本场问答和持久化结构均保持不变。
+
+实现依据为[阿里云百炼实时语音识别文档](https://help.aliyun.com/zh/model-studio/real-time-speech-recognition-user-guide)，目标为正常网络下 ASR final 到页面首字 P95 不高于 3 秒；该目标需要生产部署后的真实音频样本继续验证，不能仅由本地单元测试保证。
+
+### 验证结果
+
+```text
+.\.venv\Scripts\python.exe -m pytest tests/test_live_interview_core.py tests/test_live_interview_services.py tests/test_live_interview_web.py -q
+58 passed, 1 warning
+
+.\.venv\Scripts\python.exe -m pytest tests -q
+876 passed, 66 skipped, 19 warnings
+
+cd web-ui
+node --test src/browser-live-interview-core.test.js src/browser-live-interview-view.test.js
+20 passed
+
+npm test
+373 passed, 1 failed
+
+npm run build
+构建成功，4149 modules transformed
+```
+
+WebUI 全量测试唯一失败来自工作区既有未提交的 `JobSearchWorkspace.vue` 与 `job-search-extension-gate.test.js` 断言不一致，与实时面试模块无关；定向复跑结果一致。仓库根目录直接运行 `pytest -q` 会收集既有 `tmp/production-release-20261110` 副本并产生测试模块重名，因此正式全量回归限定为 `tests/`。Vite 仍只有既有的 500KB chunk 警告。
+
+本次仅完成本地代码、配置示例、测试与文档，尚未部署生产。

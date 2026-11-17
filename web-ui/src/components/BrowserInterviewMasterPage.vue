@@ -11,6 +11,7 @@ import {
   buildArchivePreview,
   estimateAsrCost,
   formatDuration,
+  formatLatency,
   isNearScrollEnd,
   pickInitialAnswerModel
 } from '../browser-live-interview/view.js'
@@ -74,6 +75,13 @@ const activeTrackCount = computed(() => (
 ))
 const costEstimate = computed(() => estimateAsrCost(elapsedSeconds.value, activeTrackCount.value).toFixed(4))
 const durationText = computed(() => formatDuration(elapsedSeconds.value))
+const latestLatency = computed(() => latencySamples.value.at(-1) || null)
+const latencyText = computed(() => {
+  const sample = latestLatency.value
+  if (!sample) return ''
+  const model = sample.modelMs === null ? '' : ` · 模型 ${formatLatency(sample.modelMs)}`
+  return `首字 ${formatLatency(sample.endToEndMs)}${model}`
+})
 const quickLines = computed(() => answerPreviewLines(state.value.answerText, 5))
 const latestTranscripts = computed(() => allTranscripts.value.slice(-18))
 const interviewerPartial = computed(() => state.value.partialTranscripts.interviewer || '')
@@ -148,7 +156,15 @@ function handleServerEvent(event) {
   if (event.type === 'question.detected') questionDetectedAt.set(Number(event.question_version), performance.now())
   if (event.type === 'answer.delta' && Number(event.delta_index) === 1) {
     const detectedAt = questionDetectedAt.get(Number(event.question_version))
-    if (detectedAt) latencySamples.value.push(Math.max(0, performance.now() - detectedAt))
+    if (detectedAt) {
+      const modelMs = Number(event.first_token_ms)
+      latencySamples.value.push({
+        endToEndMs: Math.max(0, performance.now() - detectedAt),
+        modelMs: Number.isFinite(modelMs) && modelMs >= 0 ? modelMs : null
+      })
+      latencySamples.value = latencySamples.value.slice(-20)
+      questionDetectedAt.delete(Number(event.question_version))
+    }
   }
   if (event.type === 'transcript.final') {
     allTranscripts.value.push({
@@ -265,6 +281,8 @@ async function startInterview() {
   errorMessage.value = ''
   message.value = ''
   state.value = createInterviewState()
+  latencySamples.value = []
+  questionDetectedAt.clear()
   connectionState.value = 'connecting'
   capture = new BrowserAudioCapture()
   try {
@@ -713,7 +731,10 @@ onBeforeUnmount(() => {
         <div v-if="errorMessage" class="notice-strip error">{{ errorMessage }}</div>
 
         <article class="current-question-card">
-          <div class="question-meta"><span>当前问题</span><em>{{ state.questionIntent || '等待识别' }}</em></div>
+          <div class="question-meta">
+            <span>当前问题</span>
+            <div><strong v-if="latencyText">{{ latencyText }}</strong><em>{{ state.questionIntent || '等待识别' }}</em></div>
+          </div>
           <h1>{{ state.currentQuestion || '面试官的完整问题会显示在这里' }}</h1>
           <div class="question-actions">
             <button type="button" :disabled="phase !== 'active'" @click="answerNow">立即回答</button>
@@ -871,7 +892,7 @@ onBeforeUnmount(() => {
 .rail-section { flex: 1; min-height: 0; display: flex; flex-direction: column; }.rail-section > header, .history-section > header { display: flex; align-items: center; justify-content: space-between; }.rail-section h2, .history-section h2 { margin: 0; font-size: 14px; }.transcript-tools { display: flex; align-items: center; gap: 8px; }.rail-section header span { color: #6f8ab2; font: 700 12px ui-monospace, monospace; }.transcript-tools button { padding: 4px 8px; border: 1px solid rgba(110,174,254,.28); border-radius: 999px; background: rgba(28,123,242,.15); color: #8cc1ff; font-size: 11px; cursor: pointer; }.transcript-list { flex: 1; min-height: 0; margin-top: 12px; padding-right: 8px; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; scrollbar-width: thin; scrollbar-color: #47698f rgba(255,255,255,.06); display: flex; flex-direction: column; gap: 10px; }.transcript-list::-webkit-scrollbar { width: 7px; }.transcript-list::-webkit-scrollbar-track { border-radius: 999px; background: rgba(255,255,255,.05); }.transcript-list::-webkit-scrollbar-thumb { border-radius: 999px; background: #47698f; }.transcript-list article { padding: 12px; border-radius: 12px; background: rgba(255,255,255,.06); }.transcript-list article.candidate { background: rgba(28,123,242,.14); }.transcript-list article.partial { opacity: .66; }.transcript-list span { color: #6eaefe; font-size: 11px; font-weight: 800; }.transcript-list p { margin: 5px 0 0; color: #d5e1f3; font-size: 13px; line-height: 1.55; }
 .rail-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }.rail-actions button { min-height: 40px; border: 1px solid #365173; border-radius: 10px; background: #173053; color: white; cursor: pointer; }.rail-actions .danger { color: #ffb2b2; }
 .answer-workspace { height: 100%; min-width: 0; padding: 26px 30px 50px; overflow-y: auto; }.notice-strip { margin-bottom: 12px; padding: 11px 14px; border-radius: 10px; background: #e3f0ff; color: #285d99; }.notice-strip.error { background: #fff0f0; color: #a93c3c; }
-.current-question-card { padding: 26px 28px; border-radius: 18px; background: #176fe5; color: white; box-shadow: 0 18px 38px rgba(32,92,172,.19); }.question-meta { display: flex; justify-content: space-between; color: #c9e0ff; font-size: 12px; font-weight: 700; }.question-meta em { font-style: normal; }.current-question-card h1 { margin: 18px 0 24px; max-width: 1100px; font-size: clamp(25px, 3vw, 40px); line-height: 1.35; letter-spacing: -.035em; }.question-actions { display: flex; gap: 8px; }.question-actions button { padding: 9px 14px; border: 1px solid rgba(255,255,255,.35); border-radius: 9px; background: rgba(255,255,255,.12); color: white; cursor: pointer; }.question-actions button:disabled { opacity: .45; cursor: not-allowed; }
+.current-question-card { padding: 26px 28px; border-radius: 18px; background: #176fe5; color: white; box-shadow: 0 18px 38px rgba(32,92,172,.19); }.question-meta { display: flex; justify-content: space-between; color: #c9e0ff; font-size: 12px; font-weight: 700; }.question-meta > div { display: flex; align-items: center; gap: 12px; }.question-meta strong { color: #fff; font-variant-numeric: tabular-nums; }.question-meta em { font-style: normal; }.current-question-card h1 { margin: 18px 0 24px; max-width: 1100px; font-size: clamp(25px, 3vw, 40px); line-height: 1.35; letter-spacing: -.035em; }.question-actions { display: flex; gap: 8px; }.question-actions button { padding: 9px 14px; border: 1px solid rgba(255,255,255,.35); border-radius: 9px; background: rgba(255,255,255,.12); color: white; cursor: pointer; }.question-actions button:disabled { opacity: .45; cursor: not-allowed; }
 .answer-grid { margin-top: 18px; display: grid; grid-template-columns: minmax(280px, .72fr) minmax(460px, 1.45fr); gap: 18px; }.quick-answer-card, .full-answer-card, .history-section { border: 1px solid #d9e3f1; border-radius: 16px; background: white; box-shadow: 0 9px 24px rgba(34,67,107,.06); }.quick-answer-card, .full-answer-card { min-height: 330px; padding: 22px; }.quick-answer-card header, .full-answer-card header { display: flex; align-items: center; justify-content: space-between; }.quick-answer-card header span, .full-answer-card header span { font-weight: 800; }.quick-answer-card small, .full-answer-card small { color: #7a8ca4; }.quick-answer-card ol { padding-left: 25px; }.quick-answer-card li { margin: 16px 0; padding-left: 5px; line-height: 1.65; }.full-answer-card header > div { display: flex; gap: 10px; align-items: baseline; }.answer-text { margin-top: 20px; color: #263b59; font-size: 16px; line-height: 1.86; white-space: pre-wrap; }.typing-dot { width: 9px; height: 9px; border-radius: 50%; background: #176fe5; animation: breathe 1s ease-in-out infinite; }
 .history-section { margin-top: 18px; padding: 22px; }.history-section > header span { color: #7a8ca4; font-size: 12px; }.history-list { margin-top: 12px; display: grid; gap: 8px; }.history-list details { padding: 14px 16px; border-radius: 11px; background: #f4f7fb; }.history-list summary { display: flex; gap: 12px; cursor: pointer; font-weight: 700; }.history-list summary span { color: #176fe5; }.history-list p { margin: 14px 0 2px; color: #435773; line-height: 1.75; white-space: pre-wrap; }.empty-copy { color: #8292a8; line-height: 1.7; }
 .archive-backdrop { position: fixed; z-index: 80; inset: 0; display: grid; place-items: center; padding: 24px; background: rgba(7, 24, 52, .58); backdrop-filter: blur(5px); }

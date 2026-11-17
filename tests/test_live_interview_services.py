@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator
 from uuid import uuid4
 
 from src.career_assistant.live_interview.answer_service import (
+    LIVE_ANSWER_OPTIONS,
     LiveAnswerContext,
     LiveAnswerService,
     build_answer_prompt,
@@ -32,6 +33,13 @@ def test_prompt_requires_chinese_and_forbids_personal_fabrication() -> None:
     assert "不得编造" in prompt
     assert "可替换占位提示" in prompt
     assert "专有名词保留原文" in prompt
+    assert "800 个中文字符" in prompt
+
+
+def test_live_answer_options_prioritize_first_token_latency() -> None:
+    assert LIVE_ANSWER_OPTIONS.temperature == 0.2
+    assert LIVE_ANSWER_OPTIONS.max_tokens == 1_024
+    assert LIVE_ANSWER_OPTIONS.thinking is False
 
 
 def test_prompt_only_uses_transcribed_interviewer_question() -> None:
@@ -172,6 +180,38 @@ async def _assert_session_manager_detects_question_and_streams_answer() -> None:
 
 def test_session_manager_reports_only_active_channels() -> None:
     asyncio.run(_assert_session_manager_reports_only_active_channels())
+
+
+def test_session_manager_emits_queue_first_token_and_generation_latency() -> None:
+    asyncio.run(_assert_session_manager_emits_queue_first_token_and_generation_latency())
+
+
+async def _assert_session_manager_emits_queue_first_token_and_generation_latency() -> None:
+    interviewer = ScriptedAsrSession()
+    now = [100.0]
+
+    async def answer(prompt: str):
+        now[0] = 100.75
+        yield "直接结论"
+        now[0] = 101.2
+
+    manager = LiveSessionManager(
+        asr_sessions={AudioChannel.INTERVIEWER: interviewer},
+        answer_service=LiveAnswerService(answer),
+        clock=lambda: now[0],
+    )
+    await manager.start()
+    await _wait_for_type(manager, "session.ready")
+    await interviewer.emit(TranscriptEvent(AudioChannel.INTERVIEWER, 1, "解释 CAP。", True))
+
+    started = await _wait_for_type(manager, "answer.started")
+    delta = await _wait_for_type(manager, "answer.delta")
+    completed = await _wait_for_type(manager, "answer.completed")
+
+    assert started.payload["queue_wait_ms"] == 0
+    assert delta.payload["first_token_ms"] == 750
+    assert completed.payload["generation_ms"] == 1_200
+    await manager.close("test")
 
 
 async def _assert_session_manager_reports_only_active_channels() -> None:

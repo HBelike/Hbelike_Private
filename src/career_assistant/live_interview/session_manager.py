@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -51,6 +52,7 @@ async def _noop_answer(
 class _QueuedAnswer:
     detected: DetectedQuestion
     recent_conversation: tuple[str, ...]
+    queued_at: float
     manual: bool = False
     version: int | None = None
     attempt: int = 1
@@ -68,12 +70,14 @@ class LiveSessionManager:
         answer_context: LiveAnswerContext | None = None,
         transcript_hook: TranscriptHook = _noop_transcript,
         answer_hook: AnswerHook = _noop_answer,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._asr_sessions = asr_sessions
         self._answer_service = answer_service
         self._answer_context = answer_context or LiveAnswerContext()
         self._transcript_hook = transcript_hook
         self._answer_hook = answer_hook
+        self._clock = clock
         self._assembler = TranscriptAssembler()
         self._detector = RuleBasedQuestionDetector()
         self._outgoing: asyncio.Queue[ServerEvent] = asyncio.Queue(maxsize=1_000)
@@ -172,6 +176,7 @@ class LiveSessionManager:
                 _QueuedAnswer(
                     detected=detected,
                     recent_conversation=prior_conversation,
+                    queued_at=self._clock(),
                 )
             )
             self._ensure_answer_worker()
@@ -215,6 +220,7 @@ class LiveSessionManager:
                         is_follow_up=intent is QuestionIntent.FOLLOW_UP,
                     ),
                     recent_conversation=recent_conversation,
+                    queued_at=self._clock(),
                     version=version,
                     attempt=attempt,
                     emit_detected=False,
@@ -241,6 +247,7 @@ class LiveSessionManager:
                 _QueuedAnswer(
                     detected=detected,
                     recent_conversation=tuple(self._recent_conversation[-4:]),
+                    queued_at=self._clock(),
                     manual=True,
                 )
             )
@@ -272,6 +279,7 @@ class LiveSessionManager:
                         question,
                         self._active_intent,
                         job.recent_conversation,
+                        job.queued_at,
                     )
                 finally:
                     self._answer_running = False
@@ -286,11 +294,18 @@ class LiveSessionManager:
         question: str,
         intent: QuestionIntent,
         recent_conversation: tuple[str, ...],
+        queued_at: float,
     ) -> None:
         text = ""
+        started_at = self._clock()
         try:
             await self._answer_hook(version, attempt, question, intent, "generating", text)
-            await self._emit("answer.started", question_version=version, attempt=attempt)
+            await self._emit(
+                "answer.started",
+                question_version=version,
+                attempt=attempt,
+                queue_wait_ms=max(0, round((started_at - queued_at) * 1_000)),
+            )
             context = LiveAnswerContext(
                 candidate_facts=self._answer_context.candidate_facts,
                 target_role=self._answer_context.target_role,
@@ -304,19 +319,25 @@ class LiveSessionManager:
                     return
                 text += chunk
                 delta_index += 1
-                await self._emit(
-                    "answer.delta",
-                    question_version=version,
-                    attempt=attempt,
-                    delta_index=delta_index,
-                    delta=chunk,
-                )
+                payload: dict[str, object] = {
+                    "question_version": version,
+                    "attempt": attempt,
+                    "delta_index": delta_index,
+                    "delta": chunk,
+                }
+                if delta_index == 1:
+                    payload["first_token_ms"] = max(
+                        0,
+                        round((self._clock() - started_at) * 1_000),
+                    )
+                await self._emit("answer.delta", **payload)
             await self._answer_hook(version, attempt, question, intent, "completed", text)
             await self._emit(
                 "answer.completed",
                 question_version=version,
                 attempt=attempt,
                 answer_text=text,
+                generation_ms=max(0, round((self._clock() - started_at) * 1_000)),
             )
         except asyncio.CancelledError:
             await self._answer_hook(version, attempt, question, intent, "cancelled", text)

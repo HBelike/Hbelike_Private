@@ -14,11 +14,13 @@ from pydantic import BaseModel, Field
 from starlette.concurrency import iterate_in_threadpool
 
 from src.career_assistant.contracts import ModelCapability, ModelSelectionMode, ModelSelectionRequest
-from src.career_assistant.live_interview.answer_service import LiveAnswerService
+from src.career_assistant.live_interview.answer_service import LIVE_ANSWER_OPTIONS, LiveAnswerService
 from src.career_assistant.live_interview.archive import LiveInterviewArchiveService
 from src.career_assistant.live_interview.asr.dashscope_realtime import (
     DEFAULT_DASHSCOPE_ASR_MODEL,
     DEFAULT_DASHSCOPE_ASR_URL,
+    DEFAULT_DASHSCOPE_MAX_SENTENCE_SILENCE_MS,
+    DEFAULT_DASHSCOPE_VAD_MODEL,
     DashScopeRealtimeAsrProvider,
 )
 from src.career_assistant.live_interview.asr.fake import FakeAsrProvider
@@ -441,6 +443,7 @@ async def _build_live_manager(
                 ChatMessage(role="user", content=prompt),
             ],
             api_key=answer_resolution.credential,
+            options=LIVE_ANSWER_OPTIONS,
         )
         async for chunk in iterate_in_threadpool(iterator):
             yield chunk
@@ -512,6 +515,8 @@ def _resolve_asr_provider(services, record: LiveInterviewSessionRecord):
             model=resolution.profile.model_id or DEFAULT_DASHSCOPE_ASR_MODEL,
             base_url=os.getenv("DASHSCOPE_ASR_WEBSOCKET_URL", DEFAULT_DASHSCOPE_ASR_URL),
             workspace_id=os.getenv("DASHSCOPE_WORKSPACE_ID", ""),
+            max_sentence_silence_ms=_dashscope_sentence_silence_ms(),
+            vad_model=os.getenv("DASHSCOPE_ASR_VAD_MODEL", DEFAULT_DASHSCOPE_VAD_MODEL),
         )
     if resolution.profile.provider_key != "openai":
         raise RuntimeError("实时转写仅支持 DashScope 或 OpenAI Provider")
@@ -545,6 +550,7 @@ def _environment_asr_config() -> dict[str, object]:
             "display_name": "阿里云百炼 · Qwen 实时转写",
             "provider_key": "dashscope",
             "model_id": os.getenv("DASHSCOPE_ASR_MODEL", DEFAULT_DASHSCOPE_ASR_MODEL),
+            "max_sentence_silence_ms": _dashscope_sentence_silence_ms(),
         }
     if os.getenv("OPENAI_API_KEY", "").strip():
         return {
@@ -575,7 +581,23 @@ def _dashscope_environment_provider() -> DashScopeRealtimeAsrProvider:
         model=os.getenv("DASHSCOPE_ASR_MODEL", DEFAULT_DASHSCOPE_ASR_MODEL),
         base_url=os.getenv("DASHSCOPE_ASR_WEBSOCKET_URL", DEFAULT_DASHSCOPE_ASR_URL),
         workspace_id=os.getenv("DASHSCOPE_WORKSPACE_ID", ""),
+        max_sentence_silence_ms=_dashscope_sentence_silence_ms(),
+        vad_model=os.getenv("DASHSCOPE_ASR_VAD_MODEL", DEFAULT_DASHSCOPE_VAD_MODEL),
     )
+
+
+def _dashscope_sentence_silence_ms() -> int:
+    raw = os.getenv(
+        "DASHSCOPE_ASR_MAX_SENTENCE_SILENCE_MS",
+        str(DEFAULT_DASHSCOPE_MAX_SENTENCE_SILENCE_MS),
+    ).strip()
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise RuntimeError("DASHSCOPE_ASR_MAX_SENTENCE_SILENCE_MS 必须是整数") from exc
+    if not 200 <= value <= 6_000:
+        raise RuntimeError("DASHSCOPE_ASR_MAX_SENTENCE_SILENCE_MS 必须在 200 到 6000 之间")
+    return value
 
 
 def _model_payload(availability) -> dict[str, object]:

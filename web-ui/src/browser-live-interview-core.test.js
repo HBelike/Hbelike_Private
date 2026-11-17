@@ -12,6 +12,7 @@ import {
   reduceInterviewEvent
 } from './browser-live-interview/session-state.js'
 import {
+  MAX_BUFFERED_BYTES,
   LiveInterviewSocket,
   buildLiveInterviewWebSocketUrl
 } from './browser-live-interview/socket.js'
@@ -117,7 +118,8 @@ test('browser live interview socket waits for ready and applies backpressure', a
   socket.socket.onmessage({ data: JSON.stringify({ type: 'session.ready', active_channels: ['interviewer'] }) })
   await ready
   assert.equal(socket.sendAudio('interviewer', 0, new Int16Array([1])), true)
-  socket.socket.bufferedAmount = 1_000_001
+  assert.equal(MAX_BUFFERED_BYTES, 256_000)
+  socket.socket.bufferedAmount = MAX_BUFFERED_BYTES + 1
   assert.equal(socket.sendAudio('interviewer', 1, new Int16Array([2])), false)
   assert.ok(states.includes('ready'))
   socket.close()

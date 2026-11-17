@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
@@ -258,8 +259,18 @@ def test_environment_asr_prefers_dashscope_and_hides_key() -> None:
 
     assert config["readiness"] == "ready"
     assert config["provider_key"] == "dashscope"
-    assert config["model_id"] == "qwen-audio-3.0-asr-flash-streaming"
+    assert config["model_id"] == "qwen-audio-3.1-asr-flash-streaming"
+    assert config["max_sentence_silence_ms"] == 500
     assert "secret-value" not in str(config)
+
+
+def test_dashscope_endpointing_environment_is_validated(monkeypatch) -> None:
+    monkeypatch.setenv("DASHSCOPE_ASR_MAX_SENTENCE_SILENCE_MS", "350")
+    assert live_web._dashscope_sentence_silence_ms() == 350
+
+    monkeypatch.setenv("DASHSCOPE_ASR_MAX_SENTENCE_SILENCE_MS", "not-a-number")
+    with pytest.raises(RuntimeError, match="整数"):
+        live_web._dashscope_sentence_silence_ms()
 
 
 def test_setup_options_describe_all_supported_desktop_browsers() -> None:

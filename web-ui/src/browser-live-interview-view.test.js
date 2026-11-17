@@ -7,6 +7,7 @@ import {
   buildArchivePreview,
   defaultInterviewDate,
   estimateAsrCost,
+  formatLatency,
   formatDuration,
   isNearScrollEnd,
   isInterviewMasterPath,
@@ -101,6 +102,13 @@ test('interview master view formats duration and Qwen estimate', () => {
   assert.equal(estimateAsrCost(3600, 2), 2.376)
 })
 
+test('interview master formats visible first-token latency', () => {
+  assert.equal(formatLatency(348), '348ms')
+  assert.equal(formatLatency(1_580), '1.6s')
+  assert.equal(formatLatency(null), '--')
+  assert.match(interviewMasterPage, /首字/)
+})
+
 test('interview master view inherits a ready answer model only', () => {
   const models = [
     { id: 'blocked', readiness: 'blocked' },
@@ -108,4 +116,13 @@ test('interview master view inherits a ready answer model only', () => {
   ]
   assert.equal(pickInitialAnswerModel(models, 'blocked'), 'ready-1')
   assert.equal(pickInitialAnswerModel(models, 'ready-1'), 'ready-1')
+})
+
+test('interview master defaults to a ready flash model for low latency', () => {
+  const models = [
+    { id: 'pro', readiness: 'ready', display_name: 'DeepSeek Pro', model_id: 'deepseek-v4-pro' },
+    { id: 'flash', readiness: 'ready', display_name: 'DeepSeek Flash', model_id: 'deepseek-v4-flash' }
+  ]
+  assert.equal(pickInitialAnswerModel(models), 'flash')
+  assert.equal(pickInitialAnswerModel(models, 'pro'), 'pro')
 })
