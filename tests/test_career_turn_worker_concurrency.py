@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import threading
-import time
 import unittest
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
@@ -125,6 +124,7 @@ class InMemoryDurableQueue:
 class ConcurrencyTrackingProcessor:
     def __init__(self) -> None:
         self._lock = threading.Lock()
+        self._initial_wave_ready = threading.Event()
         self._running = 0
         self._running_by_conversation: dict[UUID, int] = defaultdict(int)
         self.max_running = 0
@@ -143,8 +143,12 @@ class ConcurrencyTrackingProcessor:
                 self._running_by_conversation[conversation_id],
             )
             self.started_turn_indexes[conversation_id].append(turn_index)
+            if self._running == 8:
+                self._initial_wave_ready.set()
         try:
-            time.sleep(0.02)
+            # 首批任务等待全局 8 个槽位全部进入，避免用短暂 sleep 猜测线程调度时机。
+            if not self._initial_wave_ready.wait(timeout=10):
+                raise TimeoutError("首次并发波次未达到预期的 8 个槽位")
             return TurnExecutionOutcome(
                 status=AgentTurnStatus.SUCCEEDED,
                 event_payload={"state": "succeeded"},

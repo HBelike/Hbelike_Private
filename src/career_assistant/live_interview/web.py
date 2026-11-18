@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from collections.abc import AsyncIterator
 from datetime import date
@@ -16,6 +17,7 @@ from starlette.concurrency import iterate_in_threadpool
 from src.career_assistant.contracts import ModelCapability, ModelSelectionMode, ModelSelectionRequest
 from src.career_assistant.live_interview.answer_service import LIVE_ANSWER_OPTIONS, LiveAnswerService
 from src.career_assistant.live_interview.archive import LiveInterviewArchiveService
+from src.career_assistant.live_interview.audio_relay import AudioRelayError, LiveAudioRelay
 from src.career_assistant.live_interview.asr.dashscope_realtime import (
     DEFAULT_DASHSCOPE_ASR_MODEL,
     DEFAULT_DASHSCOPE_ASR_URL,
@@ -32,7 +34,9 @@ from src.career_assistant.live_interview.desktop_launcher import (
 )
 from src.career_assistant.live_interview.contracts import (
     AnswerStatus,
+    AudioAppendEvent,
     AudioChannel,
+    AudioCommitEvent,
     SessionEndEvent,
     TranscriptEvent,
     parse_client_event,
@@ -59,6 +63,7 @@ from src.platform_access.contracts import PlatformRole
 
 
 router = APIRouter(prefix="/api/career/live-interviews", tags=["live-interview"])
+logger = logging.getLogger(__name__)
 
 
 class CreateLiveInterviewRequest(BaseModel):
@@ -316,25 +321,29 @@ async def live_interview_stream(websocket: WebSocket, session_id: UUID) -> None:
         manager = await _build_live_manager(websocket, repository, record)
         await asyncio.to_thread(repository.activate, actor.organization_id, actor.actor_id, session_id)
         await manager.start()
-        sender = asyncio.create_task(_send_manager_events(websocket, manager))
+        channels = (AudioChannel.INTERVIEWER, AudioChannel.CANDIDATE) if (
+            record.candidate_audio_enabled
+        ) else (AudioChannel.INTERVIEWER,)
+        await _run_live_transport(websocket, manager, channels)
+    except WebSocketDisconnect as exc:
+        # 只记录标准连接原因，不让客户端可控文本或转写正文进入日志。
+        reason = exc.reason if exc.reason in {
+            "keepalive ping timeout", "session_ready_timeout", "session_ready_cancelled", ""
+        } else "omitted"
+        logger.info(
+            "live_interview_client_disconnected session_id=%s code=%s reason=%s",
+            session_id,
+            exc.code,
+            reason,
+        )
+    except AudioRelayError as exc:
+        failed = True
+        logger.warning("live_interview_audio_failed session_id=%s code=%s", session_id, exc.code)
         try:
-            while not manager.closed:
-                payload = await websocket.receive_json()
-                try:
-                    event = parse_client_event(payload)
-                    await manager.handle(event)
-                except ValueError as exc:
-                    await websocket.send_json(
-                        {"type": "error", "code": "invalid_event", "message": str(exc)}
-                    )
-                    continue
-                if isinstance(event, SessionEndEvent):
-                    break
-        finally:
-            sender.cancel()
-            await asyncio.gather(sender, return_exceptions=True)
-    except WebSocketDisconnect:
-        pass
+            await websocket.send_json({"type": "error", "code": exc.code, "message": str(exc)})
+            await websocket.close(code=1013, reason=exc.code)
+        except Exception:
+            pass
     except Exception:
         failed = True
         try:
@@ -364,6 +373,61 @@ async def _send_manager_events(websocket: WebSocket, manager: LiveSessionManager
     while True:
         event = await manager.next_event()
         await websocket.send_json(event.to_dict())
+
+
+async def _run_live_transport(
+    websocket: WebSocket,
+    manager: LiveSessionManager,
+    channels: tuple[AudioChannel, ...],
+    *,
+    audio_send_timeout_seconds: float = 3.0,
+    max_audio_frames: int = 20,
+) -> None:
+    """收包持续运行，音频按轨转发；监控全部后台任务，防止静默失效。"""
+
+    relay = LiveAudioRelay(
+        manager.handle,
+        channels,
+        send_timeout_seconds=audio_send_timeout_seconds,
+        max_frames=max_audio_frames,
+    )
+    sender = asyncio.create_task(_send_manager_events(websocket, manager), name="live-event-sender")
+    relay_failure = asyncio.create_task(relay.wait_failed(), name="live-audio-monitor")
+    receiver: asyncio.Task | None = None
+    try:
+        while not manager.closed:
+            receiver = asyncio.create_task(websocket.receive_json(), name="live-client-receiver")
+            done, _ = await asyncio.wait(
+                (receiver, sender, relay_failure),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if relay_failure in done:
+                relay_failure.result()
+            if sender in done:
+                sender.result()
+                raise RuntimeError("实时事件发送任务意外结束")
+            payload = receiver.result()
+            try:
+                event = parse_client_event(payload)
+                if isinstance(event, AudioAppendEvent | AudioCommitEvent):
+                    relay.enqueue(event)
+                else:
+                    await manager.handle(event)
+            except ValueError as exc:
+                await websocket.send_json(
+                    {"type": "error", "code": "invalid_event", "message": str(exc)}
+                )
+                continue
+            if isinstance(event, SessionEndEvent):
+                break
+    finally:
+        tasks = [sender, relay_failure]
+        if receiver is not None:
+            tasks.append(receiver)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await relay.close()
 
 
 async def _resolve_websocket_actor(websocket: WebSocket):

@@ -1,0 +1,8 @@
+# 在已核验的当前生产镜像上仅覆盖实时面试模块，避免旧 Git 基线回退其他业务。
+ARG BASE_IMAGE=wechat-agent-career-api:release-local-baa5f320b873
+FROM ${BASE_IMAGE}
+COPY --chown=career:career src/career_assistant/live_interview/web.py /app/src/career_assistant/live_interview/web.py
+COPY --chown=career:career src/career_assistant/live_interview/audio_relay.py /app/src/career_assistant/live_interview/audio_relay.py
+COPY --chown=career:career src/career_assistant/live_interview/session_manager.py /app/src/career_assistant/live_interview/session_manager.py
+COPY --chown=career:career src/career_assistant/live_interview/answer_service.py /app/src/career_assistant/live_interview/answer_service.py
+COPY --chown=career:career src/career_assistant/live_interview/asr/dashscope_realtime.py /app/src/career_assistant/live_interview/asr/dashscope_realtime.py
