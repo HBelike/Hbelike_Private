@@ -28,4 +28,13 @@
 - 之前偶发的 Worker 并发测试以 `threading.Event` 确定首次 8 槽位同时进入，移除依赖 Windows 调度的 20ms sleep。全部业务断言不变，整个文件重复 5 次通过。
 - 检查证据：`tmp/production-releases/checks/skill_release_677dc31991304578a6cba8e6697ff548/`；持续压测：`tmp/regression-20261118-144536/transport-soak.log`。
 
-生产切换和真实 Provider WSS 验收待后续记录。
+## 生产结果
+
+- 2026-11-18 已提交、推送并投产 `aedaea7e05d16c345977e703c25878aecbae57cb`，分支 `codex/live-interview-latency-release`。
+- API/Worker 新镜像 `sha256:a81b2d0db162c6fecf5ebe02599b628f22aac01b3c56a73489037464a72e45de`；Web 仍为原 `sha256:2a5b31c758d9e243604899f70fe9f81e677c2b0db793e8765a86df00bdeb3fd6`。
+- 正式部署门禁确认环境、挂载、数据库容器、核心数据数量和 Scheduler 状态保留；数据库 head 仍为 `20261109_37`，活跃 Turn 为 0，API/Web 均 healthy。
+- 新镜像实时面试回归 `65 passed, 1 skipped`。前两次镜像验收缺 pytest/前端源码 fixture，补齐临时测试容器离线依赖与只读 fixture 后通过；未修改生产镜像依赖或业务断言。
+- 公开 HTTPS/WSS 真实链路验收：持续 75 秒、750 帧静音 PCM、75 次应用心跳；心跳 P50 2.30ms、P95 3.78ms，0 断连。该探针从生产主机经公开域名访问 Caddy，指标不代表用户电脑公网 RTT。
+- 真实调用 1 次 DashScope `qwen-audio-3.1-asr-flash-streaming` 和 1 次 `deepseek-v4-flash`；模型首字 766ms，完整生成 1006ms。真实语音语义准确率不属于该静音探针覆盖范围。
+- 本次合成面试会话和临时认证会话均按唯一 ID 清理。证据：`tmp/live-interview-hotfix/production-wss-verification.log`，发布包 `tmp/live-interview-hotfix/release-aedaea7e/manifest.json`，线上部署结果保存在对应 release 目录的 `result.json`。
+- SSH 曾间歇性在握手前关闭；只有握手恢复后才开始业务验收，不把该传输问题计为语音 Provider 调用失败。

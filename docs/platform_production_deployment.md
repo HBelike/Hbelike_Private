@@ -1,5 +1,11 @@
 # 全平台生产部署基线
 
+## 2026-11-18 实时面试精确补丁投产
+
+提交 `aedaea7e05d16c345977e703c25878aecbae57cb` 已通过分支 `codex/live-interview-latency-release` 推送并部署。以线上 11 月快照 API 镜像为父层，仅覆盖五个实时面试文件；API/Worker 镜像为 `sha256:a81b2d0db162c6fecf5ebe02599b628f22aac01b3c56a73489037464a72e45de`，原 Web 镜像保持不变，避免旧 Git 基线回退其他业务。数据库仍为 `20261109_37`，核心数据数量、环境、挂载及 Scheduler 状态均通过保留校验。
+
+修复上游音频背压阻塞浏览器读包而引发 WebSocket 心跳超时的问题。正式检查 Python 628 通过、Web 233 通过、扩展 44 通过；75 秒本地持续连接与 32 并发传输压测通过；生产真实公开 WSS 75 秒/750 帧/75 心跳通过，实际 ASR 3.1 与 DeepSeek Flash 各调用一次，模型首字 766ms、完整生成 1006ms。测试数据已清理。详细证据和边界见 `docs/fixes/2026-11-18-live-interview-heartbeat.md`。
+
 ## 设计目标
 
 本文件定义当前个人平台的首个公网部署形态：在一台香港 Linux VPS 上完整运行 GitHub 周榜公众号工作流、审核台、技能库、求职助手、面经库、登录/管理台与 PostgreSQL + pgvector，同时不把数据库、FastAPI 或临时附件直接暴露到公网。
