@@ -102,7 +102,8 @@ career_assistant:
           # https://{workspace_id}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1。
           api_base_url_env: CAREER_DOCUMENT_VISION_BASE_URL
           request_timeout_seconds: 90
-          max_completion_tokens: 2500
+          # 高清简历逐页转录需要保留全部细节，避免旧 2500 Token 上限截断页面后半段。
+          max_completion_tokens: 8192
         aliyun-qwen-high-accuracy:
           # 按需启用：复杂图表、长图或高风险人工复核时，可切到 qwen3.7-plus。
           # 默认关闭，避免把高质量模型变成每张图片的常规成本。
@@ -125,14 +126,16 @@ career_assistant:
       max_converted_size_bytes: 20971520
 
   model_policy:
-    default_selection_mode: free_quota_first
-    # 生产默认关闭；本地需要使用 DeepSeek 等付费档案时由环境变量显式开启。
-    allow_paid_profiles: ${CAREER_ALLOW_PAID_PROFILES:-false}
+    default_selection_mode: platform_default
+    # 平台统一提供DeepSeek默认连接，仍可由管理员环境变量显式停用付费模型。
+    allow_paid_profiles: ${CAREER_ALLOW_PAID_PROFILES:-true}
     enable_local_ollama_profile: false
     fallback_on_rate_limit: true
     fallback_on_provider_unavailable: true
 
   model_gateway:
+    default_provider_key: deepseek
+    default_model_id: deepseek-v4-pro
     provider_credentials:
       openai: OPENAI_API_KEY
       gemini: GEMINI_API_KEY
@@ -144,6 +147,7 @@ career_assistant:
       hunyuan: HUNYUAN_API_KEY
       qwen: DASHSCOPE_API_KEY
       deepseek: DEEPSEEK_API_KEY
+      kimi: MOONSHOT_API_KEY
       nvidia: NVIDIA_API_KEY
       tokenhub: TOKENHUB_API_KEY
       siliconflow: SILICONFLOW_API_KEY
@@ -155,7 +159,7 @@ career_assistant:
   job_assessment:
     # 岗位分析使用管理员固定模型，不跟随聊天框当前选择。
     judge_profile_key: deepseek-deepseek-v4-flash
-    prompt_version: career-job-judge-v2
+    prompt_version: career-job-judge-v3
     max_attempts: 3
 
   online_assessment:

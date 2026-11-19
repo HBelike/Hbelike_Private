@@ -108,7 +108,7 @@ class SkillToolRegistry:
     ) -> tuple[FunctionToolDefinition, ...]:
         """只有本轮显式挂载了 Skill 时才暴露通用 Skill 管理工具。"""
 
-        if not activated_skills:
+        if not any(skill.invocation_source != "automatic" for skill in activated_skills):
             return ()
         return tuple(self._definitions.values())
 

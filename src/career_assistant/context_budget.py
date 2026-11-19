@@ -118,6 +118,7 @@ class ConservativeTokenEstimator:
             "content": message.content,
             "tool_call_id": message.tool_call_id,
             "tool_calls": [asdict(item) for item in message.tool_calls],
+            "reasoning_content": message.reasoning_content,
         }
         serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         return 8 + estimate_text_tokens(message.role) + estimate_text_tokens(serialized)

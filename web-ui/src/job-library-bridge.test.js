@@ -4,6 +4,7 @@ import test from 'node:test'
 import {
   createGreetingRequestPayload,
   createJobDetailPayload,
+  jobLibraryBridge,
   JobLibraryBridgeError,
   pingExtensionWithRetry
 } from './job-library-bridge.js'
@@ -35,19 +36,25 @@ test('createJobDetailPayload converts a reactive-style job into clone-safe data'
   const payload = createJobDetailPayload(source)
 
   assert.deepEqual(structuredClone(payload), {
+    platform: 'boss',
     securityId: 'security-1',
+    jobId: 'encrypt-job-1',
     fallback: {
+      platform: '',
       id: 'job-1',
+      jobKey: '',
       securityId: 'security-1',
       jobId: 'encrypt-job-1',
       bossId: 'encrypt-boss-1',
       lid: 'lid-1',
       title: '全栈开发工程师',
+      description: '',
       salary: '15-30K·14薪',
       experience: '',
       degree: '',
       city: '',
       district: '',
+      address: '',
       skills: ['全栈开发', '后端开发经验'],
       welfare: ['五险一金'],
       recruiter: '',
@@ -59,7 +66,9 @@ test('createJobDetailPayload converts a reactive-style job into clone-safe data'
       industry: '',
       scale: '',
       stage: '',
-      sourceUrl: ''
+      sourceUrl: '',
+      labels: [],
+      adapterData: { jobKind: '' }
     }
   })
 })
@@ -95,6 +104,45 @@ test('发送错误保留安全重试阶段与默认招呼状态', () => {
   assert.equal(error.retryMode, 'message')
   assert.equal(error.submissionState, 'not_submitted')
   assert.equal(error.defaultGreetingSent, true)
+})
+
+test('所有发送入口原样提交超过建议字数的文案，仍阻止空文案', async () => {
+  const previousWindow = globalThis.window
+  const listeners = new Set()
+  const requests = []
+  const fakeWindow = {
+    location: { origin: 'http://127.0.0.1:5173' },
+    setTimeout,
+    clearTimeout,
+    addEventListener(type, handler) { if (type === 'message') listeners.add(handler) },
+    removeEventListener(type, handler) { if (type === 'message') listeners.delete(handler) },
+    postMessage(request) {
+      requests.push(request)
+      queueMicrotask(() => {
+        for (const listener of [...listeners]) listener({
+          source: fakeWindow,
+          origin: fakeWindow.location.origin,
+          data: { channel: 'find-job-job-library-extension-v1', requestId: request.requestId, ok: true, data: {} }
+        })
+      })
+    }
+  }
+  globalThis.window = fakeWindow
+  try {
+    const message = '🙂'.repeat(201)
+    assert.equal(createGreetingRequestPayload({}, ` ${message} `).message, message)
+    for (const method of ['sendGreeting', 'preflightGreeting', 'retryGreetingMessage']) {
+      await jobLibraryBridge[method]({}, ` ${message} `)
+      assert.equal(requests.at(-1).payload.message, message)
+      const requestCount = requests.length
+      assert.throws(() => jobLibraryBridge[method]({}, '  '), (error) => error.code === 'message_invalid')
+      assert.equal(requests.length, requestCount)
+    }
+    assert.equal(requests.length, 3)
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window
+    else globalThis.window = previousWindow
+  }
 })
 
 test('扩展首次握手超时后自动重试一次', async () => {

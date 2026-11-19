@@ -45,7 +45,7 @@ test('已安装旧版助手保持已连接，只单独标记安全重试能力�
     missingCapabilities: []
   })
   assert.deepEqual(normalizeBossExtensionConnection(null), {
-    status: 'missing',
+    status: 'unavailable',
     version: '',
     capabilities: [],
     greetingRetryReady: false,
@@ -54,9 +54,11 @@ test('已安装旧版助手保持已连接，只单独标记安全重试能力�
   })
 })
 
-test('静默检测不弹安装窗口，只有用户操作且真正未连接时才弹出', () => {
+test('连接失败和手动检测都不弹安装窗口，仅主动查看说明才打开', () => {
   assert.equal(shouldOpenBossExtensionGate('missing'), false)
-  assert.equal(shouldOpenBossExtensionGate('missing', { interactive: true }), true)
+  assert.equal(shouldOpenBossExtensionGate('missing', { interactive: true }), false)
+  assert.equal(shouldOpenBossExtensionGate('unavailable', { interactive: true }), false)
+  assert.equal(shouldOpenBossExtensionGate('unavailable', { explicitInstall: true }), true)
   assert.equal(shouldOpenBossExtensionGate('ready', { interactive: true }), false)
 })
 

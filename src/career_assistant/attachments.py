@@ -33,6 +33,10 @@ from src.career_assistant.legacy_office import (
     LegacyOfficeConversionError,
     LegacyOfficeConverter,
 )
+from src.career_assistant.pdf_scan_images import (
+    PDF_PAGE_TRANSCRIPTION_PROMPT,
+    full_page_scan_jpeg,
+)
 
 
 @dataclass(frozen=True)
@@ -66,6 +70,24 @@ class ParsedAttachment:
     document_understanding_result: DocumentUnderstandingResult | None = None
     document_understanding_error: str | None = None
     cloud_vision_result: CloudVisionResult | None = None
+    text_truncated: bool = False
+
+    @property
+    def parsing_notices(self) -> tuple[str, ...]:
+        """汇总完整性问题，防止基准简历把降级文本当成完整事实保存。"""
+
+        notices: list[str] = []
+        if self.document_understanding_error:
+            notices.append(self.document_understanding_error)
+        if self.cloud_vision_result is None:
+            if self.document_understanding_result is not None:
+                if self.document_understanding_result.status != "success":
+                    notices.append("文档仅部分识别成功，可能缺少页面或区块；请对照原简历补全，或重新上传清晰文件。")
+            elif self.document_probe is not None and self.document_probe.requires_document_understanding:
+                notices.append("PDF 存在未完整读取的页面，当前仅保留可读取的文字；请补全缺失内容或重新解析。")
+        if self.text_truncated:
+            notices.append("解析文本超过字符上限，内容已截断；请精简材料后重新上传，或对照原简历补全。")
+        return tuple(notices)
 
 
 class TemporaryAttachmentStore:
@@ -282,13 +304,25 @@ class AttachmentParser:
 
         attachment.validate()
         if attachment.media_type == "application/pdf":
-            return self._parse_pdf(attachment)
-        if attachment.kind in {
+            parsed = self._parse_pdf(attachment)
+        elif attachment.kind in {
             AttachmentKind.RESUME_DOCUMENT,
             AttachmentKind.JOB_DESCRIPTION_FILE,
         }:
-            return self._parse_structured_document(attachment)
-        return self._parse_image(attachment)
+            parsed = self._parse_structured_document(attachment)
+        else:
+            parsed = self._parse_image(attachment)
+
+        # 各解析分支仍按既有容量截取文本，同时把截断事实传给确认预览。
+        if parsed.cloud_vision_result is not None:
+            source_characters = len(parsed.cloud_vision_result.analysis_text)
+        elif parsed.document_understanding_result is not None:
+            source_characters = len(parsed.document_understanding_result.analysis_text)
+        elif parsed.document_probe is not None:
+            source_characters = parsed.document_probe.total_native_characters
+        else:
+            source_characters = len(parsed.extracted_text)
+        return replace(parsed, text_truncated=source_characters > self._settings.max_extracted_characters)
 
     def _parse_pdf(self, attachment: AttachmentDescriptor) -> ParsedAttachment:
         """先探测 PDF 文本层，再按需委托结构化解析服务处理扫描件。"""
@@ -309,8 +343,8 @@ class AttachmentParser:
             except Exception:
                 page_text = ""
                 failed_page_count += 1
-            probe_sample_length = self._settings.minimum_native_characters_per_pdf_page
-            page_texts.append(page_text[:probe_sample_length])
+            # 逐页视觉补全时保留原生文本页，不用探测用的短片段替换正文。
+            page_texts.append(page_text[: self._settings.max_extracted_characters])
             page_text_character_counts.append(len(page_text))
             if page_text and remaining > 0:
                 text_parts.append(page_text[:remaining])
@@ -338,13 +372,62 @@ class AttachmentParser:
                 # Docling/OCR 是可恢复的增强服务。服务暂时不可用时仍保留原生文本，
                 # 让后续模型如实解释“已收到但尚未完整识别”，而不是整轮直接失败。
                 document_understanding_error = str(exc)
+        cloud_vision_result: CloudVisionResult | None = None
+        if (
+            document_probe.requires_document_understanding
+            and self._cloud_vision_parser is not None
+            and (
+                document_understanding_result is None
+                or document_understanding_result.status != "success"
+                or not self._has_usable_image_ocr_text(extracted_text)
+            )
+        ):
+            recovered, recovery_error = self._recover_pdf_scan_pages(reader, page_texts)
+            if recovered is not None:
+                cloud_vision_result = recovered
+                extracted_text = recovered.analysis_text[: self._settings.max_extracted_characters]
+                document_understanding_error = recovery_error
+            elif recovery_error:
+                document_understanding_error = recovery_error
         return ParsedAttachment(
             kind=attachment.kind, media_type=attachment.media_type, page_count=len(reader.pages),
             image_width=None, image_height=None, extracted_text=extracted_text,
             requires_vision_model=False, image_bytes=None, document_probe=document_probe,
             document_understanding_result=document_understanding_result,
             document_understanding_error=document_understanding_error,
+            cloud_vision_result=cloud_vision_result,
         )
+
+    def _recover_pdf_scan_pages(
+        self, reader: PdfReader, native_page_texts: list[str],
+    ) -> tuple[CloudVisionResult | None, str | None]:
+        """按页转录整页扫描图，保留成功页并准确报告失败页。"""
+
+        parts: list[str] = []
+        failures: list[str] = []
+        first_result: CloudVisionResult | None = None
+        for index, (page, native_text) in enumerate(zip(reader.pages, native_page_texts), start=1):
+            text = native_text
+            if len(native_text) < self._settings.minimum_native_characters_per_pdf_page:
+                try:
+                    image_bytes = full_page_scan_jpeg(
+                        page, max_bytes=self._settings.max_cloud_vision_image_bytes,
+                    )
+                    result = self._cloud_vision_parser.analyze_image_with_prompt(
+                        "image/jpeg", image_bytes, PDF_PAGE_TRANSCRIPTION_PROMPT,
+                    )
+                    if not result.analysis_text.strip():
+                        raise CloudVisionError("未返回可辨认文字")
+                    text = result.analysis_text.strip()
+                    first_result = first_result or result
+                except (CloudVisionError, OSError, ValueError) as exc:
+                    failures.append(f"第 {index} 页未完成识别：{exc}")
+            if text.strip():
+                parts.append(f"## 第 {index} 页\n\n{text}")
+        error = "；".join(failures) if failures else None
+        if first_result is None:
+            return None, error
+        return replace(first_result, analysis_text="\n\n".join(parts)), error
 
     def _parse_structured_document(
         self,
@@ -528,7 +611,13 @@ class AttachmentParser:
                         pass
 
         cloud_vision_result: CloudVisionResult | None = None
-        if not self._has_usable_image_ocr_text(extracted_text):
+        if (
+            not self._has_usable_image_ocr_text(extracted_text)
+            or (
+                document_understanding_result is not None
+                and document_understanding_result.status != "success"
+            )
+        ):
             if self._cloud_vision_parser is None:
                 document_understanding_error = (
                     "图片文字识别结果不足，且平台云端图片理解服务尚未配置"

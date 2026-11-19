@@ -7,7 +7,8 @@ import {
 defineProps({
   open: { type: Boolean, default: false },
   error: { type: String, default: '' },
-  mode: { type: String, default: 'install' }
+  mode: { type: String, default: 'install' },
+  platform: { type: String, default: 'boss' }
 })
 
 defineEmits(['close', 'refresh'])
@@ -21,7 +22,7 @@ defineEmits(['close', 'refresh'])
           <div>
             <span class="gate-kicker"><i aria-hidden="true"></i>{{ mode === 'update' ? '浏览器助手更新' : '首次使用准备' }}</span>
             <h2 id="extension-gate-title">{{ mode === 'update' ? '更新浏览器助手' : '连接你的 BOSS 工作台' }}</h2>
-            <p>{{ mode === 'update' ? '旧版助手不具备安全重试能力，更新后才能继续真实发送。' : '真实岗位和打招呼需要浏览器助手读取你当前已登录的 BOSS 页面。' }}</p>
+            <p>{{ mode === 'update' ? platform === 'liepin' ? '当前助手版本不支持猎聘官方搜索，下载最新版并在扩展管理页重新加载后即可继续。' : '当前助手缺少所需功能，下载最新版并在扩展管理页重新加载后即可继续。' : '真实岗位和打招呼需要浏览器助手读取你当前已登录的 BOSS 页面。' }}</p>
           </div>
           <button type="button" class="gate-close" aria-label="关闭安装说明" @click="$emit('close')">×</button>
         </header>
@@ -31,7 +32,7 @@ defineEmits(['close', 'refresh'])
           <i aria-hidden="true"><b></b></i>
           <div class="bridge-core"><span>本机</span><strong>浏览器助手</strong></div>
           <i aria-hidden="true"><b></b></i>
-          <div><span>登录态</span><strong>BOSS 直聘</strong></div>
+          <div><span>{{ platform === 'liepin' ? '官方服务' : '登录态' }}</span><strong>{{ platform === 'liepin' ? '猎聘搜索' : 'BOSS 直聘' }}</strong></div>
         </div>
 
         <ol class="gate-steps">

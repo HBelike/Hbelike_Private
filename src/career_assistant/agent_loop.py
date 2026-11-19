@@ -20,6 +20,9 @@ class ActiveAgentTurn:
 
     conversation: ConversationRecord
     turn: AgentTurnRecord
+    source: str = "user"
+    parent_turn_id: UUID | None = None
+    job_search_batch_id: UUID | None = None
 
 
 class CareerAgentLoop:

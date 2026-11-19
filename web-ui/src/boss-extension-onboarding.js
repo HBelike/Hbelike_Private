@@ -1,4 +1,4 @@
-export const BOSS_EXTENSION_VERSION = '0.4.0'
+export const BOSS_EXTENSION_VERSION = '0.7.1'
 export const BOSS_EXTENSION_DOWNLOAD_URL = `/downloads/find-job-boss-helper-v${BOSS_EXTENSION_VERSION}.zip`
 export const BOSS_EXTENSION_GUIDE_URL = '/boss-extension-guide.html'
 export const BOSS_EXTENSION_REQUIRED_CAPABILITIES = Object.freeze([
@@ -10,7 +10,7 @@ export const BOSS_EXTENSION_REQUIRED_CAPABILITIES = Object.freeze([
 export function normalizeBossExtensionConnection(payload) {
   if (payload?.connected !== true) {
     return {
-      status: 'missing',
+      status: 'unavailable',
       version: '',
       capabilities: [],
       greetingRetryReady: false,
@@ -33,8 +33,9 @@ export function normalizeBossExtensionConnection(payload) {
   }
 }
 
-export function shouldOpenBossExtensionGate(status, { interactive = false } = {}) {
-  return interactive && status === 'missing'
+export function shouldOpenBossExtensionGate(status, { explicitInstall = false } = {}) {
+  // 网页无法仅凭没有响应证明扩展未安装，说明窗口只由用户主动打开。
+  return explicitInstall && status !== 'ready'
 }
 
 export function bossExtensionGuideUrl(browser = 'chrome') {

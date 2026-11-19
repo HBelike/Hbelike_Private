@@ -189,6 +189,7 @@ class CareerHistoryFastPathTests(unittest.TestCase):
                 conversation_id,
                 candidate_id,
                 target_id,
+                **_scope,
             ):
                 bind_calls.append((actor_id, conversation_id, candidate_id, target_id))
                 return context
@@ -209,6 +210,7 @@ class CareerHistoryFastPathTests(unittest.TestCase):
                 side_effect=AssertionError("带上下文会话必须保留完整服务流程"),
             ),
             patch.object(career_router, "_enqueue_job_assessment") as enqueue_assessment,
+            patch.object(career_router, "_enqueue_resume_review", return_value=None) as enqueue_review,
             patch.object(career_router, "_current_job_assessment", return_value=None),
             patch.object(
                 career_router,
@@ -245,7 +247,8 @@ class CareerHistoryFastPathTests(unittest.TestCase):
             ],
         )
         enqueue_assessment.assert_called_once()
-        self.assertEqual(payload["context"], {"bound": True})
+        enqueue_review.assert_called_once()
+        self.assertEqual(payload["context"], {"bound": True, "resume_review": None})
 
     def test_ready_history_detail_uses_read_services_without_full_agent_initialization(
         self,

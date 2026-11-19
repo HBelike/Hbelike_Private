@@ -21,6 +21,7 @@ class CandidateProfileRecord:
     resume_outline: str
     version: int
     created_at: datetime
+    owner_display_name: str | None = None
 
 
 @dataclass(frozen=True)

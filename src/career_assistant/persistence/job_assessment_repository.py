@@ -161,7 +161,7 @@ class CareerJobAssessmentRepository:
             """
             UPDATE career_assistant.job_match_assessments
             SET status = :status, attempt_count = :attempt_count,
-                result = CAST(:result AS JSONB), error_code = NULL, updated_at = NOW()
+                result = CAST(:result AS JSONB), schema_version = :schema_version, error_code = NULL, updated_at = NOW()
             WHERE id = :id
             RETURNING *
             """,
@@ -170,6 +170,7 @@ class CareerJobAssessmentRepository:
                 "status": "fallback_ready" if fallback else "ready",
                 "attempt_count": attempt_count,
                 "result": json.dumps(result, ensure_ascii=False),
+                "schema_version": result.get("schema_version", "career-job-assessment-v1"),
             },
         )
         if record is None:

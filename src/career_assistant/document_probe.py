@@ -115,7 +115,7 @@ class PdfDocumentProbe:
 
         if total_native_characters == 0:
             issues.append(DocumentProbeIssue.NO_TEXT_LAYER)
-        elif coverage < self._minimum_native_text_coverage:
+        elif pages_with_native_text < page_count:
             issues.append(DocumentProbeIssue.PARTIAL_TEXT_LAYER)
 
         if failed_page_count:
@@ -127,6 +127,8 @@ class PdfDocumentProbe:
 
         requires_document_understanding = (
             total_native_characters == 0
+            # 即使恰好达到配置的覆盖率，也不能静默跳过其余页面。
+            or pages_with_native_text < page_count
             or coverage < self._minimum_native_text_coverage
             or failed_page_count > 0
         )

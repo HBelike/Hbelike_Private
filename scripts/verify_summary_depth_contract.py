@@ -348,8 +348,8 @@ def main() -> None:
     assert "technical_features_markdown" in main_prompt
     assert "mechanism_breakdown_markdown" in main_prompt
     assert "engineering_insights_markdown" in main_prompt
-    assert "flow：steps 为 3 到 5 项" in main_prompt
-    assert "edges 必须且只能按 steps 相邻顺序连接" in main_prompt
+    assert "flow：steps 数量按证据中的真实流程动态确定，不设置固定数量范围" in main_prompt
+    assert "edges 数量随 steps 动态确定，必须且只能按相邻顺序连接" in main_prompt
     assert "video_script 必须" not in main_prompt
     assert "image_prompts 必须" not in main_prompt
     assert all(item.full_name not in main_prompt for item in rankings[1:])

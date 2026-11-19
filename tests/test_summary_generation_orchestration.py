@@ -260,6 +260,89 @@ def test_generation_retries_only_the_failed_project() -> None:
     assert audit["provider_call_count"] == 5
 
 
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("阅读[仓库](https://github.com/example/project)。", "阅读仓库。"),
+        ("阅读[文档](https://example.org/docs)。", "阅读文档。"),
+        ("阅读[文档](HTTPS://example.org/docs)。", "阅读文档。"),
+        ('阅读[文档](https://example.org/docs "使用说明")。', "阅读文档。"),
+        ("阅读[文档](https://example.org/docs_(v1))。", "阅读文档。"),
+        ("阅读[文档](<https://example.org/docs>)。", "阅读文档。"),
+        ("链接：https://example.org/docs，保留后文。", "链接：，保留后文。"),
+        ("链接：https://example.org/docs. Next sentence.", "链接：. Next sentence."),
+        ("链接（https://example.org/docs）；保留后文。", "链接（）；保留后文。"),
+        ("链接(https://example.org/docs)，保留后文。", "链接()，保留后文。"),
+        ("链接：https://raw.githubusercontent.com/example/project/main/README.md。", "链接：。"),
+        ("本地接口：http://localhost:8000/api；随后处理。", "本地接口：；随后处理。"),
+        ("链接：<https://example.org/docs>。", "链接：。"),
+        ("只依据 README 说明项目机制。", "只依据 README 说明项目机制。"),
+    ],
+)
+def test_generated_prose_removes_http_urls_and_preserves_surrounding_text(
+    text: str, expected: str,
+) -> None:
+    assert _task()._normalize_generated_prose(text) == expected
+
+
+def test_generation_cleans_urls_in_all_prose_fields_without_retrying() -> None:
+    rankings = _build_rankings(3)
+    projects = [_build_project_payload(item) for item in rankings]
+    for project in projects:
+        for field in (
+            "overview_text",
+            "technical_features_markdown",
+            "mechanism_breakdown_markdown",
+            "engineering_insights_markdown",
+        ):
+            project[field] += " 详见[文档](https://example.org/docs)。"
+        project["project_brief"]["summary_text"] += " 详见[文档](https://example.org/docs)。"
+    global_payload = _build_global_payload()
+    for field in global_payload:
+        global_payload[field] += "[说明](https://example.org/docs)"
+    provider = StubProvider([*projects, global_payload])
+
+    _, normalized, audit = _generate(rankings, provider)
+
+    assert audit["provider_call_count"] == 4
+    assert "https://" not in json.dumps(normalized, ensure_ascii=False)
+    assert normalized["article_markdown"].count("详见文档。") == 12
+    assert all("详见文档" in brief["summary_text"] for brief in normalized["image_prompts"])
+    assert normalized["title"] == global_payload["title"].split("[说明]")[0] + "说明"
+
+
+@pytest.mark.parametrize("phase", ["project", "global"])
+@pytest.mark.parametrize(
+    ("invalid_text", "error"),
+    [("### 多余标题", "Markdown 标题"), ("https://example.org/docs", "不能为空")],
+)
+def test_repair_receives_previous_output_and_failing_field(
+    phase: str, invalid_text: str, error: str,
+) -> None:
+    rankings = _build_rankings(1)
+    project = _build_project_payload(rankings[0])
+    global_payload = _build_global_payload()
+    if phase == "project":
+        invalid = dict(project, mechanism_breakdown_markdown=invalid_text)
+        provider = StubProvider([invalid, project, global_payload])
+        repair_call_index = 1
+        field = "mechanism_breakdown_markdown"
+    else:
+        invalid = dict(global_payload, weekly_theme_markdown=invalid_text)
+        provider = StubProvider([project, invalid, global_payload])
+        repair_call_index = 2
+        field = "weekly_theme_markdown"
+
+    _generate(rankings, provider)
+
+    repair_messages = provider.calls[repair_call_index]["messages"]
+    assert repair_messages[-2].role == "assistant"
+    assert json.loads(repair_messages[-2].content) == invalid
+    assert repair_messages[-1].role == "user"
+    assert field in repair_messages[-1].content
+    assert error in repair_messages[-1].content
+
+
 def test_generation_repairs_visual_spec_with_evidence_path_outside_repository_inputs() -> None:
     rankings = _build_rankings(1)
     invalid = _build_project_payload(rankings[0])

@@ -8,7 +8,7 @@ export function normalizeGreetingPayload(payload = {}) {
     jobId: text(payload.jobId, 300),
     bossId: text(payload.bossId, 300),
     lid: text(payload.lid, 300),
-    message: text(payload.message, 2000)
+    message: typeof payload.message === 'string' ? payload.message.trim() : ''
   }
   if (!normalized.securityId) throw new Error('岗位安全标识不能为空。')
   if (!normalized.jobId) throw new Error('岗位标识不能为空。')

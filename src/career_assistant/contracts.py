@@ -39,6 +39,7 @@ class SkillExecutionMode(StrEnum):
 class ModelSelectionMode(StrEnum):
     """用户在聊天页选择模型时可使用的策略。"""
 
+    PLATFORM_DEFAULT = "platform_default"
     FREE_QUOTA_FIRST = "free_quota_first"
     SPECIFIC_PROFILE = "specific_profile"
 
@@ -78,6 +79,8 @@ class ModelSelectionRequest:
 
         if self.mode is ModelSelectionMode.FREE_QUOTA_FIRST and self.profile_id is not None:
             raise ValueError("免费额度优先策略不能同时绑定特定模型档案")
+        if self.mode is ModelSelectionMode.PLATFORM_DEFAULT and self.profile_id is not None:
+            raise ValueError("平台默认策略不能同时绑定特定模型档案")
 
 
 @dataclass(frozen=True)
@@ -194,6 +197,11 @@ class CareerInboundMessage:
     candidate_profile_context: str = ""
     target_role_context: str = ""
     context_binding_version: int | None = None
+    job_search_snapshot: dict | None = None
+    job_search_view: dict | None = None
+    execution_source: str = "user"
+    parent_turn_id: UUID | None = None
+    job_search_batch_id: UUID | None = None
 
     def validate(self) -> None:
         """确保本轮输入至少有文本、职位链接或临时附件之一。"""

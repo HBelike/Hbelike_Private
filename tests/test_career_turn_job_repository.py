@@ -130,6 +130,36 @@ def _turn_row(*, status: str = "queued") -> dict[str, object]:
 
 
 class CareerTurnJobRepositoryTests(unittest.TestCase):
+    def test_duplicate_automatic_review_returns_existing_turn_before_admission(self):
+        from src.career_assistant.persistence.turn_job_repository import CareerTurnJobRepository, TurnPayloadRecord
+        row = _turn_row(status="succeeded")
+        database = FakeDatabase([FakeResult(row={"id": row["conversation_id"]}), FakeResult(row=row)])
+        proposed_id = uuid4()
+        result = CareerTurnJobRepository(database).enqueue(
+            turn_id=proposed_id, conversation_id=row["conversation_id"], actor_id=row["actor_id"],
+            model_selection=ModelSelectionRequest(), input_kind_codes=frozenset({"resume_review"}),
+            payload=TurnPayloadRecord(proposed_id, "初评", "初评", None, (), {}),
+            idempotency_key="resume_review:profile:v1",
+        )
+        self.assertEqual(result.id, row["id"])
+        self.assertEqual(len(database.connection.calls), 2)
+
+    def test_automatic_review_can_queue_behind_active_reply_and_stores_key(self):
+        from src.career_assistant.persistence.turn_job_repository import CareerTurnJobRepository, TurnPayloadRecord
+        row = _turn_row()
+        database = FakeDatabase([
+            FakeResult(row={"id": row["conversation_id"]}), FakeResult(),
+            FakeResult(row={"successful_turns": 2, "active_turns": 1}),
+            FakeResult(row=row), FakeResult(), FakeResult(),
+        ])
+        CareerTurnJobRepository(database).enqueue(
+            turn_id=row["id"], conversation_id=row["conversation_id"], actor_id=row["actor_id"],
+            model_selection=ModelSelectionRequest(), input_kind_codes=frozenset({"resume_review"}),
+            payload=TurnPayloadRecord(row["id"], "初评", "初评", None, (), {"source":"resume_review"}),
+            idempotency_key="review:v1", allow_queue_when_busy=True,
+        )
+        self.assertIn('"idempotency_key": "review:v1"', database.connection.calls[4][1]["request_metadata"])
+
     def test_enqueue_writes_turn_payload_and_queued_event_in_one_transaction(self) -> None:
         from src.career_assistant.persistence.turn_job_repository import (
             CareerTurnJobRepository,

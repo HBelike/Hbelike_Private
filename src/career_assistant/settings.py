@@ -24,6 +24,8 @@ class ModelGatewaySettings:
     allow_paid_profiles: bool
     enable_local_ollama_profile: bool
     provider_credential_env: dict[str, str | None]
+    default_provider_key: str = "deepseek"
+    default_model_id: str = "deepseek-v4-pro"
 
 
 @dataclass(frozen=True)
@@ -365,6 +367,10 @@ def load_model_gateway_settings(
         normalized_provider_key = _normalize_provider_key(provider_key)
         normalized_credentials[normalized_provider_key] = _normalize_env_name(env_name)
 
+    default_model_id = model_gateway.get("default_model_id", "deepseek-v4-pro")
+    if not isinstance(default_model_id, str) or not default_model_id.strip():
+        raise ValueError("model_gateway.default_model_id 必须是非空 Model ID")
+
     return ModelGatewaySettings(
         allow_paid_profiles=_read_boolean(model_policy, "allow_paid_profiles"),
         enable_local_ollama_profile=_read_boolean(
@@ -372,6 +378,8 @@ def load_model_gateway_settings(
             "enable_local_ollama_profile",
         ),
         provider_credential_env=normalized_credentials,
+        default_provider_key=_normalize_provider_key(str(model_gateway.get("default_provider_key", "deepseek"))),
+        default_model_id=default_model_id.strip(),
     )
 
 

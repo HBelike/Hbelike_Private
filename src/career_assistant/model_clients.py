@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from urllib.parse import urlparse
@@ -45,6 +46,7 @@ class ChatMessage:
     content: str | list[dict[str, object]] | None
     tool_call_id: str | None = None
     tool_calls: tuple["FunctionToolCall", ...] = ()
+    reasoning_content: str | None = None
 
 
 @dataclass(frozen=True)
@@ -103,6 +105,7 @@ class ToolModelResponse:
 
     content: str
     tool_calls: tuple[FunctionToolCall, ...]
+    reasoning_content: str | None = None
 
 
 @dataclass(frozen=True)
@@ -114,11 +117,43 @@ class ModelConnectionTarget:
     api_base_url: str | None
 
 
+KIMI_API_HOSTS = frozenset({"api.moonshot.cn", "api.moonshot.ai"})
+KIMI_MODEL_IDS = frozenset(
+    {
+        "kimi-k3",
+        "kimi-k2.7-code",
+        "kimi-k2.7-code-highspeed",
+        "kimi-k2.6",
+    },
+)
+
+
+def normalize_model_connection_target(
+    target: ModelConnectionTarget,
+) -> ModelConnectionTarget:
+    """识别 Moonshot 官方端点，并只纠正常见的 Kimi 展示名写法。"""
+
+    provider_key = target.provider_key.strip().casefold()
+    configured_url = (target.api_base_url or "").strip().rstrip("/")
+    host = (urlparse(configured_url).hostname or "").casefold()
+    if provider_key != "kimi" and host not in KIMI_API_HOSTS:
+        return target
+
+    loose_model_id = re.sub(r"[\s_]+", "-", target.model_id.strip().casefold())
+    model_id = loose_model_id if loose_model_id in KIMI_MODEL_IDS else target.model_id.strip()
+    return ModelConnectionTarget(
+        provider_key="kimi",
+        model_id=model_id,
+        api_base_url=configured_url or None,
+    )
+
+
 class OpenAICompatibleChatClient:
-    """统一调用 Groq、OpenRouter 与 Gemini OpenAI-compatible 端点。"""
+    """统一调用已登记 Provider 与自定义 OpenAI-compatible 端点。"""
 
     _DEFAULT_BASE_URLS = {
         "deepseek": "https://api.deepseek.com",
+        "kimi": "https://api.moonshot.cn/v1",
         "groq": "https://api.groq.com/openai/v1",
         "openrouter": "https://openrouter.ai/api/v1",
         "gemini": "https://generativelanguage.googleapis.com/v1beta/openai",
@@ -327,6 +362,7 @@ class OpenAICompatibleChatClient:
         credential = api_key.strip()
         if not credential:
             raise ModelInvocationError("请填写 API Key 后再测试连接")
+        normalized_target = normalize_model_connection_target(target)
         messages = [
             ChatMessage(role="system", content="你正在进行 API 连通性验证。"),
             ChatMessage(role="user", content="你好，请仅回复 OK。"),
@@ -335,19 +371,19 @@ class OpenAICompatibleChatClient:
             run_name="career.model.connectivity_test",
             run_type="llm",
             execute=lambda: self._request_completion(
-                target,
+                normalized_target,
                 credential,
                 messages,
                 # 推理模型可能先产生内部 reasoning，再输出最终 content。4 个 token
                 # 会让这类模型只来得及开始推理，进而被误判为“无返回内容”。
-                max_tokens=96,
+                max_tokens=512 if self._is_kimi_target(normalized_target) else 96,
             ),
             summarize=lambda result: {
                 "output_characters": len(result),
                 "has_output": bool(result),
             },
             metadata={
-                **self._trace_metadata(target, streaming=False),
+                **self._trace_metadata(normalized_target, streaming=False),
                 **self._trace_message_metrics(messages),
                 "operation": "connectivity_test",
             },
@@ -615,6 +651,11 @@ class OpenAICompatibleChatClient:
         return ToolModelResponse(
             content=self._content_text(message.get("content")).strip(),
             tool_calls=tuple(parsed_calls),
+            reasoning_content=(
+                str(message["reasoning_content"])
+                if message.get("reasoning_content") is not None
+                else None
+            ),
         )
 
     def _stream_request_completion(
@@ -735,6 +776,7 @@ class OpenAICompatibleChatClient:
         应在未来以独立的用户可见模式开启，而不是隐式拖慢每一轮聊天。
         """
 
+        target = normalize_model_connection_target(target)
         request_options = options or CompletionRequestOptions()
         payload: dict[str, object] = {
             "model": target.model_id,
@@ -742,9 +784,19 @@ class OpenAICompatibleChatClient:
                 OpenAICompatibleChatClient._message_payload(message)
                 for message in messages
             ],
-            "temperature": float(request_options.temperature),
-            "max_tokens": request_options.max_tokens or max_tokens,
         }
+        if OpenAICompatibleChatClient._is_kimi_k3_target(target):
+            # Kimi K3 固定 temperature/top_p 等采样参数，并使用新版输出长度字段。
+            # 产品当前没有独立推理强度开关，普通请求默认选择低强度以控制首字延迟。
+            payload["max_completion_tokens"] = request_options.max_tokens or max_tokens
+            payload["reasoning_effort"] = "max" if request_options.thinking else "low"
+        elif OpenAICompatibleChatClient._is_kimi_target(target):
+            # Kimi K2.6/K2.7 同样固定采样参数；显式 temperature 会被 Moonshot 拒绝。
+            # K2.x 仍兼容 max_tokens，思考模式未显式配置时沿用服务商默认值。
+            payload["max_tokens"] = request_options.max_tokens or max_tokens
+        else:
+            payload["temperature"] = float(request_options.temperature)
+            payload["max_tokens"] = request_options.max_tokens or max_tokens
         if stream:
             payload["stream"] = True
             payload["stream_options"] = {"include_usage": True}
@@ -824,11 +876,14 @@ class OpenAICompatibleChatClient:
                 }
                 for call in message.tool_calls
             ]
+        if message.reasoning_content is not None:
+            payload["reasoning_content"] = message.reasoning_content
         return payload
 
     def _base_url_for(self, target: ModelConnectionTarget) -> str:
         """优先使用页面配置的兼容端点，内置 Provider 仅作为安全默认值。"""
 
+        target = normalize_model_connection_target(target)
         configured_url = (target.api_base_url or "").strip().rstrip("/")
         if configured_url:
             if not configured_url.startswith("https://"):
@@ -841,6 +896,15 @@ class OpenAICompatibleChatClient:
         if default_url is None:
             raise ModelInvocationError("该 Provider 需要在模型档案中配置 OpenAI-compatible API 地址")
         return default_url
+
+    @staticmethod
+    def _is_kimi_k3_target(target: ModelConnectionTarget) -> bool:
+        normalized = normalize_model_connection_target(target)
+        return normalized.provider_key == "kimi" and normalized.model_id == "kimi-k3"
+
+    @staticmethod
+    def _is_kimi_target(target: ModelConnectionTarget) -> bool:
+        return normalize_model_connection_target(target).provider_key == "kimi"
 
     @staticmethod
     def _http_error_message(status_code: int) -> str:

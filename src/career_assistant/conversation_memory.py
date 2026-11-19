@@ -75,7 +75,7 @@ class ConversationSummary:
 @dataclass(frozen=True)
 class DialogueTurn:
     turn_id: UUID
-    user_message: MessageRecord
+    user_message: MessageRecord | None
     assistant_message: MessageRecord
     estimated_tokens: int
 
@@ -139,16 +139,18 @@ def group_complete_turns(messages: list[MessageRecord] | tuple[MessageRecord, ..
     turns: list[DialogueTurn] = []
     for turn_id in order:
         pair = grouped[turn_id]
-        if MessageRole.USER not in pair or MessageRole.ASSISTANT not in pair:
+        if MessageRole.ASSISTANT not in pair:
             continue
-        user = pair[MessageRole.USER]
         assistant = pair[MessageRole.ASSISTANT]
+        user = pair.get(MessageRole.USER)
+        if user is None and (assistant.ui_payload or {}).get("type") != "job_search_analysis":
+            continue
         turns.append(
             DialogueTurn(
                 turn_id=turn_id,
                 user_message=user,
                 assistant_message=assistant,
-                estimated_tokens=estimate_text_tokens(user.content_text)
+                estimated_tokens=(estimate_text_tokens(user.content_text) if user else 0)
                 + estimate_text_tokens(assistant.content_text),
             ),
         )
@@ -404,7 +406,7 @@ class ConversationMemoryService:
         dialogue = [
             {
                 "turn_id": str(turn.turn_id),
-                "user": turn.user_message.content_text,
+                "user": turn.user_message.content_text if turn.user_message else None,
                 "assistant": turn.assistant_message.content_text,
             }
             for turn in turns

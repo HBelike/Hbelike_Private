@@ -1,6 +1,9 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { jobLibraryBridge } from '../job-library-bridge.js'
+import { isMobileBrowser } from '../platform-capabilities.js'
+import { useDialogFocus } from '../use-dialog-focus.js'
+import { useHistoryLayer } from '../use-history-layer.js'
 import {
   createXiaohongshuDiscoveryPayload,
   createXiaohongshuNotePayload,
@@ -19,6 +22,24 @@ import {
 } from '../public-web-collection.js'
 
 const treeItems = ref([])
+const libraryShell = ref(null)
+const compactLibraryView = ref('list')
+useHistoryLayer(() => compactLibraryView.value === 'detail', returnToLibraryList)
+const libraryImportsOpen = ref(false)
+let libraryListScrollTop = 0
+
+function showLibraryDetail() {
+  const main = libraryShell.value?.closest('.main')
+  if (compactLibraryView.value === 'list') libraryListScrollTop = main?.scrollTop || 0
+  compactLibraryView.value = 'detail'
+  if (window.matchMedia('(max-width:640px)').matches) nextTick(() => main?.scrollTo({ top: 0, behavior: 'instant' }))
+}
+
+async function returnToLibraryList() {
+  compactLibraryView.value = 'list'
+  await nextTick()
+  libraryShell.value?.closest('.main')?.scrollTo({ top: libraryListScrollTop, behavior: 'instant' })
+}
 const treeLoading = ref(false)
 const treeError = ref('')
 const query = ref('')
@@ -37,6 +58,8 @@ const editorSummary = ref('')
 const editorTags = ref('')
 const showImportModal = ref(false)
 const showCollectionModal = ref(false)
+useDialogFocus(() => showImportModal.value, '.import-dialog', closeImport, () => !importing.value)
+useDialogFocus(() => showCollectionModal.value, '.collection-dialog', closeCollection, () => !collectionSubmitting.value)
 const importMode = ref('text')
 const importing = ref(false)
 const importProgress = ref(null)
@@ -668,7 +691,8 @@ function queueTreeSearch() {
 }
 
 async function selectExperience(experienceId) {
-  if (!experienceId || experienceId === selectedExperienceId.value) return
+  if (!experienceId) return
+  if (experienceId === selectedExperienceId.value) { showLibraryDetail(); return }
   if (editMode.value && !window.confirm('当前修改尚未保存，确定切换到另一份面经吗？')) return
 
   detailLoading.value = true
@@ -680,6 +704,7 @@ async function selectExperience(experienceId) {
     selectedExperience.value = payload
     selectedExperienceId.value = payload.id
     syncEditor(payload)
+    showLibraryDetail()
   } catch (error) {
     detailError.value = error instanceof Error ? error.message : '面经正文加载失败'
   } finally {
@@ -833,6 +858,10 @@ function startCollectionPolling(jobId) {
 }
 
 async function openCollection(mode = 'xiaohongshu') {
+  if (mode === 'xiaohongshu' && isMobileBrowser()) {
+    libraryNotice.value = '小红书读取需要电脑端浏览器助手。手机端可上传面经文件或使用公开信息收集。'
+    return
+  }
   stopCollectionPolling()
   collectionMode.value = mode
   collectionError.value = ''
@@ -1328,7 +1357,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <section class="interview-library-shell">
+  <section ref="libraryShell" class="interview-library-shell" :class="{ 'show-mobile-detail': compactLibraryView === 'detail', 'show-mobile-imports': libraryImportsOpen }">
     <header class="library-header">
       <div class="library-heading">
         <span class="library-heading-mark" aria-hidden="true">↥</span>
@@ -1337,7 +1366,8 @@ onBeforeUnmount(() => {
           <p class="library-description">把零散经历沉淀成可检索、可追溯的面试证据</p>
         </div>
       </div>
-      <div class="library-actions">
+      <button class="mobile-library-import-toggle" type="button" :aria-expanded="libraryImportsOpen" aria-controls="library-import-actions" @click="libraryImportsOpen = !libraryImportsOpen">{{ libraryImportsOpen ? '收起导入方式' : '导入面经' }}</button>
+      <div id="library-import-actions" class="library-actions">
         <button type="button" class="quiet-action collection-action" @click="openCollection('xiaohongshu')"><span aria-hidden="true">⌁</span>小红书URL读取</button>
         <button type="button" class="quiet-action information-collection-action" @click="openCollection('keyword')"><span aria-hidden="true">⌕</span>公开信息收集</button>
         <button type="button" class="primary-action upload-action" @click="openImport('file')"><span aria-hidden="true">↑</span>上传面经</button>
@@ -1396,6 +1426,7 @@ onBeforeUnmount(() => {
       </aside>
 
       <article class="interview-detail-pane">
+        <button class="mobile-library-back" type="button" @click="returnToLibraryList">← 返回面经列表</button>
         <div v-if="detailLoading" class="detail-state">
           <span class="thinking-orbit"></span>
           <strong>正在读取面经正文</strong>
@@ -1410,7 +1441,7 @@ onBeforeUnmount(() => {
 
         <div v-else-if="emptyState" class="detail-state library-empty-state">
           <div class="empty-index-mark">@</div>
-          <p class="section-label">RETRIEVAL READY</p>
+
           <h3>从一份真实面经开始</h3>
           <p>导入 PDF、Word、Excel、图片或整理好的 Markdown。平台只持久化解析后的文本、来源与索引，不保留上传原件。</p>
           <button type="button" class="primary-action" @click="openImport('file')">导入第一份材料</button>
@@ -1558,7 +1589,6 @@ onBeforeUnmount(() => {
           </div>
           <header>
             <div>
-              <p class="library-kicker">NEW INTERVIEW EVIDENCE</p>
               <h2 id="importTitle">导入面经材料</h2>
               <p>上传原件只在解析任务中暂存；入库后仅保留 Markdown、来源信息与检索切片。</p>
             </div>
@@ -1697,7 +1727,7 @@ onBeforeUnmount(() => {
             <section v-if="collectionCandidates.length" class="candidate-list xiaohongshu-candidate-list">
               <header class="candidate-list-header">
                 <div>
-                  <p class="section-label">COLLECTION RESULTS</p>
+
                   <h3>采集结果</h3>
                 </div>
                 <span>{{ collectionCandidates.length }} 条候选</span>
@@ -1723,7 +1753,7 @@ onBeforeUnmount(() => {
                 <section v-if="canManuallySaveCandidate(candidate) && candidateDraft(candidate)" class="candidate-review">
                   <header class="candidate-review-heading">
                     <div>
-                      <p class="section-label">HUMAN REVIEW</p>
+
                       <strong>核对正文后保存到面经库</strong>
                     </div>
                     <em>{{ candidateValidity(candidate) === true ? 'Agent 已提取' : '需人工核验' }}</em>
@@ -1874,7 +1904,7 @@ onBeforeUnmount(() => {
             <section v-for="candidate in collectionCandidates" :key="candidate.id" class="candidate-card">
               <header>
                 <div>
-                  <p class="section-label">CANDIDATE ARTICLE</p>
+
                   <h3>{{ candidate.title || '未命名面经正文' }}</h3>
                   <a v-if="candidate.source_url" :href="candidate.source_url" target="_blank" rel="noreferrer">查看公开来源 ↗</a>
                 </div>

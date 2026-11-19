@@ -4,12 +4,18 @@ import {
   buildDetailEndpoint,
   buildSearchEndpoint,
   classifyBossFailure,
+  fetchBossJobData,
   normalizeDetailResponse,
   normalizeCityResponse,
   normalizeSearchResponse,
   shouldSyncBossSearchPage,
   shouldRefreshBossSession
 } from './boss-data.js'
+import {
+  buildLiepinSearchPayload,
+  classifyLiepinFailure,
+  normalizeLiepinSearchResponse
+} from './liepin-data.js'
 import {
   BOSS_CHAT_PAGE_EVIDENCE,
   buildBossChatUrl,
@@ -43,13 +49,18 @@ import {
   runExtensionTask,
   settleExtensionCalls
 } from './extension-lifecycle.js'
+import { createBossChatDispatcher } from './boss-chat-dispatch.js'
 
 const WEB_CHANNEL = 'find-job-job-library-web-v1'
-const GREETING_CAPABILITIES = Object.freeze([
+const EXTENSION_CAPABILITIES = Object.freeze([
   'retry_greeting_message',
   'greeting_submission_state',
   'greeting_fire_and_continue',
   'xiaohongshu_keyword_collection',
+  'boss_chat_read',
+  'boss_chat_execute_v1',
+  'boss_chat_reply',
+  'liepin_job_search',
   ASSESSMENT_CAPTURE_CAPABILITY
 ])
 const ALLOWED_APP_HOSTS = new Set(['127.0.0.1', 'localhost', 'xingxingtech.cn', 'www.xingxingtech.cn'])
@@ -60,6 +71,8 @@ const APP_PAGE_PATTERNS = [
   'https://www.xingxingtech.cn/*'
 ]
 const BOSS_HOME = 'https://www.zhipin.com/web/geek/jobs?city=101020100&ka=open_joblist'
+const LIEPIN_API_ROOT = 'https://open-agent.liepin.com'
+const LIEPIN_TOKEN_KEY = 'find_job_liepin_user_token_v1'
 const REQUEST_GAP_MS = 1000
 const SESSION_SETTLE_MS = 1500
 const XIAOHONGSHU_HOME = 'https://www.xiaohongshu.com/explore'
@@ -127,6 +140,31 @@ async function getBossTab(initialUrl = BOSS_HOME) {
   if (!created.id) throw new Error('无法打开 BOSS 直聘后台页面。')
   return waitForTabReady(created.id)
 }
+
+async function getBossChatReadTab() {
+  const tabs = await chrome.tabs.query({ url: 'https://www.zhipin.com/*' })
+  const chats = tabs.filter((tab) => {
+    try {
+      const url = new URL(tab.url)
+      return tab.id && url.origin === 'https://www.zhipin.com'
+        && /^\/web\/geek\/chat\/?$/.test(url.pathname)
+    } catch {
+      return false
+    }
+  }).sort((left, right) => Number(right.lastAccessed ?? 0) - Number(left.lastAccessed ?? 0))
+  const reusable = chats.find((tab) => tab.status === 'complete' && !tab.discarded) ?? chats[0]
+  if (reusable) return waitForTabReady(reusable.id)
+  // 不导航用户的岗位搜索页，也不选择任何联系人或触碰聊天输入框。
+  const created = await chrome.tabs.create({ url: 'https://www.zhipin.com/web/geek/chat', active: false })
+  if (!created.id) throw new Error('无法打开 BOSS 沟通页面，请先在浏览器中打开该页面。')
+  return waitForTabReady(created.id)
+}
+
+const handleBossChatOperation = createBossChatDispatcher({
+  getChatTab: getBossChatReadTab,
+  navigateChat: (tabId, peerId) => navigateBossTab(tabId, `https://www.zhipin.com/web/geek/chat?id=${encodeURIComponent(peerId)}`),
+  beforeSource: async () => { await respectRequestGap(); lastRequestAt = Date.now() }
+})
 
 async function getXiaohongshuTab(initialUrl = XIAOHONGSHU_HOME) {
   const tabs = await chrome.tabs.query({ url: 'https://www.xiaohongshu.com/*' })
@@ -429,45 +467,8 @@ async function runBossFetch(tabId, endpoint) {
   const [{ result } = {}] = await chrome.scripting.executeScript({
     target: { tabId },
     world: 'MAIN',
-    args: [endpoint],
-    func: async (requestedEndpoint) => {
-      const pageText = document.body?.innerText ?? ''
-      if (/安全验证|环境存在异常|请稍候/.test(pageText) || /verify|security-check/i.test(location.pathname)) {
-        return { kind: 'verification' }
-      }
-      if (/登录后继续|扫码登录|密码登录/.test(pageText) || /\/web\/user\/?$/.test(location.pathname)) {
-        return { kind: 'login' }
-      }
-
-      const controller = new AbortController()
-      const timeoutId = setTimeout(() => controller.abort(), 12000)
-      try {
-        const supportedEndpoint = /^\/wapi\/zpgeek\/(search\/joblist|job\/detail)\.json\?/.test(requestedEndpoint)
-          || requestedEndpoint === '/wapi/zpgeek/common/data/city/site.json'
-        if (!supportedEndpoint) {
-          return { kind: 'network', message: '不支持的职位操作。' }
-        }
-
-        const response = await fetch(requestedEndpoint, {
-          method: 'GET',
-          credentials: 'include',
-          cache: 'no-store',
-          headers: { Accept: 'application/json, text/plain, */*' },
-          signal: controller.signal
-        })
-        if (!response.ok) return { kind: 'http', status: response.status }
-        return { kind: 'api', response: await response.json() }
-      } catch (error) {
-        return {
-          kind: 'network',
-          message: error instanceof Error && error.name === 'AbortError'
-            ? 'BOSS 直聘请求超时，请稍后重试。'
-            : (error instanceof Error ? error.message : 'BOSS 直聘请求失败。')
-        }
-      } finally {
-        clearTimeout(timeoutId)
-      }
-    }
+    args: [endpoint, BOSS_CHAT_PAGE_EVIDENCE],
+    func: fetchBossJobData
   })
   return result
 }
@@ -756,7 +757,8 @@ async function handleGreetingOperation(action, rawPayload) {
   try {
     payload = normalizeGreetingPayload(rawPayload)
   } catch (error) {
-    return { ok: false, error: { code: 'invalid_greeting', message: error.message, stopBatch: true } }
+    return { ok: false, error: { code: error.code || 'invalid_greeting', message: error.message,
+      stopBatch: error.code !== 'message_invalid', submissionState: 'not_submitted' } }
   }
 
   const bossTab = await getBossTab(BOSS_HOME)
@@ -897,6 +899,72 @@ async function handleBossOperation(action, payload) {
   return {
     ok: true,
     data: normalizeDetailResponse(result.response, payload.fallback ?? {})
+  }
+}
+
+async function handleLiepinOperation(action, payload = {}) {
+  if (action === 'liepin_state') {
+    const saved = await chrome.storage.local.get(LIEPIN_TOKEN_KEY)
+    return { ok: true, data: { configured: Boolean(String(saved[LIEPIN_TOKEN_KEY] ?? '').trim()) } }
+  }
+  if (action !== 'search_jobs') {
+    return { ok: false, error: { code: 'liepin_detail_unavailable', message: '猎聘官方搜索暂未提供独立岗位详情接口；请先打开原岗位查看完整 JD。' } }
+  }
+
+  const saved = await chrome.storage.local.get(LIEPIN_TOKEN_KEY)
+  const token = String(saved[LIEPIN_TOKEN_KEY] ?? '').trim()
+  if (!token) return { ok: false, error: { code: 'liepin_authorization_required', message: '请先配置猎聘官方授权，再搜索岗位。' } }
+
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), 30000)
+  try {
+    const response = await fetch(`${LIEPIN_API_ROOT}/mcp/search-job`, {
+      method: 'POST',
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+        'x-user-token': token
+      },
+      body: JSON.stringify(buildLiepinSearchPayload(payload.query, payload.page, payload.cityName)),
+      cache: 'no-store',
+      credentials: 'omit',
+      signal: controller.signal
+    })
+    let body
+    try {
+      body = await response.json()
+    } catch {
+      const statusFailure = classifyLiepinFailure(null, response.status)
+      if (statusFailure) return { ok: false, error: statusFailure }
+      return { ok: false, error: { code: 'liepin_response_invalid', message: '猎聘返回了无法识别的数据，本次未展示岗位。' } }
+    }
+    const failure = classifyLiepinFailure(body, response.status)
+    if (failure) return { ok: false, error: failure }
+    if (!response.ok) {
+      return { ok: false, error: { code: 'liepin_request_failed', message: `猎聘搜索失败（HTTP ${response.status}）。` } }
+    }
+    try {
+      return {
+        ok: true,
+        data: normalizeLiepinSearchResponse(body, {
+          query: payload.query,
+          cityName: payload.cityName,
+          page: payload.page
+        })
+      }
+    } catch (error) {
+      return { ok: false, error: { code: error?.code || 'liepin_response_invalid', message: error instanceof Error ? error.message : '猎聘返回的数据结构无法识别。' } }
+    }
+  } catch (error) {
+    return {
+      ok: false,
+      error: {
+        code: error?.name === 'AbortError' ? 'liepin_timeout' : 'liepin_network_error',
+        message: error?.name === 'AbortError' ? '猎聘搜索超时，请稍后重试。' : '无法连接猎聘官方职位搜索，请检查网络后重试。'
+      }
+    }
+  } finally {
+    clearTimeout(timeoutId)
   }
 }
 
@@ -1093,7 +1161,7 @@ async function handleMessage(message, sender) {
       data: {
         connected: true,
         version: chrome.runtime.getManifest().version,
-        capabilities: GREETING_CAPABILITIES
+        capabilities: EXTENSION_CAPABILITIES
       }
     }
   }
@@ -1106,6 +1174,26 @@ async function handleMessage(message, sender) {
   if (['search_xiaohongshu_notes', 'get_xiaohongshu_note'].includes(message.action)) {
     return handleXiaohongshuOperation(message.action, message.payload ?? {})
   }
+  if (['boss_chat_state', 'boss_chat_list', 'boss_chat_messages', 'boss_chat_reply', 'boss_chat_cancel', 'boss_chat_resume'].includes(message.action)) {
+    return handleBossChatOperation(message.action, message.payload ?? {}, sender)
+  }
+  if (message.action === 'liepin_open_settings') {
+    await chrome.runtime.openOptionsPage()
+    return { ok: true, data: { opened: true } }
+  }
+  if (message.action === 'liepin_state') {
+    return handleLiepinOperation(message.action, message.payload ?? {})
+  }
+  if (message.action === 'search_jobs' && message.payload?.platform === 'liepin') {
+    return handleLiepinOperation(message.action, message.payload ?? {})
+  }
+  if (message.action === 'get_job_detail' && message.payload?.platform === 'liepin') {
+    const description = String(message.payload?.fallback?.description ?? '').trim()
+    if (!description) {
+      return { ok: false, error: { code: 'liepin_detail_unavailable', message: '猎聘官方搜索未返回完整 JD，请打开原岗位核对。' } }
+    }
+    return { ok: true, data: message.payload.fallback }
+  }
   if (!['list_cities', 'search_jobs', 'get_job_detail'].includes(message.action)) {
     return { ok: false, error: { code: 'unsupported_action', message: '职位库助手不支持该操作。' } }
   }
@@ -1113,9 +1201,12 @@ async function handleMessage(message, sender) {
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  requestQueue = requestQueue
-    .catch(() => undefined)
-    .then(() => handleMessage(message, sender))
+  // 连接探测与取消不等待耗时业务；仍由同一处理器校验来源和通信通道。
+  const immediate = ['ping', 'boss_chat_cancel'].includes(message?.action)
+  const task = immediate
+    ? handleMessage(message, sender)
+    : requestQueue.catch(() => undefined).then(() => handleMessage(message, sender))
+  const completion = task
     .then((response) => {
       try {
         sendResponse(response)
@@ -1136,6 +1227,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         // 与上方相同，避免失效消息端口产生第二次未处理异常。
       }
     })
+  if (!immediate) requestQueue = completion
   return true
 })
 

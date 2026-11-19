@@ -29,13 +29,23 @@ class FakeResult:
 
 
 class FakeConnection:
-    def __init__(self, *, current_candidate_id=None, current_target_id=None) -> None:
+    def __init__(
+        self,
+        *,
+        current_candidate_id=None,
+        current_target_id=None,
+        owns_candidate=True,
+    ) -> None:
         self.current_candidate_id = current_candidate_id
         self.current_target_id = current_target_id
+        self.owns_candidate = owns_candidate
         self.insert_parameters = None
+        self.ownership_sql = ""
 
     def execute(self, statement, parameters):
         sql = " ".join(str(statement).split())
+        if sql.startswith("SELECT id FROM career_assistant.conversations") and "FOR UPDATE" in sql:
+            return FakeResult()
         if sql.startswith("SELECT binding.candidate_profile_id"):
             return FakeResult(
                 row={
@@ -44,6 +54,7 @@ class FakeConnection:
                 },
             )
         if "AS owns_candidate" in sql and "AS owns_target" in sql:
+            self.ownership_sql = sql
             if (
                 parameters["candidate_id"] is None
                 and "CAST(:candidate_id AS UUID) IS NULL" not in sql
@@ -54,7 +65,12 @@ class FakeConnection:
                 and "CAST(:target_id AS UUID) IS NULL" not in sql
             ):
                 raise RuntimeError("PostgreSQL 无法推断 target_id 的 NULL 参数类型")
-            return FakeResult(row={"owns_candidate": True, "owns_target": True})
+            return FakeResult(
+                row={
+                    "owns_candidate": self.owns_candidate or parameters["can_manage_all"],
+                    "owns_target": True,
+                }
+            )
         if sql.startswith("SELECT COALESCE(MAX(binding_version)"):
             return FakeResult(scalar=2)
         if sql.startswith("INSERT INTO career_assistant.conversation_context_bindings"):
@@ -114,6 +130,7 @@ class CareerOptionalContextRepositoryTests(unittest.TestCase):
             uuid4(),
             uuid4(),
             candidate_profile_id=candidate_id,
+            organization_id=uuid4(),
         )
 
         self.assertEqual(context.candidate.id, candidate_id)
@@ -131,6 +148,7 @@ class CareerOptionalContextRepositoryTests(unittest.TestCase):
             uuid4(),
             uuid4(),
             target_role_profile_id=target_id,
+            organization_id=uuid4(),
         )
 
         self.assertEqual(context.candidate.id, candidate_id)
@@ -147,12 +165,45 @@ class CareerOptionalContextRepositoryTests(unittest.TestCase):
             uuid4(),
             uuid4(),
             target_role_profile_id=target_id,
+            organization_id=uuid4(),
         )
 
         self.assertIsNone(context.candidate)
         self.assertEqual(context.target_role.id, target_id)
         self.assertIsNone(connection.insert_parameters["candidate_id"])
         self.assertEqual(connection.insert_parameters["target_id"], target_id)
+
+    def test_normal_user_cannot_bind_another_users_candidate(self) -> None:
+        connection = FakeConnection(owns_candidate=False)
+        repository = CareerContextRepository(FakeDatabase(connection))
+
+        with self.assertRaisesRegex(LookupError, "无权访问"):
+            repository.bind_conversation(
+                uuid4(),
+                uuid4(),
+                candidate_profile_id=uuid4(),
+                organization_id=uuid4(),
+                can_manage_all=False,
+            )
+
+        self.assertIn("organization_id = :organization_id", connection.ownership_sql)
+        self.assertIn("actor_id = :actor_id OR :can_manage_all", connection.ownership_sql)
+
+    def test_admin_can_bind_another_users_candidate_in_same_organization(self) -> None:
+        candidate_id = uuid4()
+        connection = FakeConnection(owns_candidate=False)
+        repository = CareerContextRepository(FakeDatabase(connection))
+
+        context = repository.bind_conversation(
+            uuid4(),
+            uuid4(),
+            candidate_profile_id=candidate_id,
+            organization_id=uuid4(),
+            can_manage_all=True,
+        )
+
+        self.assertEqual(context.candidate.id, candidate_id)
+        self.assertTrue(connection.insert_parameters is not None)
 
 
 if __name__ == "__main__":

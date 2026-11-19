@@ -158,7 +158,6 @@ test('网页桥与后台同时开放仅重发定制文案动作', async () => {
   assert.match(serviceWorker, /if \(isTransientTabEditError\(error\)\) throw error/)
   assert.match(serviceWorker, /createTabBusyGreetingFailure/)
   assert.match(serviceWorker, /'greeting_submission_state'/)
-  assert.match(serviceWorker, /capabilities: GREETING_CAPABILITIES/)
   assert.match(serviceWorker, /sendButton\.click\(\)\s*return \{ ok: true, status: 'submitted' \}/)
   assert.doesNotMatch(serviceWorker, /new MutationObserver/)
   assert.match(serviceWorker, /data-message-direction="outgoing"/)
@@ -261,4 +260,20 @@ test('历史同文案和未清空输入框不能伪造新发送成功', () => {
     inputCleared: false,
     stableForMs: 5000
   }), 'pending')
+})
+
+
+test('插件保留200字左右及更长的完整招呼语，不按长度拒绝或截断', () => {
+  for (const length of [180, 200, 201, 260, 3000]) {
+    const message = '中'.repeat(length)
+    assert.equal(normalizeGreetingPayload({ ...payload, message }).message, message)
+  }
+})
+
+test('插件只去除招呼语首尾空白，保留Emoji和内部空格并拒绝空正文', () => {
+  const emojiMessage = '😀'.repeat(201)
+  const spacedMessage = '中'.repeat(199) + ' 1'
+  assert.equal(normalizeGreetingPayload({ ...payload, message: `  ${emojiMessage}  ` }).message, emojiMessage)
+  assert.equal(normalizeGreetingPayload({ ...payload, message: spacedMessage }).message, spacedMessage)
+  assert.throws(() => normalizeGreetingPayload({ ...payload, message: '  ' }), /不能为空/)
 })

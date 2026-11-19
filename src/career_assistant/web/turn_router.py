@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from dataclasses import replace
 from collections.abc import AsyncIterator
 from uuid import UUID, uuid4
 
@@ -51,10 +52,11 @@ class EnqueueTurnRequest(BaseModel):
 
     text: str = Field(default="", max_length=30_000)
     job_url: str | None = Field(default=None, max_length=2_000)
-    selection_mode: ModelSelectionMode = ModelSelectionMode.FREE_QUOTA_FIRST
+    selection_mode: ModelSelectionMode = ModelSelectionMode.PLATFORM_DEFAULT
     model_profile_id: UUID | None = None
     interview_experience_ids: list[UUID] = Field(default_factory=list, max_length=5)
     selected_skill_ids: list[str] = Field(default_factory=list, max_length=3)
+    job_search_view: dict | None = None
 
 
 @router.post(
@@ -81,6 +83,7 @@ async def enqueue_turn(
             model_profile_id=request_body.model_profile_id,
             interview_experience_ids=request_body.interview_experience_ids,
             selected_skill_ids=request_body.selected_skill_ids,
+            job_search_view=request_body.job_search_view,
         )
         queue_status = await _enqueue_inbound(
             services,
@@ -114,13 +117,14 @@ async def enqueue_turn_with_materials(
     text: str = Form(default=""),
     job_url: str | None = Form(default=None),
     selection_mode: ModelSelectionMode = Form(
-        default=ModelSelectionMode.FREE_QUOTA_FIRST,
+        default=ModelSelectionMode.PLATFORM_DEFAULT,
     ),
     model_profile_id: UUID | None = Form(default=None),
     interview_experience_ids: list[UUID] = Form(default_factory=list),
     selected_skill_ids: list[str] = Form(default_factory=list),
     resume_file: UploadFile | None = File(default=None),
     job_description_file: UploadFile | None = File(default=None),
+    job_search_view: str | None = Form(default=None),
 ) -> dict[str, object]:
     """在 API 内解析附件，完整文本入库后删除原始文件并返回 202。"""
 
@@ -165,6 +169,7 @@ async def enqueue_turn_with_materials(
             model_profile_id=model_profile_id,
             interview_experience_ids=interview_experience_ids,
             selected_skill_ids=selected_skill_ids,
+            job_search_view=_parse_search_view(job_search_view),
         )
         queue_status = await _enqueue_inbound(
             services,
@@ -261,7 +266,7 @@ async def get_context_usage(
             services.conversation_repository.get_last_model_selection,
             actor.actor_id,
             conversation_id,
-        ) or ModelSelectionRequest()
+        ) or ModelSelectionRequest(mode=ModelSelectionMode.PLATFORM_DEFAULT)
     try:
         resolution = await asyncio.to_thread(
             services.model_gateway.resolve,
@@ -375,6 +380,7 @@ async def _build_enriched_inbound(
     model_profile_id: UUID | None,
     interview_experience_ids: list[UUID],
     selected_skill_ids: list[str],
+    job_search_view: dict | None = None,
 ) -> CareerInboundMessage:
     interview_evidence = await asyncio.to_thread(
         _build_interview_evidence,
@@ -405,12 +411,23 @@ async def _build_enriched_inbound(
         ),
         interview_evidence=interview_evidence,
         activated_skills=skill_activation.skills,
+        job_search_view=job_search_view or {},
     )
     return await asyncio.to_thread(
         _attach_conversation_context,
         services,
         inbound_message,
     )
+
+
+def _parse_search_view(value: str | None) -> dict | None:
+    """附件与文本入口使用相同的搜索引用契约。"""
+    if value is None or not value.strip():
+        return None
+    parsed = json.loads(value)
+    if not isinstance(parsed, dict):
+        raise ValueError("岗位搜索引用必须是对象")
+    return parsed
 
 
 async def _enqueue_inbound(
@@ -494,6 +511,7 @@ def _queue_status_payload(queue_status) -> dict[str, object]:
         "conversation_id": str(turn.conversation_id),
         "status": turn.status.value,
         "input_kind_codes": list(turn.input_kind_codes),
+        "source": "job_search_auto_analysis" if "job_search_auto_analysis" in turn.input_kind_codes else "user",
         "requested_selection_mode": turn.requested_selection_mode.value,
         "queue_sequence": queue_status.queue_sequence,
         "conversation_position": queue_status.conversation_position,

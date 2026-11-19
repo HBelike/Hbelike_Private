@@ -25,10 +25,10 @@ test('应用壳层在目标 viewport 使用正确导航模式', async ({ page })
     const sidebar = page.locator('.sidebar')
     const toggle = page.locator('.mobile-nav-toggle')
     if (viewport.width >= 1280) {
-      await expect(sidebar).toHaveCSS('width', '248px')
+      await expect(sidebar).toHaveCSS('width', '136px')
       await expect(toggle).toBeHidden()
     } else if (viewport.width >= 1024) {
-      await expect(sidebar).toHaveCSS('width', '216px')
+      await expect(sidebar).toHaveCSS('width', '128px')
       await expect(toggle).toBeHidden()
     } else {
       await expect(toggle).toBeVisible()

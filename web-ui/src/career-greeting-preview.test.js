@@ -2,6 +2,10 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   advanceGreetingSend,
+  GREETING_MESSAGE_TARGET_LENGTH,
+  greetingMessageLength,
+  greetingMessageError,
+  updateGreetingMessage,
   applyGreetingFailure,
   applyGreetingResult,
   createGreetingItems,
@@ -87,7 +91,7 @@ test('超过五条需要风险确认', () => {
 })
 
 test('本地发送每次只推进一个待发送岗位', () => {
-  const items = createGreetingItems([job('1'), job('2')]).map((item) => ({ ...item, status: 'queued' }))
+  const items = createGreetingItems([job('1'), job('2')]).map((item) => ({ ...item, message: '有效招呼语', status: 'queued' }))
   const first = advanceGreetingSend(items)
   assert.equal(first[0].status, 'sent')
   assert.equal(first[1].status, 'queued')
@@ -99,6 +103,7 @@ test('取消项不会进入本地发送队列', () => {
   const items = createGreetingItems([job('1'), job('2')])
   const queued = items.map((item, index) => ({
     ...item,
+    message: '有效招呼语',
     included: index === 0,
     status: index === 0 ? 'queued' : 'excluded'
   }))
@@ -115,7 +120,7 @@ test('没有生成成功的岗位不会进入发送队列', () => {
 })
 
 test('串行发送状态按预检、发送、完成推进', () => {
-  const items = createGreetingItems([job('1'), job('2')]).map((item) => ({ ...item, status: 'queued' }))
+  const items = createGreetingItems([job('1'), job('2')]).map((item) => ({ ...item, message: '有效招呼语', status: 'queued' }))
   const preflighting = updateGreetingItemStatus(items, items[0].id, 'preflighting')
   assert.deepEqual(preflighting.map((item) => item.status), ['preflighting', 'queued'])
   const sending = updateGreetingItemStatus(preflighting, items[0].id, 'sending')
@@ -142,6 +147,7 @@ test('停止批次会停止未发送和预检中的岗位，但不篡改已提�
 test('安全失败可重试当前项并恢复后续串行队列', () => {
   const items = createGreetingItems([job('1'), job('2'), job('3')]).map((item, index) => ({
     ...item,
+    message: '有效招呼语',
     status: ['sent', 'failed', 'stopped'][index],
     retryable: index === 1,
     retryMode: index === 1 ? 'message' : ''
@@ -206,4 +212,59 @@ test('旧版助手产生的安全验证失败引导更新而不盲目重发', ()
     errorCode: 'send_unknown',
     submissionState: 'unknown'
   }]), null)
+})
+
+
+test('招呼语按Unicode codepoint计数，200字仅为建议目标', () => {
+  assert.equal(GREETING_MESSAGE_TARGET_LENGTH, 200)
+  assert.equal(greetingMessageError('中'.repeat(200)), '')
+  assert.equal(greetingMessageError('中'.repeat(201)), '')
+  assert.equal(greetingMessageError('中'.repeat(3000)), '')
+  assert.equal(greetingMessageLength('A 1，😀'), 5)
+  assert.equal(greetingMessageLength('😀'.repeat(200)), 200)
+  assert.equal(greetingMessageError('😀'.repeat(200)), '')
+  assert.equal(greetingMessageError('😀'.repeat(201)), '')
+  assert.match(greetingMessageError('   '), /不能为空/)
+  assert.equal(greetingMessageError('  ' + '中'.repeat(200) + '  '), '')
+  assert.equal(greetingMessageError('中'.repeat(199) + ' 1'), '')
+})
+
+test('模型生成超过建议字数的文案保留全文并可进入审核发送队列', () => {
+  const [item] = createGreetingItems([job('long')])
+  const generated = applyGreetingResult([item], item.id, { message: '中'.repeat(201) })
+  assert.equal(generated[0].message.length, 201)
+  assert.equal(generated[0].messageError, '')
+  assert.equal(queueGreetingItems(generated)[0].status, 'queued')
+})
+
+test('手工编辑或粘贴超过建议字数的文案可发送，空白仍不可发送', () => {
+  const [item] = createGreetingItems([job('edit')])
+  const ready = applyGreetingResult([item], item.id, { message: '原始招呼语' })
+  const edited = updateGreetingMessage(ready, item.id, '😀'.repeat(201))
+  assert.equal(greetingMessageLength(edited[0].message), 201)
+  assert.equal(edited[0].messageError, '')
+  assert.equal(queueGreetingItems(edited)[0].status, 'queued')
+  const empty = updateGreetingMessage(edited, item.id, '   ')
+  assert.match(empty[0].messageError, /不能为空/)
+  assert.equal(queueGreetingItems(empty)[0].status, 'excluded')
+})
+
+test('重发失败项和恢复后续项均不按建议字数拦截', () => {
+  const items = [
+    { id: 'failed', message: '中'.repeat(201), status: 'failed', included: true, retryable: true },
+    { id: 'later', message: '正常文案', status: 'stopped', included: true }
+  ]
+  const retried = retryGreetingItems(items, 'failed')
+  assert.deepEqual(retried.map((item) => item.status), ['queued', 'queued'])
+  assert.equal(retried[0].message, items[0].message)
+  const allowed = retryGreetingItems([{ ...items[0], message: '正常文案' }, { ...items[1], message: '中'.repeat(201) }], 'failed')
+  assert.deepEqual(allowed.map((item) => item.status), ['queued', 'queued'])
+})
+
+test('模拟推进允许超过建议字数的文案，但仍拒绝空文案', () => {
+  const [sent] = advanceGreetingSend([{ id: 'long', message: '中'.repeat(201), status: 'queued' }])
+  assert.equal(sent.status, 'sent')
+  const [empty] = advanceGreetingSend([{ id: 'empty', message: '  ', status: 'queued' }])
+  assert.equal(empty.status, 'failed')
+  assert.equal(empty.errorCode, 'message_invalid')
 })

@@ -80,7 +80,13 @@ def prepare_turn_payload(
         "candidate_profile_context": inbound_message.candidate_profile_context,
         "target_role_context": inbound_message.target_role_context,
         "context_binding_version": inbound_message.context_binding_version,
+        "job_search_snapshot": inbound_message.job_search_snapshot,
+        "execution_source": inbound_message.execution_source,
+        "parent_turn_id": str(inbound_message.parent_turn_id) if inbound_message.parent_turn_id else None,
+        "job_search_batch_id": str(inbound_message.job_search_batch_id) if inbound_message.job_search_batch_id else None,
     }
+    if inbound_message.job_search_view is not None:
+        request_metadata["job_search_view"] = inbound_message.job_search_view
     return TurnPayloadRecord(
         turn_id=inbound_message.turn_id,
         input_text=inbound_message.text,
@@ -159,6 +165,10 @@ def restore_turn_input(
         context_binding_version=_optional_positive_int(
             metadata.get("context_binding_version"),
         ),
+        job_search_snapshot=metadata.get("job_search_snapshot"),
+        execution_source=str(metadata.get("execution_source", "user")),
+        parent_turn_id=UUID(str(metadata["parent_turn_id"])) if metadata.get("parent_turn_id") else None,
+        job_search_batch_id=UUID(str(metadata["job_search_batch_id"])) if metadata.get("job_search_batch_id") else None,
     )
     inbound_message.validate()
     return PreparedTurnInput(
@@ -174,6 +184,8 @@ def collect_input_kind_codes(
     """生成不包含正文的稳定输入类型标签。"""
 
     kinds: set[str] = set()
+    if inbound_message.execution_source == "job_search_auto_analysis":
+        kinds.add("job_search_auto_analysis")
     if inbound_message.text.strip():
         kinds.add("text")
     if (inbound_message.job_url or "").strip():

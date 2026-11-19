@@ -242,6 +242,7 @@ class ToolCallingClientTests(unittest.TestCase):
                             "message": {
                                 "role": "assistant",
                                 "content": None,
+                                "reasoning_content": "需要先检查仓库。",
                                 "tool_calls": [
                                     {
                                         "id": "call-1",
@@ -283,12 +284,18 @@ class ToolCallingClientTests(unittest.TestCase):
         followup = OpenAICompatibleChatClient._build_request_payload(
             target,
             [
-                ChatMessage("assistant", None, tool_calls=response.tool_calls),
+                ChatMessage(
+                    "assistant",
+                    None,
+                    tool_calls=response.tool_calls,
+                    reasoning_content=response.reasoning_content,
+                ),
                 ChatMessage("tool", '{"items":[]}', tool_call_id="call-1"),
             ],
             max_tokens=100,
         )
         self.assertEqual(followup["messages"][0]["tool_calls"][0]["id"], "call-1")  # type: ignore[index]
+        self.assertEqual(followup["messages"][0]["reasoning_content"], "需要先检查仓库。")  # type: ignore[index]
         self.assertEqual(followup["messages"][1]["tool_call_id"], "call-1")  # type: ignore[index]
 
 

@@ -5,6 +5,7 @@ import LoginPage from './components/LoginPage.vue'
 import ResumeAssistantPage from './components/ResumeAssistantPage.vue'
 import './styles.css'
 import './theme.css'
+import './mobile.css'
 
 const scenario = new URLSearchParams(window.location.search).get('scenario') || 'shell'
 const WEB_CHANNEL = 'find-job-job-library-web-v1'

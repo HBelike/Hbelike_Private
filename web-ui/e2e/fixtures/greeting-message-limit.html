@@ -1,0 +1,11 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>招呼语字数验证</title>
+<div id="app"></div><script type="module">
+import { createApp, h } from 'vue'
+import Dialog from '/src/components/CareerGreetingDialog.vue'
+import '/src/styles.css'
+import '/src/theme.css'
+document.documentElement.dataset.uiTheme = 'blue'
+const candidateProfile = { id: 'length-test-candidate', version: 1, display_name: '字数验收简历' }
+const previewJobs = [{ id: 'length-test-job', title: 'Java 开发工程师', company: '测试公司', companyShort: '测试公司', description: '负责业务研发。', skills: ['Java'] }]
+createApp({ render: () => h(Dialog, { open: true, initialStage: 'review', simulationMode: true, candidateProfile, previewJobs }) }).mount('#app')
+</script></html>

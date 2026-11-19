@@ -54,7 +54,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start_online_assessm
 CAREER_PISTON_BASE_URL=http://127.0.0.1:2000
 ```
 
-浏览器扩展开发态可在扩展管理页加载 `browser-extension/job-library`。对外安装包为 `web-ui/public/downloads/find-job-boss-helper-v0.4.0.zip`。
+浏览器扩展开发态可在扩展管理页加载 `browser-extension/job-library`。对外安装包为 `web-ui/public/downloads/find-job-boss-helper-v0.4.2.zip`（包含连接探测修复和招呼语 200 字保护，不改变题面采集能力）。
 
 ## 数据与隐私边界
 
@@ -119,3 +119,12 @@ CAREER_PISTON_BASE_URL=http://127.0.0.1:2000
 完整产品约束见 [设计说明](../superpowers/specs/2026-09-01-online-assessment-assistant-design.md)，实现步骤见 [实施计划](../superpowers/plans/2026-09-01-online-assessment-assistant.md)。
 
 多平台升级见 [设计说明](../superpowers/specs/2026-09-02-online-assessment-multi-platform-design.md) 与 [实施计划](../superpowers/plans/2026-09-02-online-assessment-multi-platform.md)。
+
+
+## 2026-11-06 紧凑 PC 与手机入口
+
+- 目标：移除 1180px 根最小宽度造成的整体缩放，保留 PC 真实题面与执行能力。
+- 布局：宽 PC 保留三栏，1279px 以下使用题面／代码／测试标签；DOM 和原 assessment state 保留，切换不清空代码。生成和手动测试仅同步选中面板，不改变 solve、execute 或 Harness 行为。
+- 能力：App 在移动浏览器挂载前展示电脑端说明，不初始化笔试组件；窄 PC 不受此分流限制。没有新增手机扩展或远程电脑执行器。
+- 验证：900px 窄 PC、标签切换代码保留、手机说明与全平台回归通过；前端 295 项、浏览器 47 项。真实题目站点与执行服务未在本轮联调。
+- 详见 [双端适配记录](../mobile_ui_adaptation.md)，本轮未投产。

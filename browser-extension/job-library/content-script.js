@@ -7,6 +7,14 @@
     'list_cities',
     'search_jobs',
     'get_job_detail',
+    'boss_chat_state',
+    'boss_chat_list',
+    'boss_chat_messages',
+    'boss_chat_reply',
+    'boss_chat_cancel',
+    'boss_chat_resume',
+    'liepin_state',
+    'liepin_open_settings',
     'search_xiaohongshu_notes',
     'get_xiaohongshu_note',
     'preflight_greeting',
@@ -19,8 +27,10 @@
 
   const previous = globalThis[BRIDGE_STATE_KEY]
   if (previous?.listener) window.removeEventListener('message', previous.listener)
+  const bridgeVersion = chrome.runtime.getManifest().version
 
   function postResponse(requestId, payload) {
+    if (globalThis[BRIDGE_STATE_KEY]?.listener !== handleMessage) return
     window.postMessage({
       channel: EXTENSION_CHANNEL,
       requestId,
@@ -48,6 +58,11 @@
     window.removeEventListener('message', handleMessage)
     if (globalThis[BRIDGE_STATE_KEY]?.listener === handleMessage) {
       delete globalThis[BRIDGE_STATE_KEY]
+      window.postMessage({
+        channel: EXTENSION_CHANNEL,
+        type: 'disconnected',
+        version: bridgeVersion
+      }, window.location.origin)
     }
     return true
   }
@@ -59,7 +74,9 @@
     postResponse(requestId, {
       ok: false,
       error: {
-        code: 'extension_unavailable',
+        code: /Receiving end does not exist/i.test(errorMessage(error))
+          ? 'bridge_disconnected'
+          : 'bridge_error',
         message: errorMessage(error)
       }
     })
@@ -101,7 +118,7 @@
   window.addEventListener('message', handleMessage)
   globalThis[BRIDGE_STATE_KEY] = {
     listener: handleMessage,
-    version: chrome.runtime.getManifest().version
+    version: bridgeVersion
   }
-  window.postMessage({ channel: EXTENSION_CHANNEL, type: 'ready' }, window.location.origin)
+  window.postMessage({ channel: EXTENSION_CHANNEL, type: 'ready', version: bridgeVersion }, window.location.origin)
 })()

@@ -1,3 +1,5 @@
+import { isResumeReviewTurn } from './career-resume-review.js'
+
 export function restoreServerTurns(items = []) {
   return [...items]
     .filter((turn) => turn?.id && ['queued', 'running'].includes(turn.status))
@@ -5,7 +7,7 @@ export function restoreServerTurns(items = []) {
     .map((turn) => ({
       id: turn.id,
       serverTurn: { ...turn },
-      content: turn.content || '等待回复的消息',
+      content: turn.content || (isResumeReviewTurn(turn) ? '简历初评' : '等待回复的消息'),
       temporaryMessageId: turn.temporaryMessageId || '',
       streamedText: '',
       progress: []

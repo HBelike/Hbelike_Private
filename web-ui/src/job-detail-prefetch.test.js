@@ -118,3 +118,25 @@ test('遇到限流等停止条件后不再领取新的后台预取任务', async
 
   assert.deepEqual(started, ['job-1'])
 })
+
+test('搜索切换或组件退出后不再合并晚到详情，也不继续领取旧任务', async () => {
+  let active = true
+  let resolveDetail
+  const started = []
+  const resolved = []
+  const loader = createJobDetailLoader({
+    keyOf,
+    fetchDetail: (job) => {
+      started.push(job.id)
+      return new Promise((resolve) => { resolveDetail = () => resolve({ ...job, description: '旧搜索完整JD' }) })
+    }
+  })
+  const pending = prefetchJobDetails([{ id: 'old-1' }, { id: 'old-2' }], loader, {
+    concurrency: 1, shouldContinue: () => active, onResolved: (job) => resolved.push(job.id)
+  })
+  active = false
+  resolveDetail()
+  await pending
+  assert.deepEqual(started, ['old-1'])
+  assert.deepEqual(resolved, [])
+})

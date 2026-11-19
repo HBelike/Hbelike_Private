@@ -12,7 +12,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.services.skill_portability import export_skill_trees
+from src.services.skill_portability import export_skill_trees, portable_skill_files
 
 
 def parse_args() -> argparse.Namespace:
@@ -92,7 +92,7 @@ def build_manifest(destination_root: Path) -> dict[str, object]:
     """从导出的种子目录生成仅含名称和校验值的可审查清单。"""
 
     root = destination_root.resolve()
-    skills: list[dict[str, str]] = []
+    skills: list[dict[str, object]] = []
     for skill_file in sorted(root.rglob("SKILL.md"), key=lambda item: str(item).casefold()):
         relative_path = skill_file.relative_to(root).as_posix()
         digest = hashlib.sha256(skill_file.read_bytes()).hexdigest()
@@ -103,9 +103,15 @@ def build_manifest(destination_root: Path) -> dict[str, object]:
                 "sha256": digest,
             }
         )
+        resources = [
+            {"path": path.relative_to(root).as_posix(), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+            for path in portable_skill_files(skill_file) if path != skill_file
+        ]
+        if resources:
+            skills[-1]["resources"] = resources
     return {
         "format": 1,
-        "description": "仅包含可部署 SKILL.md 的名称、相对路径与 SHA-256；不包含本机绝对路径、缓存或凭据。",
+        "description": "记录可部署 SKILL.md、只读引用与许可证的名称、相对路径和 SHA-256；不包含本机绝对路径、缓存或凭据。",
         "total": len(skills),
         "skills": skills,
     }

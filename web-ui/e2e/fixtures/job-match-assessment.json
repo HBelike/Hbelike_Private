@@ -1,0 +1,546 @@
+{
+  "schema_version": "career-job-assessment-v2",
+  "algorithm_version": "jd-evidence-rules-v2",
+  "role_summary": "用户运营岗位证据对照",
+  "evaluated_at": "2026-11-04T19:28:16.075022+08:00",
+  "as_of": "2026-11-04",
+  "dimensions": [
+    {
+      "id": "qualification",
+      "label": "资格条件",
+      "description": "按 JD 要求与简历证据计算；未知条件保留为区间。",
+      "score": null,
+      "score_upper": null,
+      "numerator": 0,
+      "upper_numerator": 0,
+      "denominator": 0,
+      "item_count": 0,
+      "supported_count": 0,
+      "status": "insufficient_data",
+      "direction": "higher"
+    },
+    {
+      "id": "activity",
+      "label": "活动与复盘",
+      "description": "按 JD 要求与简历证据计算；未知条件保留为区间。",
+      "score": 50.0,
+      "score_upper": 100.0,
+      "numerator": 0.5,
+      "upper_numerator": 1.0,
+      "denominator": 1.0,
+      "item_count": 1,
+      "supported_count": 0,
+      "status": "ready",
+      "direction": "higher"
+    },
+    {
+      "id": "analysis",
+      "label": "数据分析",
+      "description": "按 JD 要求与简历证据计算；未知条件保留为区间。",
+      "score": 100.0,
+      "score_upper": 100.0,
+      "numerator": 1.0,
+      "upper_numerator": 1.0,
+      "denominator": 1.0,
+      "item_count": 1,
+      "supported_count": 1,
+      "status": "ready",
+      "direction": "higher"
+    },
+    {
+      "id": "industry",
+      "label": "行业场景",
+      "description": "按 JD 要求与简历证据计算；未知条件保留为区间。",
+      "score": null,
+      "score_upper": null,
+      "numerator": 0,
+      "upper_numerator": 0,
+      "denominator": 0,
+      "item_count": 0,
+      "supported_count": 0,
+      "status": "insufficient_data",
+      "direction": "higher"
+    }
+  ],
+  "summaries": {
+    "hard": {
+      "id": "hard",
+      "label": "硬性条件",
+      "description": "按 JD 要求与简历证据计算；未知条件保留为区间。",
+      "score": 50.0,
+      "score_upper": 100.0,
+      "numerator": 1.0,
+      "upper_numerator": 2.0,
+      "denominator": 2.0,
+      "item_count": 2,
+      "supported_count": 1,
+      "status": "ready",
+      "direction": "higher",
+      "verdict": "needs_confirmation",
+      "unsupported_count": 0
+    },
+    "core": {
+      "id": "core",
+      "label": "核心要求",
+      "description": "按 JD 要求与简历证据计算；未知条件保留为区间。",
+      "score": 75.0,
+      "score_upper": 100.0,
+      "numerator": 1.5,
+      "upper_numerator": 2.0,
+      "denominator": 2.0,
+      "item_count": 2,
+      "supported_count": 1,
+      "status": "ready",
+      "direction": "higher"
+    },
+    "bonus": {
+      "id": "bonus",
+      "label": "加分项",
+      "description": "按 JD 要求与简历证据计算；未知条件保留为区间。",
+      "score": 100.0,
+      "score_upper": 100.0,
+      "numerator": 1.0,
+      "upper_numerator": 1.0,
+      "denominator": 1.0,
+      "item_count": 1,
+      "supported_count": 1,
+      "status": "ready",
+      "direction": "higher"
+    }
+  },
+  "items": [
+    {
+      "id": "education",
+      "title": "本科及以上",
+      "tier": "hard",
+      "dimension_id": "qualification",
+      "jd_source_ids": [
+        "JD-001"
+      ],
+      "cv_source_ids": [
+        "CV-001"
+      ],
+      "jd_evidence": [
+        "本科及以上学历。"
+      ],
+      "cv_evidence": [
+        "某大学，本科，2024年已毕业。"
+      ],
+      "rule": {
+        "label": "已取得本科",
+        "jd_source_ids": [
+          "JD-001"
+        ],
+        "kind": "degree",
+        "verdict": "supported",
+        "relation": "direct",
+        "cv_source_ids": [
+          "CV-001"
+        ],
+        "reason": "按对应教育经历的学历层级及取得状态核对。",
+        "question": "请补充已取得本科的事实。",
+        "predicate": {
+          "jd_quote": "本科及以上学历。",
+          "cv_quote": "某大学，本科，2024年已毕业。"
+        },
+        "calculation": {
+          "level": 2,
+          "target_level": 2
+        },
+        "lower": 1.0,
+        "upper": 1.0
+      },
+      "leaves": [
+        {
+          "label": "已取得本科",
+          "jd_source_ids": [
+            "JD-001"
+          ],
+          "kind": "degree",
+          "verdict": "supported",
+          "relation": "direct",
+          "cv_source_ids": [
+            "CV-001"
+          ],
+          "reason": "按对应教育经历的学历层级及取得状态核对。",
+          "question": "请补充已取得本科的事实。",
+          "predicate": {
+            "jd_quote": "本科及以上学历。",
+            "cv_quote": "某大学，本科，2024年已毕业。"
+          },
+          "calculation": {
+            "level": 2,
+            "target_level": 2
+          },
+          "lower": 1.0,
+          "upper": 1.0
+        }
+      ],
+      "verdict": "supported",
+      "display_status": "supported",
+      "lower": 1.0,
+      "upper": 1.0,
+      "factor": 1.0,
+      "weight": 1.0,
+      "weight_source": "equal_default",
+      "reason": "按对应教育经历的学历层级及取得状态核对。",
+      "questions": []
+    },
+    {
+      "id": "travel",
+      "title": "接受短期出差",
+      "tier": "hard",
+      "dimension_id": "qualification",
+      "jd_source_ids": [
+        "JD-002"
+      ],
+      "cv_source_ids": [],
+      "jd_evidence": [
+        "接受每月短期出差。"
+      ],
+      "cv_evidence": [],
+      "rule": {
+        "label": "接受短期出差",
+        "jd_source_ids": [
+          "JD-002"
+        ],
+        "kind": "semantic",
+        "verdict": "needs_confirmation",
+        "relation": "none",
+        "cv_source_ids": [],
+        "reason": "简历未说明此项事实。",
+        "question": "请补充接受短期出差的事实。",
+        "lower": 0.0,
+        "upper": 1.0
+      },
+      "leaves": [
+        {
+          "label": "接受短期出差",
+          "jd_source_ids": [
+            "JD-002"
+          ],
+          "kind": "semantic",
+          "verdict": "needs_confirmation",
+          "relation": "none",
+          "cv_source_ids": [],
+          "reason": "简历未说明此项事实。",
+          "question": "请补充接受短期出差的事实。",
+          "lower": 0.0,
+          "upper": 1.0
+        }
+      ],
+      "verdict": "needs_confirmation",
+      "display_status": "needs_confirmation",
+      "lower": 0.0,
+      "upper": 1.0,
+      "factor": 0.0,
+      "weight": 1.0,
+      "weight_source": "equal_default",
+      "reason": "简历未说明此项事实。",
+      "questions": [
+        "请补充接受短期出差的事实。"
+      ]
+    },
+    {
+      "id": "activity",
+      "title": "独立策划活动并复盘",
+      "tier": "core",
+      "dimension_id": "activity",
+      "jd_source_ids": [
+        "JD-003"
+      ],
+      "cv_source_ids": [
+        "CV-002"
+      ],
+      "jd_evidence": [
+        "独立完成用户活动策划，并进行活动数据复盘。"
+      ],
+      "cv_evidence": [
+        "独立策划会员主题活动，负责方案、执行与跨团队协调。"
+      ],
+      "rule": {
+        "label": "活动与复盘",
+        "jd_source_ids": [
+          "JD-003"
+        ],
+        "operator": "ALL",
+        "minimum": 1,
+        "children": [
+          {
+            "label": "独立活动策划",
+            "jd_source_ids": [
+              "JD-003"
+            ],
+            "kind": "semantic",
+            "verdict": "supported",
+            "relation": "direct",
+            "cv_source_ids": [
+              "CV-002"
+            ],
+            "reason": "原文支持这一具体条件。",
+            "question": "请补充独立活动策划的事实。",
+            "lower": 1.0,
+            "upper": 1.0
+          },
+          {
+            "label": "数据复盘",
+            "jd_source_ids": [
+              "JD-003"
+            ],
+            "kind": "semantic",
+            "verdict": "needs_confirmation",
+            "relation": "none",
+            "cv_source_ids": [],
+            "reason": "简历未说明此项事实。",
+            "question": "请补充数据复盘的事实。",
+            "lower": 0.0,
+            "upper": 1.0
+          }
+        ],
+        "lower": 0.5,
+        "upper": 1.0,
+        "verdict": "needs_confirmation"
+      },
+      "leaves": [
+        {
+          "label": "独立活动策划",
+          "jd_source_ids": [
+            "JD-003"
+          ],
+          "kind": "semantic",
+          "verdict": "supported",
+          "relation": "direct",
+          "cv_source_ids": [
+            "CV-002"
+          ],
+          "reason": "原文支持这一具体条件。",
+          "question": "请补充独立活动策划的事实。",
+          "lower": 1.0,
+          "upper": 1.0
+        },
+        {
+          "label": "数据复盘",
+          "jd_source_ids": [
+            "JD-003"
+          ],
+          "kind": "semantic",
+          "verdict": "needs_confirmation",
+          "relation": "none",
+          "cv_source_ids": [],
+          "reason": "简历未说明此项事实。",
+          "question": "请补充数据复盘的事实。",
+          "lower": 0.0,
+          "upper": 1.0
+        }
+      ],
+      "verdict": "needs_confirmation",
+      "display_status": "partial",
+      "lower": 0.5,
+      "upper": 1.0,
+      "factor": 0.5,
+      "weight": 1.0,
+      "weight_source": "equal_default",
+      "reason": "原文支持这一具体条件。；简历未说明此项事实。",
+      "questions": [
+        "请补充数据复盘的事实。"
+      ]
+    },
+    {
+      "id": "analysis",
+      "title": "Excel或SQL分析",
+      "tier": "core",
+      "dimension_id": "analysis",
+      "jd_source_ids": [
+        "JD-004"
+      ],
+      "cv_source_ids": [
+        "CV-003"
+      ],
+      "jd_evidence": [
+        "能够使用Excel或SQL进行运营数据分析，至少一种。"
+      ],
+      "cv_evidence": [
+        "使用Excel透视表分析会员活跃数据。"
+      ],
+      "rule": {
+        "label": "任选一种分析工具",
+        "jd_source_ids": [
+          "JD-004"
+        ],
+        "operator": "ANY",
+        "minimum": 1,
+        "children": [
+          {
+            "label": "Excel分析实践",
+            "jd_source_ids": [
+              "JD-004"
+            ],
+            "kind": "semantic",
+            "verdict": "supported",
+            "relation": "direct",
+            "cv_source_ids": [
+              "CV-003"
+            ],
+            "reason": "原文支持这一具体条件。",
+            "question": "请补充Excel分析实践的事实。",
+            "lower": 1.0,
+            "upper": 1.0
+          },
+          {
+            "label": "SQL分析实践",
+            "jd_source_ids": [
+              "JD-004"
+            ],
+            "kind": "semantic",
+            "verdict": "needs_confirmation",
+            "relation": "none",
+            "cv_source_ids": [],
+            "reason": "简历未说明此项事实。",
+            "question": "请补充SQL分析实践的事实。",
+            "lower": 0.0,
+            "upper": 1.0
+          }
+        ],
+        "lower": 1.0,
+        "upper": 1.0,
+        "verdict": "supported"
+      },
+      "leaves": [
+        {
+          "label": "Excel分析实践",
+          "jd_source_ids": [
+            "JD-004"
+          ],
+          "kind": "semantic",
+          "verdict": "supported",
+          "relation": "direct",
+          "cv_source_ids": [
+            "CV-003"
+          ],
+          "reason": "原文支持这一具体条件。",
+          "question": "请补充Excel分析实践的事实。",
+          "lower": 1.0,
+          "upper": 1.0
+        },
+        {
+          "label": "SQL分析实践",
+          "jd_source_ids": [
+            "JD-004"
+          ],
+          "kind": "semantic",
+          "verdict": "needs_confirmation",
+          "relation": "none",
+          "cv_source_ids": [],
+          "reason": "简历未说明此项事实。",
+          "question": "请补充SQL分析实践的事实。",
+          "lower": 0.0,
+          "upper": 1.0
+        }
+      ],
+      "verdict": "supported",
+      "display_status": "supported",
+      "lower": 1.0,
+      "upper": 1.0,
+      "factor": 1.0,
+      "weight": 1.0,
+      "weight_source": "equal_default",
+      "reason": "原文支持这一具体条件。；简历未说明此项事实。",
+      "questions": [
+        "请补充SQL分析实践的事实。"
+      ]
+    },
+    {
+      "id": "industry",
+      "title": "美妆行业经验",
+      "tier": "bonus",
+      "dimension_id": "industry",
+      "jd_source_ids": [
+        "JD-005"
+      ],
+      "cv_source_ids": [
+        "CV-004"
+      ],
+      "jd_evidence": [
+        "美妆行业经验优先。"
+      ],
+      "cv_evidence": [
+        "在某美妆品牌从事用户运营。"
+      ],
+      "rule": {
+        "label": "美妆行业经验",
+        "jd_source_ids": [
+          "JD-005"
+        ],
+        "kind": "semantic",
+        "verdict": "supported",
+        "relation": "direct",
+        "cv_source_ids": [
+          "CV-004"
+        ],
+        "reason": "原文支持这一具体条件。",
+        "question": "请补充美妆行业经验的事实。",
+        "lower": 1.0,
+        "upper": 1.0
+      },
+      "leaves": [
+        {
+          "label": "美妆行业经验",
+          "jd_source_ids": [
+            "JD-005"
+          ],
+          "kind": "semantic",
+          "verdict": "supported",
+          "relation": "direct",
+          "cv_source_ids": [
+            "CV-004"
+          ],
+          "reason": "原文支持这一具体条件。",
+          "question": "请补充美妆行业经验的事实。",
+          "lower": 1.0,
+          "upper": 1.0
+        }
+      ],
+      "verdict": "supported",
+      "display_status": "supported",
+      "lower": 1.0,
+      "upper": 1.0,
+      "factor": 1.0,
+      "weight": 1.0,
+      "weight_source": "equal_default",
+      "reason": "原文支持这一具体条件。",
+      "questions": []
+    }
+  ],
+  "job_sections": [
+    {
+      "category": "responsibility",
+      "title": "岗位职责",
+      "jd_source_ids": [
+        "JD-003",
+        "JD-004"
+      ],
+      "items": [
+        "独立完成用户活动策划，并进行活动数据复盘。",
+        "能够使用Excel或SQL进行运营数据分析，至少一种。"
+      ]
+    }
+  ],
+  "source_lines": {
+    "jd": {
+      "JD-001": "本科及以上学历。",
+      "JD-002": "接受每月短期出差。",
+      "JD-003": "独立完成用户活动策划，并进行活动数据复盘。",
+      "JD-004": "能够使用Excel或SQL进行运营数据分析，至少一种。",
+      "JD-005": "美妆行业经验优先。"
+    },
+    "cv": {
+      "CV-001": "某大学，本科，2024年已毕业。",
+      "CV-002": "独立策划会员主题活动，负责方案、执行与跨团队协调。",
+      "CV-003": "使用Excel透视表分析会员活跃数据。",
+      "CV-004": "在某美妆品牌从事用户运营。"
+    }
+  },
+  "weight_policy": "同层父级默认等权；仅整层均有 JD 明确百分比权重时使用原文权重。",
+  "disclaimer": "匹配区间表示当前证据支持下限与待确认上限，不是录用概率；简历陈述不代表外部核验。",
+  "status": "ready"
+}

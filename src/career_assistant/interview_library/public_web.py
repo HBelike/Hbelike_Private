@@ -114,6 +114,7 @@ class FirecrawlDocument:
     markdown: str
     image_urls: tuple[str, ...]
     metadata: Mapping[str, object] = field(default_factory=dict)
+    raw_html: str = ''
 
 
 @dataclass(frozen=True)
@@ -328,18 +329,20 @@ class FirecrawlClient:
             )
         return tuple(results)
 
-    def scrape(self, source_url: str) -> FirecrawlDocument:
+    def scrape(self, source_url: str, *, fresh: bool = False, include_html: bool = False) -> FirecrawlDocument:
         """获取一篇公开网页的主 Markdown 与临时 OCR 候选图片。"""
 
+        options = {'maxAge': 0, 'storeInCache': False} if fresh else {}
         body = self._post(
             "/v2/scrape",
             {
                 "url": source_url,
-                "formats": ["markdown", "images"],
+                "formats": ["markdown", "rawHtml"] if include_html else ["markdown", "images"],
                 "onlyMainContent": True,
                 "removeBase64Images": True,
                 "storeInCache": True,
                 "timeout": 60_000,
+                **options,
             },
             operation="scrape",
         )
@@ -374,6 +377,7 @@ class FirecrawlClient:
             title=_optional_text(metadata.get("title"), limit=500),
             markdown=markdown,
             image_urls=image_urls[:MAX_PUBLIC_IMAGES],
+            raw_html=str(data.get('rawHtml') or '')[:1_000_000] if include_html else '',
             metadata={
                 key: value
                 for key in ("cacheState", "cachedAt", "statusCode")

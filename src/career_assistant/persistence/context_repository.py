@@ -85,6 +85,41 @@ class CareerContextRepository:
             ).mappings().all()
         return [_candidate(row) for row in rows]
 
+    def list_accessible_candidate_profiles(
+        self,
+        organization_id: UUID,
+        *,
+        owner_id: UUID | None,
+        limit: int = 20,
+    ) -> list[CandidateProfileRecord]:
+        """按请求角色确定的所有者范围列出简历，并始终限制在当前组织。"""
+
+        owner_filter = "" if owner_id is None else "AND profile.actor_id = :owner_id"
+        parameters: dict[str, object] = {
+            "organization_id": organization_id,
+            "limit": limit,
+        }
+        if owner_id is not None:
+            parameters["owner_id"] = owner_id
+        with self._database.transaction() as connection:
+            rows = connection.execute(
+                text(
+                    f"""
+                    SELECT profile.*, actor.display_name AS owner_display_name
+                    FROM career_assistant.candidate_profiles AS profile
+                    LEFT JOIN career_assistant.actors AS actor
+                      ON actor.id = profile.actor_id
+                     AND actor.organization_id = profile.organization_id
+                    WHERE profile.organization_id = :organization_id
+                      {owner_filter}
+                    ORDER BY profile.created_at DESC
+                    LIMIT :limit
+                    """
+                ),
+                parameters,
+            ).mappings().all()
+        return [_candidate(row) for row in rows]
+
     def get_candidate_profile(self, actor_id: UUID, profile_id: UUID) -> CandidateProfileRecord | None:
         with self._database.transaction() as connection:
             row = connection.execute(
@@ -95,6 +130,25 @@ class CareerContextRepository:
                     """
                 ),
                 {"id": profile_id, "actor_id": actor_id},
+            ).mappings().one_or_none()
+        return _candidate(row) if row is not None else None
+
+    def get_candidate_profile_by_id(
+        self,
+        organization_id: UUID,
+        profile_id: UUID,
+    ) -> CandidateProfileRecord | None:
+        """按组织和稳定 ID 读取已经过上游授权的简历。"""
+
+        with self._database.transaction() as connection:
+            row = connection.execute(
+                text(
+                    """
+                    SELECT * FROM career_assistant.candidate_profiles
+                    WHERE id = :id AND organization_id = :organization_id
+                    """
+                ),
+                {"id": profile_id, "organization_id": organization_id},
             ).mappings().one_or_none()
         return _candidate(row) if row is not None else None
 
@@ -174,6 +228,25 @@ class CareerContextRepository:
             ).mappings().one_or_none()
         return _target_role(row) if row is not None else None
 
+    def get_target_role_by_id(
+        self,
+        organization_id: UUID,
+        role_id: UUID,
+    ) -> TargetRoleRecord | None:
+        """按组织和稳定 ID 读取已经过上游授权的目标岗位。"""
+
+        with self._database.transaction() as connection:
+            row = connection.execute(
+                text(
+                    """
+                    SELECT * FROM career_assistant.target_role_profiles
+                    WHERE id = :id AND organization_id = :organization_id
+                    """
+                ),
+                {"id": role_id, "organization_id": organization_id},
+            ).mappings().one_or_none()
+        return _target_role(row) if row is not None else None
+
     def list_target_roles(self, actor_id: UUID, *, limit: int = 20) -> list[TargetRoleRecord]:
         """列出当前 Actor 最近确认的目标岗位，供实时面试开场选择。"""
 
@@ -197,11 +270,25 @@ class CareerContextRepository:
         conversation_id: UUID,
         candidate_profile_id: UUID | None = None,
         target_role_profile_id: UUID | None = None,
+        *,
+        organization_id: UUID,
+        can_manage_all: bool = False,
     ) -> ConversationContextRecord:
         """增量更新会话资料；未传入的一侧沿用当前绑定。"""
 
         binding_id = uuid4()
         with self._database.transaction() as connection:
+            # 先锁会话，再读取最新绑定和分配版本，避免并发确认产生相同版本号。
+            connection.execute(
+                text("""
+                    SELECT id FROM career_assistant.conversations
+                    WHERE id = :conversation_id AND actor_id = :actor_id
+                      AND organization_id = :organization_id AND status <> 'deleted'
+                    FOR UPDATE
+                """),
+                {"conversation_id": conversation_id, "actor_id": actor_id,
+                 "organization_id": organization_id},
+            )
             current = connection.execute(
                 text(
                     """
@@ -211,12 +298,17 @@ class CareerContextRepository:
                         ON binding.conversation_id = conversation.id
                     WHERE conversation.id = :conversation_id
                       AND conversation.actor_id = :actor_id
+                      AND conversation.organization_id = :organization_id
                       AND conversation.status <> 'deleted'
                     ORDER BY binding.binding_version DESC NULLS LAST
                     LIMIT 1
                     """
                 ),
-                {"conversation_id": conversation_id, "actor_id": actor_id},
+                {
+                    "conversation_id": conversation_id,
+                    "actor_id": actor_id,
+                    "organization_id": organization_id,
+                },
             ).mappings().one_or_none()
             if current is None:
                 raise LookupError("会话不存在，或无权访问")
@@ -230,11 +322,15 @@ class CareerContextRepository:
                     SELECT
                         (CAST(:candidate_id AS UUID) IS NULL OR EXISTS(
                             SELECT 1 FROM career_assistant.candidate_profiles
-                            WHERE id = CAST(:candidate_id AS UUID) AND actor_id = :actor_id
+                            WHERE id = CAST(:candidate_id AS UUID)
+                              AND organization_id = :organization_id
+                              AND (actor_id = :actor_id OR :can_manage_all)
                         )) AS owns_candidate,
                         (CAST(:target_id AS UUID) IS NULL OR EXISTS(
                             SELECT 1 FROM career_assistant.target_role_profiles
-                            WHERE id = CAST(:target_id AS UUID) AND actor_id = :actor_id
+                            WHERE id = CAST(:target_id AS UUID)
+                              AND organization_id = :organization_id
+                              AND actor_id = :actor_id
                         )) AS owns_target
                     """
                 ),
@@ -242,6 +338,8 @@ class CareerContextRepository:
                     "candidate_id": effective_candidate_id,
                     "target_id": effective_target_id,
                     "actor_id": actor_id,
+                    "organization_id": organization_id,
+                    "can_manage_all": can_manage_all,
                 },
             ).mappings().one()
             if not all(ownership.values()):
@@ -377,6 +475,7 @@ def _candidate(row: RowMapping) -> CandidateProfileRecord:
         resume_outline=row["resume_outline"],
         version=row["version"],
         created_at=row["created_at"],
+        owner_display_name=row.get("owner_display_name"),
     )
 
 

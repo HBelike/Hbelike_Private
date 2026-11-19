@@ -55,6 +55,10 @@ class SummaryTask(BaseTask):
         }
     )
     _repository_token_pattern = re.compile(r"(?<![\w.-])([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)(?![\w.-])")
+    _http_url_pattern = re.compile(
+        r"""https?://[^\s<>"'`\[\]，。！？；：、（）【】“”‘’]*""",
+        flags=re.IGNORECASE,
+    )
     _banned_ai_style_phrases = (
         "在当今",
         "在这个快速发展的时代",
@@ -304,6 +308,7 @@ class SummaryTask(BaseTask):
         """生成一个项目章节；失败时只重试当前项目。"""
 
         validation_error = ""
+        previous_output: str | None = None
         audit: list[dict[str, Any]] = []
         for attempt_index, phase in enumerate(("project_generation", "project_repair"), start=1):
             messages = self._build_project_messages(
@@ -314,6 +319,14 @@ class SummaryTask(BaseTask):
                 summary_instruction=summary_instruction,
                 validation_error=validation_error or None,
             )
+            if previous_output is not None:
+                messages.extend([
+                    DeepSeekMessage(role="assistant", content=previous_output),
+                    DeepSeekMessage(
+                        role="user",
+                        content=f"请修复上次输出中的合同错误：{validation_error}。只返回修复后的完整项目 JSON。",
+                    ),
+                ])
             response = provider.chat(
                 messages,
                 retry_empty_content=False,
@@ -342,6 +355,7 @@ class SummaryTask(BaseTask):
                 ), audit
             except (JSONDecodeError, ValueError) as exc:
                 validation_error = str(exc)
+                previous_output = response.content
                 if attempt_index == 2:
                     raise
                 self.logger.warning(
@@ -468,7 +482,9 @@ figure_role 专属字段：
                 f"项目名称错误：expected={ranking.full_name} actual={repository_full_name}"
             )
 
-        overview = self._normalize_generated_prose(str(parsed["overview_text"]))
+        overview = self._normalize_generated_prose(
+            str(parsed["overview_text"]), field_name="overview_text",
+        )
         if not self._contains_exact_ranking_number(overview, ranking.current_stars):
             raise ValueError(f"{ranking.full_name} 概述缺少当前 stars")
         if not self._contains_exact_ranking_number(overview, ranking.star_growth):
@@ -483,7 +499,7 @@ figure_role 专属字段：
             "mechanism_breakdown_markdown",
             "engineering_insights_markdown",
         ):
-            value = self._normalize_generated_prose(str(parsed[field]))
+            value = self._normalize_generated_prose(str(parsed[field]), field_name=field)
             if not value:
                 raise ValueError(f"{ranking.full_name} 的 {field} 不能为空")
             if any(f"**{label}**" in value for label in self._project_section_labels):
@@ -493,7 +509,9 @@ figure_role 专属字段：
         raw_brief = parsed["project_brief"]
         if not isinstance(raw_brief, dict) or set(raw_brief) != {"summary_text", "visual_spec"}:
             raise ValueError(f"{ranking.full_name} 的 project_brief 字段不符合合同")
-        summary_text = self._normalize_generated_prose(str(raw_brief["summary_text"]))
+        summary_text = self._normalize_generated_prose(
+            str(raw_brief["summary_text"]), field_name="project_brief.summary_text",
+        )
         if not summary_text:
             raise ValueError(f"{ranking.full_name} 的 summary_text 不能为空")
 
@@ -552,6 +570,7 @@ figure_role 专属字段：
         """在所有项目通过后生成开篇、本周主线和结尾。"""
 
         validation_error = ""
+        previous_output: str | None = None
         audit: list[dict[str, Any]] = []
         for attempt_index, phase in enumerate(("global_synthesis", "global_repair"), start=1):
             messages = self._build_global_messages(
@@ -564,6 +583,14 @@ figure_role 专属字段：
                 summary_instruction=summary_instruction,
                 validation_error=validation_error or None,
             )
+            if previous_output is not None:
+                messages.extend([
+                    DeepSeekMessage(role="assistant", content=previous_output),
+                    DeepSeekMessage(
+                        role="user",
+                        content=f"请修复上次输出中的合同错误：{validation_error}。只返回修复后的完整全局 JSON。",
+                    ),
+                ])
             response = provider.chat(
                 messages,
                 retry_empty_content=False,
@@ -587,6 +614,7 @@ figure_role 专属字段：
                 return response, self._normalize_global_output(parsed, rankings), audit
             except (JSONDecodeError, ValueError) as exc:
                 validation_error = str(exc)
+                previous_output = response.content
                 if attempt_index == 2:
                     raise
                 self.logger.warning("全局综合未通过合同，将重试全局字段：%s", exc)
@@ -673,18 +701,18 @@ stars 数量最多项目: {highest_star_repository.full_name}
         normalized: dict[str, str] = {}
         for field in self._global_output_fields:
             value = self._replace_repository_aliases(str(parsed[field]), aliases)
-            value = self._normalize_generated_prose(value)
+            value = self._normalize_generated_prose(value, field_name=field)
             if not value:
                 raise ValueError(f"全局综合字段 {field} 不能为空")
             normalized[field] = value
         normalized["title"] = validate_wechat_title(normalized["title"])
         return normalized
 
-    def _normalize_generated_prose(self, text: str) -> str:
+    def _normalize_generated_prose(self, text: str, *, field_name: str = "text") -> str:
         """统一清理模型正文，并拒绝明显的营销和聊天模板。"""
 
         normalized = self._normalize_author_voice(
-            self._remove_github_urls_and_link_sections(text)
+            self._remove_urls_and_link_sections(text)
         )
         normalized = re.sub(r"\n{3,}", "\n\n", normalized).strip()
         forbidden = (
@@ -702,11 +730,11 @@ stars 数量最多项目: {highest_star_repository.full_name}
         )
         matched = next((phrase for phrase in forbidden if phrase in normalized), None)
         if matched:
-            raise ValueError(f"生成文本包含禁用表达：{matched}")
-        if re.search(r"https?://", normalized, flags=re.IGNORECASE):
-            raise ValueError("生成文本仍包含 URL")
+            raise ValueError(f"{field_name} 生成文本包含禁用表达：{matched}")
+        if self._http_url_pattern.search(normalized):
+            raise ValueError(f"{field_name} 生成文本仍包含 URL")
         if re.search(r"(?m)^#{1,6}\s+", normalized):
-            raise ValueError("生成字段内部不应包含 Markdown 标题")
+            raise ValueError(f"{field_name} 生成字段内部不应包含 Markdown 标题")
         return normalized
 
     def _assemble_article_markdown(
@@ -1057,8 +1085,8 @@ stars 数量最多项目: {highest_star_repository.full_name}
             f"该项目本周增长 {ranking.star_growth} stars，主要技术栈为 {language_text}。"
         )
 
-    def _remove_github_urls_and_link_sections(self, text: str) -> str:
-        """移除正文里的 GitHub URL、项目地址段落和自动追加链接段，保证公众号正文不直接贴仓库地址。"""
+    def _remove_urls_and_link_sections(self, text: str) -> str:
+        """统一移除 HTTP/HTTPS 链接，保留链接文字、相邻正文和句末标点。"""
 
         if not text:
             return ""
@@ -1071,17 +1099,29 @@ stars 数量最多项目: {highest_star_repository.full_name}
             flags=re.IGNORECASE,
         )
         normalized_text = re.sub(
-            r"\[([^\]]+)\]\(https?://(?:www\.)?github\.com/[^\s)]+\)",
+            r"\[([^\]]+)\]\(\s*(?:<https?://[^>\n]*>|"
+            r"https?://(?:[^\s()]|\([^()\n]*\))+)"
+            r"(?:[ \t]+(?:\"[^\"\n]*\"|'[^'\n]*'|\([^()\n]*\)))?\s*\)",
             r"\1",
             normalized_text,
             flags=re.IGNORECASE,
         )
         normalized_text = re.sub(
-            r"https?://(?:www\.)?github\.com/[^\s)]+",
+            r"<https?://[^>\n]*>",
             "",
             normalized_text,
             flags=re.IGNORECASE,
         )
+
+        def remove_url(match: re.Match[str]) -> str:
+            # 裸 URL 紧邻句号或右括号时，这些正文标点不能随地址一起吞掉。
+            value = match.group(0)
+            url = value.rstrip(".,;:!?")
+            while url.endswith(")") and url.count(")") > url.count("("):
+                url = url[:-1]
+            return value[len(url):]
+
+        normalized_text = self._http_url_pattern.sub(remove_url, normalized_text)
         normalized_text = re.sub(
             r"(?m)^\s*(?:>?\s*)?(?:GitHub\s*)?(?:项目)?地址[:：].*$",
             "",

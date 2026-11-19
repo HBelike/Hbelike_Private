@@ -143,7 +143,7 @@ html[data-ui-theme="blue"] body {
 }
 
 html[data-ui-theme="blue"] .shell {
-  grid-template-columns: 232px minmax(0, 1fr);
+  grid-template-columns: var(--app-sidebar-width) minmax(0, 1fr);
   background: var(--ui-canvas);
 }
 
@@ -242,18 +242,18 @@ html[data-ui-theme="blue"] .main {
 }
 
 html[data-ui-theme="blue"] .topbar {
-  min-height: 56px;
-  margin-bottom: 12px;
+  min-height: 44px;
+  margin-bottom: 10px;
   border-color: var(--ui-line);
   background: linear-gradient(110deg, var(--ui-surface) 0%, var(--ui-surface) 74%, var(--ui-surface-soft) 100%);
-  padding: 9px 12px 9px 18px;
+  padding: 2px 12px 2px 14px;
   box-shadow: var(--ui-shadow);
 }
 
 html[data-ui-theme="blue"] .topbar h1 {
   color: var(--ui-text);
   font-family: var(--ui-font-display);
-  font-size: 24px;
+  font-size: 20px;
   font-weight: 720;
   letter-spacing: -0.025em;
 }
@@ -507,10 +507,6 @@ html[data-ui-theme="blue"] body .skill-star-popover-note {
 }
 
 /* 求职对话页 */
-html[data-ui-theme="blue"] .career-workspace {
-  gap: 12px;
-}
-
 html[data-ui-theme="blue"] :is(.career-history-panel, .career-chat-panel) {
   border-color: var(--ui-line);
   border-radius: 12px;

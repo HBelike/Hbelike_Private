@@ -1,0 +1,11 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>对话求职卡片验证</title>
+<style>body{margin:0;padding:24px;background:#f3f7fc;font-family:Arial,sans-serif}#app{max-width:900px;margin:auto}</style>
+<div id="app"></div><script type="module">
+import { createApp, reactive, h } from 'vue'
+import Card from '/src/components/CareerJobSearchCard.vue'
+const state = reactive({ fresh: true, active: true, busy: false, message: { id: 'card-1', ui_payload: { type: 'job_search', version: 1, status: 'editing', conditions: { keyword: 'Java 开发', city: '杭州', city_source: 'user' }, auto_search: true } } })
+window.cardTestState = state
+window.cardPatches = []
+window.cardConfirmed = null
+createApp({ render: () => h(Card, { ...state, onConfirm: (job) => { window.cardConfirmed = job }, onStateChange: (patch) => { window.cardPatches.push(patch); Object.assign(state.message.ui_payload, patch) } }) }).mount('#app')
+</script></html>

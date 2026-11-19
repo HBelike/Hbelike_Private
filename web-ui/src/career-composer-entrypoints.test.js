@@ -27,8 +27,8 @@ test('@ 只检索面经，/ 才能唤醒 Skill', async () => {
   assert.doesNotMatch(selectSkillMention, /\[@\/\]/)
   assert.doesNotMatch(removeSkillInvocation, /\[@\/\]/)
   assert.doesNotMatch(skillInvocationPresent, /\[@\/\]/)
-  assert.match(source, /输入 @ 可引用面经，输入 \/ 可调用 Skill/)
-  assert.match(source, /输入你想咨询的问题…/)
+  assert.match(source, /@ 引用面经 · \/ 调用技能/)
+  assert.match(source, /说说你的目标岗位，或贴一段职位描述…/)
   assert.doesNotMatch(source, /基于当前简历与目标岗位提问/)
 })
 

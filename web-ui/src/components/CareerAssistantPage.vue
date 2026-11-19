@@ -1,5 +1,6 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { Document, Briefcase, Plus, Paperclip, Top, Search, ChatDotRound, Setting, ArrowDown, Close, EditPen } from '@element-plus/icons-vue'
 import ElConfigProvider from 'element-plus/es/components/config-provider/index.mjs'
 import ElPagination from 'element-plus/es/components/pagination/index.mjs'
 import zhCn from 'element-plus/es/locale/lang/zh-cn'
@@ -8,10 +9,15 @@ import CareerContextRail from './CareerContextRail.vue'
 import CareerContextSetupDialog from './CareerContextSetupDialog.vue'
 import CareerGreetingDialog from './CareerGreetingDialog.vue'
 import CareerJobSearchDialog from './CareerJobSearchDialog.vue'
+import CareerJobSearchCard from './CareerJobSearchCard.vue'
+import { createJobSearchSession, isJobSearchFollowup } from '../job-search-session.js'
+import { summarizeSearchJobs } from '../job-search-card.js'
 import CareerMessageContent from './CareerMessageContent.vue'
 import CareerContextMeter from './CareerContextMeter.vue'
 import { toTargetRolePayload } from '../job-library-target-role.js'
 import { isAssessmentPending } from '../career-assessment-view.js'
+import { platformDefaultSelection, FALLBACK_PLATFORM_MODEL } from '../career-default-model.js'
+import { isResumeReviewTurn, visibleConversationMessages } from '../career-resume-review.js'
 import { openBrowserInterviewMaster } from '../browser-interview-launcher.js'
 import { openOnlineAssessmentAssistant } from '../online-assessment/launcher.js'
 import {
@@ -53,8 +59,21 @@ import {
   getPanelAfterLayoutChange
 } from '../career-responsive-layout.js'
 import { createChatAutoScroller } from '../career-chat-auto-scroll.js'
+import { createComposerHistory, shouldNavigateComposerHistory, shouldSubmitComposer } from '../composer-keyboard.js'
+import { isMobileBrowser } from '../platform-capabilities.js'
+import { useDialogFocus } from '../use-dialog-focus.js'
+import { assessmentBindingKey } from '../career-assessment-snapshot.js'
+import { dismissHistoryLayers, useHistoryLayer } from '../use-history-layer.js'
+import { createSharedMaterialDraft } from '../material-share.js'
 
-defineProps({
+const props = defineProps({
+  navigationCollapsed: { type: Boolean, default: false },
+  initialWorkspace: { type: Object, default: null },
+  sharedMaterial: { type: Object, default: null },
+  currentUser: {
+    type: Object,
+    default: null
+  },
   interviewMasterVisible: {
     type: Boolean,
     default: true
@@ -65,7 +84,7 @@ defineProps({
   }
 })
 
-const emit = defineEmits(['navigate'])
+const emit = defineEmits(['navigate', 'preserve-workspace', 'shared-material-used'])
 
 const conversations = ref([])
 const candidateProfiles = ref([])
@@ -73,6 +92,7 @@ const selectedConversation = ref(null)
 const conversationContext = ref(null)
 const messages = ref([])
 const modelProfiles = ref([])
+const platformDefaultModel = ref({ ...FALLBACK_PLATFORM_MODEL })
 const freeModelCatalog = ref([])
 const freeModelCatalogError = ref('')
 const loading = ref(false)
@@ -84,6 +104,7 @@ const testingConnection = ref(false)
 const loadingFreeModelCatalog = ref(false)
 const showJobUrl = ref(false)
 const showModelDialog = ref(false)
+useDialogFocus(() => showModelDialog.value, '.model-dialog', closeModelDialog)
 const showModelApiKey = ref(false)
 const modelDialogMode = ref('list')
 const modelSetupReturnMode = ref('list')
@@ -97,6 +118,8 @@ const messageListRef = ref(null)
 const latestMessageRef = ref(null)
 const composerDisplayText = ref('')
 const messageText = ref('')
+const composerHistory = createComposerHistory()
+let composerHistoryDraftReferences = null
 const interviewMentionQuery = ref('')
 const interviewMentionResults = ref([])
 const selectedInterviewReferences = ref([])
@@ -106,7 +129,7 @@ const selectedSkillInvocations = ref([])
 const jobUrl = ref('')
 const resumeFile = ref(null)
 const resumeInput = ref(null)
-const selectionMode = ref('free_quota_first')
+const selectionMode = ref('platform_default')
 const selectedProfileId = ref('')
 const feedback = ref('')
 const errorMessage = ref('')
@@ -125,12 +148,97 @@ const deletingConversationId = ref('')
 const conversationActionLoadingId = ref('')
 const showContextSetup = ref(false)
 const contextSetupInitial = ref(null)
+const contextSetupRef = ref(null)
+const contextSetupDraft = ref(null)
+function preserveContextSetupDraft(draft) {
+  contextSetupDraft.value = { key: assessmentBindingKey(conversationContext.value, selectedConversation.value?.id), draft }
+}
 const showJobSearch = ref(false)
 const showGreetingDialog = ref(false)
 const savingJobSearch = ref(false)
 const jobSearchError = ref('')
 const pendingJobLibraryTarget = ref(null)
 const jobSearchButton = ref(null)
+const freshJobSearchCards = ref(new Set())
+const jobCardErrors = ref({})
+const confirmingJobCardId = ref('')
+const jobCardSaveQueue = new Map()
+const searchSessions = new Map()
+const preparingSearchTurn = ref(false)
+const analysisObservers = new Map()
+const referencedSearch = ref(null)
+function messageJobRefs(message) { return [...new Set(String(message.content || '').match(/S\d+-J\d+/g) || [])] }
+async function openJobReference(message, jobRef) {
+  try {
+    const session = currentSearchSession()
+    const batches = await session.restore()
+    const batch = batches.find((item) => Number(item.batch_no) === Number(jobRef.match(/^S(\d+)/)?.[1]))
+    if (!batch) throw new Error('该岗位引用对应的搜索批次不存在。')
+    referencedSearch.value = { messageId: message.id, card: { id: `reference-${jobRef}`, ui_payload: {
+      type: 'job_search', version: 2, status: 'searched', auto_search: false,
+      view_batch_id: batch.id, focused_job_ref: jobRef, conditions: batch.conditions
+    } } }
+  } catch (error) { errorMessage.value = error.message }
+}
+function currentSearchSession() {
+  const conversationId = selectedConversation.value?.id
+  if (!conversationId) return null
+  if (!searchSessions.has(conversationId)) searchSessions.set(conversationId, createJobSearchSession({
+    request: requestJson, conversationId,
+    onAnalysis: (turn, batch) => { void observeSearchAnalysis(conversationId, turn, batch) }
+  }))
+  return searchSessions.get(conversationId)
+}
+async function observeSearchAnalysis(conversationId, turn, batch) {
+  const turnId = turn.id || turn.turn_id || turn.turn?.id
+  if (!turnId || analysisObservers.has(turnId)) return
+  const controller = new AbortController()
+  analysisObservers.set(turnId, controller)
+  const localId = `analysis-${turnId}`
+  let content = ''
+  const session = searchSessions.get(conversationId)
+  session?.setAnalysisState(batch.id, 'queued')
+  const visible = () => selectedConversation.value?.id === conversationId
+  try {
+    await requestSse(`/api/career/turns/${turnId}/events`, { method: 'GET', signal: controller.signal }, {
+      started: () => session?.setAnalysisState(batch.id, 'running'),
+      delta: (event) => {
+        content += event.content || ''
+        if (visible()) replaceOrAppendMessage({ id: localId, role: 'assistant', content,
+          created_at: new Date().toISOString(), source: 'job_search_auto_analysis',
+          ui_payload: { type: 'job_search_analysis', batch_id: batch.id, parent_turn_id: batch.source_turn_id } })
+      },
+      done: (event) => {
+        const status = event.turn?.status || event.state || 'succeeded'
+        session?.setAnalysisState(batch.id, status, ['failed', 'cancelled'].includes(status) ? (event.detail || event.assistant_message?.content || '岗位推荐未完成，请重试。') : '')
+        if (!visible()) return
+        if (event.assistant_message) replaceOrAppendMessage(event.assistant_message, localId)
+        if (event.turn_limit) turnLimit.value = normalizeTurnLimit(event.turn_limit)
+      },
+      error: (event) => {
+        session?.setAnalysisState(batch.id, event.state === 'cancelled' ? 'cancelled' : 'failed', event.detail || event.message || event.assistant_message?.content || '岗位推荐未完成，请重试。')
+        if (visible()) errorMessage.value = event.detail || event.message || '岗位自动分析未完成，可在搜索卡中重试。'
+      },
+      cancelled: () => {
+        session?.setAnalysisState(batch.id, 'cancelled')
+        if (visible()) messages.value = messages.value.filter((item) => item.id !== localId)
+      },
+      cancel_requested: () => session?.setAnalysisState(batch.id, 'cancel_requested')
+    })
+  } catch (error) {
+    if (error?.name !== 'AbortError') {
+      session?.setAnalysisState(batch.id, 'failed', error.message)
+      if (visible()) errorMessage.value = error.message
+    }
+    analysisObservers.delete(turnId)
+  }
+}
+onBeforeUnmount(() => { for (const controller of analysisObservers.values()) controller.abort() })
+
+const activeJobSearchCardId = computed(() => {
+  const latest = [...messages.value].reverse().find((item) => item.ui_payload?.type === 'job_search')
+  return latest?.ui_payload.status === 'dismissed' ? '' : latest?.id || ''
+})
 const greetingButton = ref(null)
 const historyCollapsed = ref(false)
 const historyPage = ref(1)
@@ -145,10 +253,27 @@ const contextDrawerTrigger = ref(null)
 const historyDrawerClose = ref(null)
 const contextDrawerClose = ref(null)
 const workspaceWidth = ref(typeof window === 'undefined' ? 1600 : window.innerWidth)
-const layoutMode = ref(getCareerLayoutMode(workspaceWidth.value))
+const layoutMode = ref(getCareerLayoutMode(workspaceWidth.value, props.navigationCollapsed))
 const compactPanel = ref('')
+useHistoryLayer(() => Boolean(compactPanel.value), () => closeCompactPanel())
+const mobileBrowser = isMobileBrowser()
+const mobileToolsOpen = ref(false)
+const contextSetupEntry = ref('')
+const composerSuggestions = [
+  { label: '找合适的岗位', text: '请结合我的经历，帮我找到适合的岗位。', icon: Search },
+  { label: '优化简历经历', text: '请帮我优化简历中的项目经历，突出与目标岗位相关的能力。', icon: EditPen },
+  { label: '准备一场面试', text: '请结合目标岗位，帮我准备一场技术面试。', icon: ChatDotRound }
+]
+let careerViewportElement = null
+
+function syncVisualViewport() {
+  if (!careerViewportElement) return
+  document.documentElement.style.setProperty('--career-visible-height', `${Math.round(window.visualViewport?.height || window.innerHeight)}px`)
+}
 const contextUsage = ref(null)
 const contextUsageLoading = ref(false)
+const retryingAssessment = ref(false)
+const assessmentRetryError = ref('')
 const contextUsageRevision = ref(0)
 const turnLimit = ref(normalizeTurnLimit())
 
@@ -168,9 +293,9 @@ const composerHighlightSegments = computed(() => buildComposerHighlightSegments(
 
 const visibleContextRailWidth = computed(() => {
   if (layoutMode.value !== 'wide') return Math.min(contextRailWidth.value, 420)
-  const historyWidth = historyCollapsed.value ? 48 : 280
-  const minimumChatWidth = 480
-  const availableWidth = workspaceWidth.value - historyWidth - minimumChatWidth - 28
+  const historyWidth = historyCollapsed.value ? 52 : 220
+  const minimumChatWidth = 640
+  const availableWidth = workspaceWidth.value - historyWidth - minimumChatWidth - 16
   return Math.min(contextRailWidth.value, Math.max(CONTEXT_RAIL_MIN_WIDTH, availableWidth))
 })
 
@@ -185,7 +310,7 @@ const turnInputBlocked = computed(() => sending.value || turnLimitView.value.blo
 const composerPlaceholder = computed(() => (
   turnLimitView.value.blocked
     ? '本对话已达到 30 轮，请开启新对话'
-    : (selectedConversation.value ? '输入你想咨询的问题…' : '请先开启一个对话')
+    : (selectedConversation.value ? '说说你的目标岗位，或贴一段职位描述…' : '请先开启一个对话')
 ))
 const welcomeMessage = computed(() => {
   if (hasCandidateContext.value && hasTargetContext.value) {
@@ -199,6 +324,8 @@ const welcomeMessage = computed(() => {
   }
   return '现在可以直接和我聊求职问题。简历和 JD 都是可选资料，你可以随时在下方补充，后续回答会自动使用最新资料。'
 })
+const visibleMessages = computed(() => visibleConversationMessages(messages.value))
+const readingResume = computed(() => isResumeReviewTurn(lastTurn.value) && sending.value)
 
 let errorToastTimer = null
 let conversationSelectionRequestId = 0
@@ -246,7 +373,20 @@ watch(
   { deep: true, flush: 'post' }
 )
 
+const workspaceFields = {
+  selectedConversation, conversationContext, messages, lastTurn, turnLimit,
+  messageText, composerDisplayText, jobUrl, resumeFile,
+  selectedInterviewReferences, selectedSkillInvocations, historyPage, historyPageSize,
+  contextSetupDraft,
+}
+
 onBeforeUnmount(() => {
+  if (showContextSetup.value && contextSetupRef.value) preserveContextSetupDraft(contextSetupRef.value.captureDraft())
+  emit('preserve-workspace', Object.fromEntries(
+    Object.entries(workspaceFields).map(([key, state]) => [key, state.value])
+  ))
+  window.visualViewport?.removeEventListener('resize', syncVisualViewport)
+  if (careerViewportElement) document.documentElement.style.removeProperty('--career-visible-height')
   if (errorToastTimer) clearTimeout(errorToastTimer)
   if (interviewMentionDebounceTimer) clearTimeout(interviewMentionDebounceTimer)
   if (skillMentionDebounceTimer) clearTimeout(skillMentionDebounceTimer)
@@ -373,7 +513,7 @@ function resetContextRailWidth() {
 
 function syncCareerWorkspaceWidth(width) {
   const nextWidth = Math.max(0, Math.round(Number(width) || 0))
-  const nextMode = getCareerLayoutMode(nextWidth)
+  const nextMode = getCareerLayoutMode(nextWidth, props.navigationCollapsed)
   compactPanel.value = getPanelAfterLayoutChange(layoutMode.value, nextMode, compactPanel.value)
   workspaceWidth.value = nextWidth
   layoutMode.value = nextMode
@@ -403,10 +543,57 @@ function closeCompactPanel(restoreFocus = true) {
 }
 
 function handleCareerPanelKeydown(event) {
-  if (event.key !== 'Escape' || !compactPanel.value) return
-  event.preventDefault()
-  closeCompactPanel()
+  if (!compactPanel.value || document.querySelector('dialog[open]')) return
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    closeCompactPanel()
+  } else if (event.key === 'Tab') {
+    const panel = compactPanel.value === 'history'
+      ? historyDrawerClose.value?.closest('aside') : contextDrawerClose.value?.closest('.context-rail-slot')
+    if (!panel?.contains(document.activeElement)) return
+    const controls = [...panel.querySelectorAll('button, a[href], input, select, textarea, [tabindex="0"]')]
+      .filter(element => !element.disabled && !element.closest('[inert]') && element.getClientRects().length)
+    const target = event.shiftKey && document.activeElement === controls[0] ? controls.at(-1)
+      : !event.shiftKey && document.activeElement === controls.at(-1) ? controls[0] : null
+    if (target) { event.preventDefault(); target.focus() }
+  }
 }
+
+function handleComposerKeydown(event) {
+  if (shouldSubmitComposer(event, mobileBrowser)) {
+    event.preventDefault()
+    if (!event.repeat) void sendMessage()
+    return
+  }
+  if (!shouldNavigateComposerHistory(event, mobileBrowser, composerHistory.browsing)) return
+  if (!composerHistory.browsing) {
+    composerHistoryDraftReferences = {
+      interviews: [...selectedInterviewReferences.value],
+      skills: [...selectedSkillInvocations.value]
+    }
+  }
+  const recalled = composerHistory.move(event.key, messageText.value,
+    visibleMessages.value.filter(message => message.role === 'user').map(message => message.content))
+  if (!recalled) return
+  event.preventDefault()
+  messageText.value = recalled.text
+  selectedInterviewReferences.value = recalled.atDraft ? composerHistoryDraftReferences.interviews : []
+  selectedSkillInvocations.value = recalled.atDraft ? composerHistoryDraftReferences.skills : []
+  const input = event.currentTarget
+  nextTick(() => {
+    const caret = event.key === 'ArrowUp' ? 0 : recalled.text.length
+    input.setSelectionRange(caret, caret)
+    input.scrollTop = event.key === 'ArrowUp' ? 0 : input.scrollHeight
+    syncComposerHighlightScroll({ currentTarget: input })
+  })
+}
+
+function resetComposerHistory() {
+  composerHistory.reset()
+  composerHistoryDraftReferences = null
+}
+
+watch(() => selectedConversation.value?.id, resetComposerHistory)
 
 function handleConversationActionPointerDown(event) {
   if (!conversationMenuId.value) return
@@ -549,6 +736,7 @@ function activeSelectedSkillInvocations(text) {
 }
 
 watch(messageText, (text) => {
+  if (composerHistory.browsing && text !== composerHistory.text) resetComposerHistory()
   composerDisplayText.value = text
   const activeInterviews = selectedInterviewReferences.value.filter((experience) => (
     selectedInterviewReferencePresent(text, experience)
@@ -565,6 +753,7 @@ watch(messageText, (text) => {
 })
 
 function syncComposerHighlightInput(event) {
+  resetComposerHistory()
   // v-model 会等中文输入法完成组合后再更新；显示层需要逐个 input 即时跟随。
   composerDisplayText.value = event.currentTarget.value
 }
@@ -577,6 +766,7 @@ function syncComposerHighlightScroll(event) {
 
 const providerOptions = [
   { key: 'deepseek', label: 'DeepSeek', short: 'DS', detail: '中文技术与推理模型', websiteUrl: 'https://platform.deepseek.com', apiBaseUrl: 'https://api.deepseek.com', defaultModelId: 'deepseek-v4-pro', modelHint: '例如：deepseek-v4-pro', vision: false },
+  { key: 'kimi', label: 'Kimi（Moonshot AI）', short: 'KM', detail: 'Kimi 多模态与推理模型', websiteUrl: 'https://platform.kimi.com', apiBaseUrl: 'https://api.moonshot.cn/v1', defaultModelId: 'kimi-k3', modelHint: '例如：kimi-k3', vision: true, tools: true },
   { key: 'groq', label: 'Groq', short: 'G', detail: '低延迟开源模型推理服务', websiteUrl: 'https://console.groq.com', apiBaseUrl: 'https://api.groq.com/openai/v1', defaultModelId: 'openai/gpt-oss-20b', modelHint: '例如：openai/gpt-oss-20b', vision: false },
   { key: 'mistral', label: 'Mistral AI', short: 'MI', detail: '提供有限月度用量的 Free mode', websiteUrl: 'https://console.mistral.ai', apiBaseUrl: 'https://api.mistral.ai/v1', defaultModelId: 'mistral-small-latest', modelHint: '例如：mistral-small-latest', vision: false },
   { key: 'openrouter', label: 'OpenRouter', short: 'OR', detail: '可路由到当前免费模型', websiteUrl: 'https://openrouter.ai', apiBaseUrl: 'https://openrouter.ai/api/v1', defaultModelId: 'openrouter/free', modelHint: '例如：openrouter/free', vision: false },
@@ -600,11 +790,18 @@ const selectedProfile = computed(() =>
 const readyModelProfiles = computed(() =>
   modelProfiles.value.filter((item) => item.readiness === 'ready')
 )
+const platformDefaultProfile = computed(() => readyModelProfiles.value.find((item) =>
+  item.profile.provider_key === platformDefaultModel.value.provider_key
+  && item.profile.model_id === platformDefaultModel.value.model_id
+  && (!platformDefaultModel.value.profile_id || item.profile.id === platformDefaultModel.value.profile_id)
+))
+const platformDefaultLabel = computed(() => platformDefaultModel.value.model_id === 'deepseek-v4-pro'
+  ? 'DeepSeek V4 Pro' : platformDefaultModel.value.model_id)
 const readyFreeModelProfiles = computed(() =>
   readyModelProfiles.value.filter((item) => item.profile.cost_tier === 'free_quota')
 )
 const readyPaidModelProfiles = computed(() =>
-  readyModelProfiles.value.filter((item) => item.profile.cost_tier === 'paid')
+  readyModelProfiles.value.filter((item) => item.profile.cost_tier === 'paid' && item.profile.id !== platformDefaultProfile.value?.profile.id)
 )
 const readyLocalModelProfiles = computed(() =>
   readyModelProfiles.value.filter((item) => item.profile.cost_tier === 'local')
@@ -613,20 +810,13 @@ const hasReadyModel = computed(() => readyModelProfiles.value.length > 0)
 const hasReadyFreeModel = computed(() => readyFreeModelProfiles.value.length > 0)
 const modelSelectionValue = computed(() => {
   if (selectionMode.value === 'free_quota_first' && hasReadyFreeModel.value) return 'free_quota_first'
-  return selectedProfile.value?.readiness === 'ready' ? selectedProfileId.value : ''
+  return selectedProfile.value?.readiness === 'ready' ? selectedProfileId.value : 'platform_default'
 })
 const resolvedSelectedProfileId = computed(() => (
   selectionMode.value === 'free_quota_first'
     ? (readyFreeModelProfiles.value[0]?.profile.id ?? '')
     : selectedProfileId.value
 ))
-const modelLabel = computed(() =>
-  selectionMode.value === 'free_quota_first' && hasReadyFreeModel.value
-    ? '免费模型自动选择'
-    : selectedProfile.value
-      ? modelPrimaryLabel(selectedProfile.value)
-      : '尚未配置可用模型'
-)
 const modelDialogTitle = computed(() => ({
   list: '模型与连接',
   free: '申请并接入免费模型',
@@ -690,7 +880,8 @@ function chooseProvider(provider) {
     modelId: provider.defaultModelId ?? '',
     apiBaseUrl: provider.apiBaseUrl,
     websiteUrl: provider.websiteUrl,
-    vision: provider.vision
+    vision: provider.vision,
+    tools: Boolean(provider.tools)
   }
   testedConnectionFingerprint.value = ''
   connectionTestMessage.value = ''
@@ -906,7 +1097,10 @@ function scheduleTurnRecoveryPolling() {
 async function restoreServerQueue(conversationId) {
   const payload = await requestJson(`/api/career/conversations/${conversationId}/active-turns`)
   if (selectedConversation.value?.id !== conversationId) return
-  pendingTurns.value = restoreServerTurns(payload.items ?? [])
+  pendingTurns.value = restoreServerTurns(payload.items ?? []).map((item) => {
+    const existing = pendingTurns.value.find((current) => current.id === item.id)
+    return existing ? { ...existing, serverTurn: item.serverTurn } : item
+  })
   if (pendingTurns.value.length > 0) {
     lastTurn.value = pendingTurns.value.at(-1)?.serverTurn ?? lastTurn.value
     void observeNextServerTurn()
@@ -965,9 +1159,10 @@ function scheduleAssessmentPolling() {
 async function refreshAssessmentContext() {
   const conversationId = selectedConversation.value?.id
   if (!conversationId || !isAssessmentPending(conversationContext.value?.assessment)) return
+  const bindingKey = assessmentBindingKey(conversationContext.value, conversationId)
   try {
     const payload = await requestJson(`/api/career/conversations/${conversationId}`)
-    if (selectedConversation.value?.id !== conversationId) return
+    if (selectedConversation.value?.id !== conversationId || assessmentBindingKey(conversationContext.value, conversationId) !== bindingKey) return
     conversationContext.value = payload.context ?? null
   } catch {
     // 分析任务仍在后台运行，短暂读取失败时继续轮询，不打断当前对话。
@@ -1051,24 +1246,15 @@ function messageModelLabel(message) {
   return `${providerOption(model.provider_key).label} · ${model.model_id}`
 }
 
-function useFreeQuotaFirstSelection() {
-  if (!hasReadyFreeModel.value) {
-    useFirstReadyModelSelection()
-    return
-  }
-  selectionMode.value = 'free_quota_first'
-  selectedProfileId.value = ''
+function usePlatformDefaultSelection() {
+  const choice = platformDefaultSelection(modelProfiles.value, platformDefaultModel.value)
+  selectionMode.value = choice.mode
+  selectedProfileId.value = choice.profileId
 }
 
-function useFirstReadyModelSelection() {
-  const firstReady = readyModelProfiles.value[0]
-  if (!firstReady) {
-    selectionMode.value = 'specific_profile'
-    selectedProfileId.value = ''
-    return
-  }
-  selectionMode.value = 'specific_profile'
-  selectedProfileId.value = firstReady.profile.id
+function useFreeQuotaFirstSelection() {
+  selectionMode.value = 'free_quota_first'
+  selectedProfileId.value = ''
 }
 
 function restoreConversationModelSelection(selection) {
@@ -1079,12 +1265,7 @@ function restoreConversationModelSelection(selection) {
     selectedProfileId.value = profileId
     return
   }
-  if (selection?.mode === 'free_quota_first' && hasReadyFreeModel.value) {
-    selectionMode.value = 'free_quota_first'
-    selectedProfileId.value = ''
-    return
-  }
-  useFreeQuotaFirstSelection()
+  usePlatformDefaultSelection()
 }
 
 function formatDate(value) {
@@ -1161,7 +1342,7 @@ async function requestSse(url, options, handlers) {
   }
 }
 
-async function refreshData() {
+async function refreshData({ preserveConversation = false } = {}) {
   loading.value = true
   errorMessage.value = ''
   const historyRequest = requestJson(pageRequestUrl(historyPage.value, historyPageSize.value))
@@ -1175,7 +1356,7 @@ async function refreshData() {
     applyHistoryPage(history)
     if (selectedConversation.value) {
       const current = conversations.value.find((item) => item.id === selectedConversation.value.id)
-      if (current) await selectConversation(current.id, false)
+      if (current || preserveConversation) await selectConversation(selectedConversation.value.id, false)
       else {
         selectedConversation.value = null
         conversationContext.value = null
@@ -1194,6 +1375,7 @@ async function refreshData() {
   ])
   if (profileResult.status === 'fulfilled') {
     modelProfiles.value = profileResult.value.items ?? []
+    platformDefaultModel.value = profileResult.value.default_model ?? { ...FALLBACK_PLATFORM_MODEL }
     restoreConversationModelSelection(null)
   } else if (!errorMessage.value) {
     errorMessage.value = profileResult.reason instanceof Error
@@ -1212,23 +1394,33 @@ async function refreshData() {
 
 async function selectConversation(conversationId, clearFeedback = true) {
   if (savingJobSearch.value || submittingTurnCount.value > 0) return
-  resetJobSearch()
   closeConversationActions()
   const requestId = ++conversationSelectionRequestId
+  const sameConversation = selectedConversation.value?.id === conversationId
+  if (sameConversation && clearFeedback) {
+    loading.value = false
+    if (compactPanel.value === 'history') closeCompactPanel()
+    return
+  }
   loading.value = true
   errorMessage.value = ''
-  if (clearFeedback) feedback.value = ''
-  stopTurnRecoveryPolling()
-  stopAssessmentPolling()
-  cancelContextUsageRequest()
-  contextUsage.value = null
-  contextUsageLoading.value = false
-  resetConversationDraft()
-  conversationContext.value = null
-  useFreeQuotaFirstSelection()
   try {
     const payload = await requestJson(`/api/career/conversations/${conversationId}`)
     if (requestId !== conversationSelectionRequestId) return
+    assessmentRetryError.value = ''
+    if (clearFeedback) feedback.value = ''
+    resetJobSearch()
+    freshJobSearchCards.value = new Set()
+    jobCardErrors.value = {}
+    stopTurnRecoveryPolling()
+    stopAssessmentPolling()
+    cancelContextUsageRequest()
+    contextUsage.value = null
+    contextUsageLoading.value = false
+    if (!sameConversation) {
+      resetConversationDraft()
+      usePlatformDefaultSelection()
+    }
     selectedConversation.value = payload.conversation
     turnLimit.value = normalizeTurnLimit(payload.turn_limit)
     conversationContext.value = payload.context ?? null
@@ -1236,6 +1428,7 @@ async function selectConversation(conversationId, clearFeedback = true) {
     restoreConversationModelSelection(payload.last_model_selection)
     lastTurn.value = payload.latest_turn ?? null
     sending.value = isActiveTurn(lastTurn.value)
+    if (compactPanel.value === 'history') closeCompactPanel()
     void restoreServerQueueSafely(conversationId)
   } catch (error) {
     if (requestId !== conversationSelectionRequestId) return
@@ -1269,7 +1462,9 @@ async function createConversation({
       body: JSON.stringify({
         title,
         candidate_profile_id: candidateProfileId || null,
-        target_role_profile_id: targetRoleProfileId || null
+        target_role_profile_id: targetRoleProfileId || null,
+        selection_mode: selectionMode.value,
+        model_profile_id: selectedProfileId.value || null
       })
     })
     historyPage.value = 1
@@ -1285,8 +1480,9 @@ async function createConversation({
     lastTurn.value = null
     if (!preserveDraft) {
       resetConversationDraft()
-      useFreeQuotaFirstSelection()
+      usePlatformDefaultSelection()
     }
+    await restoreResumeReview(conversation.context, conversation.id)
     return conversation
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '新建会话失败'
@@ -1300,16 +1496,49 @@ async function startNewConversation() {
   if (savingJobSearch.value || submittingTurnCount.value > 0) return
   resetJobSearch()
   const conversation = await createConversation({ title: '新的求职咨询' })
-  if (conversation) feedback.value = '新对话已开启，可以直接提问；简历和 JD 均可稍后补充。'
+  if (conversation) {
+    closeCompactPanel()
+    feedback.value = '新对话已开启，可以直接提问；简历和 JD 均可稍后补充。'
+  }
 }
 
-function openContextSetup() {
+async function openContextSetup(entry = '') {
+  mobileToolsOpen.value = false
+  if (!await dismissHistoryLayers()) return
   if (!selectedConversation.value) {
     errorMessage.value = '请先开启一个对话。'
     return
   }
   contextSetupInitial.value = conversationContext.value
+  contextSetupEntry.value = entry === 'target' || entry === 'resume' ? entry : ''
+  if (contextSetupDraft.value?.key !== assessmentBindingKey(conversationContext.value, selectedConversation.value.id)) contextSetupDraft.value = null
   showContextSetup.value = true
+}
+
+async function openComposerMaterial(entry) {
+  await openContextSetup(entry)
+}
+
+function applyComposerSuggestion(text) {
+  if (!selectedConversation.value || turnInputBlocked.value) return
+  resetComposerHistory()
+  messageText.value = text
+  nextTick(() => careerWorkspaceRef.value?.querySelector('.composer textarea')?.focus())
+}
+
+async function importSharedMaterial() {
+  if (!props.sharedMaterial || !selectedConversation.value || creating.value) return
+  if (!await dismissHistoryLayers()) return
+  const bindingKey = assessmentBindingKey(conversationContext.value, selectedConversation.value.id)
+  const previousDraft = contextSetupDraft.value?.key === bindingKey ? contextSetupDraft.value.draft : null
+  if (previousDraft && !window.confirm('当前有尚未确认的资料草稿，是否用分享资料替换对应表单？')) return
+  contextSetupInitial.value = conversationContext.value
+  contextSetupDraft.value = {
+    key: bindingKey,
+    draft: createSharedMaterialDraft(props.sharedMaterial, conversationContext.value, previousDraft || {})
+  }
+  showContextSetup.value = true
+  emit('shared-material-used')
 }
 
 function openTargetAdjustment() {
@@ -1323,6 +1552,7 @@ function closeContextSetup() {
 }
 
 function launchInterviewMaster() {
+  if (mobileBrowser) { emit('navigate', '/career/interview-master'); return }
   const selected = modelSelectionValue.value
   const opened = openBrowserInterviewMaster({
     answerModelProfileId: selected === 'free_quota_first' ? '' : selected
@@ -1331,11 +1561,16 @@ function launchInterviewMaster() {
 }
 
 function launchOnlineAssessment() {
+  if (mobileBrowser) { emit('navigate', '/career/online-assessment'); return }
   const opened = openOnlineAssessmentAssistant()
   feedback.value = opened ? '' : '弹窗被拦截，请允许本站打开窗口后重试。'
 }
 
 function openGreetingDialog() {
+  if (mobileBrowser) {
+    errorMessage.value = '招呼语生成与发送需要电脑端浏览器助手。请在电脑端选择岗位并审核文案。'
+    return
+  }
   if (!selectedConversation.value) {
     errorMessage.value = '请先开启一个对话。'
     return
@@ -1381,12 +1616,13 @@ function jobLibrarySelectionKey(job) {
   return String(job?.id ?? job?.jobId ?? job?.sourceUrl ?? `${job?.company ?? ''}:${job?.title ?? ''}`)
 }
 
-async function confirmJobFromLibrary(job) {
+async function confirmJobFromLibrary(job, cardMessage = null) {
   if (!selectedConversation.value || savingJobSearch.value) return
   const conversationId = selectedConversation.value.id
   const candidateProfileId = conversationContext.value?.candidate_profile?.id ?? null
   const selectionKey = jobLibrarySelectionKey(job)
   savingJobSearch.value = true
+  confirmingJobCardId.value = cardMessage?.id || ''
   jobSearchError.value = ''
   try {
     let targetRole = pendingJobLibraryTarget.value?.selectionKey === selectionKey
@@ -1411,13 +1647,57 @@ async function confirmJobFromLibrary(job) {
     })
     if (selectedConversation.value?.id === conversationId) {
       conversationContext.value = nextContext
-      feedback.value = '职位库岗位已导入，岗位分析已开始；后续回答将使用新岗位。'
+      const assessment = nextContext.assessment
+      feedback.value = !nextContext.candidate_profile
+        ? '目标岗位已设置，后续回答将使用该岗位；添加简历后可分析匹配情况。'
+        : isAssessmentPending(assessment)
+          ? '目标岗位已设置，岗位匹配分析正在处理。'
+          : ['ready', 'fallback_ready'].includes(assessment?.status)
+            ? '目标岗位已设置，岗位匹配分析已可查看。'
+            : '目标岗位已设置，后续回答将使用该岗位。'
+      if (cardMessage) {
+        await saveJobSearchCard(cardMessage, {
+          status: 'selected', selected_job: summarizeSearchJobs([job]).jobs[0]
+        })
+      }
+      await restoreResumeReview(nextContext, conversationId)
     }
-    resetJobSearch({ restoreFocus: true })
+    if (!cardMessage) resetJobSearch({ restoreFocus: true })
   } catch (error) {
-    jobSearchError.value = error instanceof Error ? error.message : '职位导入失败，请稍后重试。'
+    const message = error instanceof Error ? error.message : '职位导入失败，请稍后重试。'
+    if (cardMessage) jobCardErrors.value = { ...jobCardErrors.value, [cardMessage.id]: message }
+    else jobSearchError.value = message
   } finally {
     savingJobSearch.value = false
+    confirmingJobCardId.value = ''
+  }
+}
+
+async function saveJobSearchCard(message, patch) {
+  const conversationId = selectedConversation.value?.id
+  if (!conversationId || !message?.id) return null
+  const previous = jobCardSaveQueue.get(message.id) || Promise.resolve()
+  const pending = previous.catch(() => {}).then(async () => {
+    const payload = await requestJson(`/api/career/conversations/${conversationId}/messages/${message.id}/job-search`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch)
+    })
+    if (selectedConversation.value?.id === conversationId) {
+      const current = messages.value.find((item) => item.id === message.id) || message
+      replaceOrAppendMessage({ ...current, ...payload.message })
+      jobCardErrors.value = { ...jobCardErrors.value, [message.id]: '' }
+    }
+    return payload.message
+  })
+  jobCardSaveQueue.set(message.id, pending)
+  try {
+    return await pending
+  } catch (error) {
+    if (selectedConversation.value?.id === conversationId) {
+      jobCardErrors.value = { ...jobCardErrors.value, [message.id]: error instanceof Error ? error.message : '搜索状态保存失败，请稍后重试。' }
+    }
+    return null
+  } finally {
+    if (jobCardSaveQueue.get(message.id) === pending) jobCardSaveQueue.delete(message.id)
   }
 }
 
@@ -1432,6 +1712,7 @@ async function applyCareerContext(payload) {
   if (!candidateProfileId && !targetRoleProfileId) {
     showContextSetup.value = false
     contextSetupInitial.value = null
+    contextSetupDraft.value = null
     feedback.value = '未添加求职资料，你仍然可以继续正常对话。'
     return
   }
@@ -1443,7 +1724,9 @@ async function applyCareerContext(payload) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         candidate_profile_id: candidateProfileId,
-        target_role_profile_id: targetRoleProfileId
+        target_role_profile_id: targetRoleProfileId,
+        selection_mode: selectionMode.value,
+        model_profile_id: selectedProfileId.value || null
       })
     })
     const updatedLabels = [
@@ -1453,6 +1736,8 @@ async function applyCareerContext(payload) {
     feedback.value = `${updatedLabels.join('和')}已更新，岗位分析已开始；后续回答将自动使用最新资料。`
     showContextSetup.value = false
     contextSetupInitial.value = null
+    contextSetupDraft.value = null
+    await restoreResumeReview(conversationContext.value, selectedConversation.value.id)
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '求职上下文建立失败'
   } finally {
@@ -1460,23 +1745,50 @@ async function applyCareerContext(payload) {
   }
 }
 
+async function restoreResumeReview(context, conversationId) {
+  const review = context?.resume_review
+  if (review?.status === 'unavailable') {
+    feedback.value = review.message
+    return
+  }
+  if (!review?.turn || selectedConversation.value?.id !== conversationId) return
+  // 保留当前输入草稿；后台已完成时也读取落库结果，不依赖及时订阅。
+  const snapshot = await requestJson(`/api/career/conversations/${conversationId}`)
+  if (selectedConversation.value?.id !== conversationId) return
+  messages.value = snapshot.messages ?? []
+  lastTurn.value = snapshot.latest_turn ?? null
+  turnLimit.value = normalizeTurnLimit(snapshot.turn_limit)
+  await restoreServerQueueSafely(conversationId)
+  if (isActiveTurn(lastTurn.value)) feedback.value = '简历已确认，正在为你整理初评建议。'
+}
+
 async function retryJobAssessment() {
   const conversationId = selectedConversation.value?.id
-  if (!conversationId || isAssessmentPending(conversationContext.value?.assessment)) return
+  if (!conversationId || retryingAssessment.value || isAssessmentPending(conversationContext.value?.assessment)) return
+  retryingAssessment.value = true
+  const bindingKey = assessmentBindingKey(conversationContext.value, conversationId)
+  assessmentRetryError.value = ''
   errorMessage.value = ''
   try {
-    conversationContext.value = await requestJson(`/api/career/conversations/${conversationId}/assessment/retry`, {
+    const nextContext = await requestJson(`/api/career/conversations/${conversationId}/assessment/retry`, {
       method: 'POST'
     })
+    if (selectedConversation.value?.id !== conversationId || assessmentBindingKey(conversationContext.value, conversationId) !== bindingKey) return
+    conversationContext.value = nextContext
     feedback.value = '岗位分析已重新排队。'
   } catch (error) {
+    if (selectedConversation.value?.id !== conversationId) return
     errorMessage.value = error instanceof Error ? error.message : '岗位分析重新排队失败'
+    assessmentRetryError.value = errorMessage.value
+  } finally {
+    retryingAssessment.value = false
   }
 }
 
 function createMaterialsRequest(input) {
   const formData = new FormData()
   formData.append('text', input.text)
+  if (input.jobSearchView) formData.append('job_search_view', JSON.stringify(input.jobSearchView))
   formData.append('job_url', input.jobUrl || '')
   formData.append('selection_mode', input.selectionMode)
   if (input.selectionMode === 'specific_profile' && input.selectedProfileId) {
@@ -1510,6 +1822,11 @@ function replaceOrAppendMessage(message, temporaryMessageId = '') {
   const temporaryIndex = temporaryMessageId
     ? messages.value.findIndex((item) => item.id === temporaryMessageId)
     : -1
+  if (existingIndex >= 0 && temporaryIndex >= 0 && existingIndex !== temporaryIndex) {
+    messages.value.splice(temporaryIndex, 1)
+    messages.value.splice(messages.value.findIndex((item) => item.id === message.id), 1, message)
+    return
+  }
   const replacementIndex = existingIndex >= 0 ? existingIndex : temporaryIndex
   if (replacementIndex >= 0) {
     messages.value.splice(replacementIndex, 1, message)
@@ -1547,6 +1864,7 @@ function finalizeStreamProgress() {
 }
 
 function clearComposerAfterSubmit() {
+  resetComposerHistory()
   messageText.value = ''
   jobUrl.value = ''
   showJobUrl.value = false
@@ -1579,7 +1897,7 @@ async function sendMessage() {
     errorMessage.value = '当前回复完成后可继续发送'
     return
   }
-  if (!hasReadyModel.value) {
+  if (!hasReadyModel.value && !/(?:找|搜|检索|推荐).{0,30}(?:工作|岗位|职位)|换工作|求职表单|城市改|再看看/.test(messageText.value)) {
     errorMessage.value = '尚未配置可调用模型，请先申请免费模型或添加模型连接。'
     openFreeModelDirectory()
     return
@@ -1600,6 +1918,16 @@ async function sendMessage() {
     selectedSkillIds: activeSkillInvocations.map((item) => item.id),
     skillInvocations: [...activeSkillInvocations]
   }
+  if (preparingSearchTurn.value) return
+  preparingSearchTurn.value = true
+  try {
+    const session = currentSearchSession()
+    if (session && isJobSearchFollowup(input.text)) await session.ensureSaved(session.relevantBatchIds(input.text))
+    input.jobSearchView = session?.view() || null
+  } catch (error) {
+    errorMessage.value = error.message
+    return
+  } finally { preparingSearchTurn.value = false }
   const temporaryMessage = createTemporaryMessage(input)
   const preparedTurn = {
     conversationId: selectedConversation.value.id,
@@ -1649,6 +1977,7 @@ async function submitPreparedTurn(preparedTurn) {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             text: input.text,
+            job_search_view: input.jobSearchView || null,
             job_url: input.jobUrl || null,
             selection_mode: input.selectionMode,
             model_profile_id: input.selectionMode === 'specific_profile' ? input.selectedProfileId || null : null,
@@ -1656,6 +1985,9 @@ async function submitPreparedTurn(preparedTurn) {
             selected_skill_ids: input.selectedSkillIds
           })
         }
+    // 搜索与详情通过 PATCH 保存，先等待已经发起的保存，避免追问抢先进入 Worker。
+    const pendingCardSaves = [...jobCardSaveQueue.values()]
+    if (pendingCardSaves.length) await Promise.all(pendingCardSaves)
     const payload = await requestJson(endpoint, requestOptions)
     turnLimit.value = normalizeTurnLimit(payload.turn_limit)
     const serverTurn = payload.turn
@@ -1786,6 +2118,17 @@ async function observeNextServerTurn() {
     terminalObserved = true
     replaceOrAppendMessage(payload.message, item.temporaryMessageId)
     replaceOrAppendMessage(payload.assistant_message)
+    for (const updated of payload.updated_messages || []) {
+      const current = messages.value.find((entry) => entry.id === updated.id) || {}
+      replaceOrAppendMessage({ ...current, ...updated })
+    }
+    if (item.temporaryMessageId) {
+      const nextFresh = new Set(freshJobSearchCards.value)
+      for (const message of [payload.assistant_message, ...(payload.updated_messages || [])]) {
+        if (message?.ui_payload?.type === 'job_search') nextFresh.add(message.id)
+      }
+      freshJobSearchCards.value = nextFresh
+    }
     lastTurn.value = payload.turn ?? { ...item.serverTurn, status: payload.state }
     feedback.value = payload.turn?.status === 'succeeded'
       ? '本轮回复已完成。'
@@ -1869,7 +2212,7 @@ async function archiveConversation(conversation) {
       conversationContext.value = null
       messages.value = []
       resetConversationDraft()
-      useFreeQuotaFirstSelection()
+      usePlatformDefaultSelection()
     }
     feedback.value = '会话已归档，历史会被保留但不能继续写入。'
     void loadConversationPage(historyPage.value)
@@ -1958,7 +2301,7 @@ async function deleteConversation(conversation) {
       messages.value = []
       lastTurn.value = null
       resetConversationDraft()
-      useFreeQuotaFirstSelection()
+      usePlatformDefaultSelection()
     }
     feedback.value = '会话及其历史记录已永久删除。'
     closeConversationActions()
@@ -1978,8 +2321,8 @@ function chooseModel(event) {
   }
   const selected = readyModelProfiles.value.find((item) => item.profile.id === value)
   if (!selected) {
-    useFirstReadyModelSelection()
-    errorMessage.value = '该模型连接当前不可调用，请在“模型与连接”中重新测试或配置。'
+    usePlatformDefaultSelection()
+    errorMessage.value = '该模型暂不可用，请联系管理员检查共享模型连接。'
     return
   }
   selectionMode.value = 'specific_profile'
@@ -2013,7 +2356,7 @@ async function saveModelProfile() {
       selectionMode.value = 'specific_profile'
       selectedProfileId.value = payload.profile.id
     } else {
-      useFreeQuotaFirstSelection()
+      usePlatformDefaultSelection()
     }
     contextUsageRevision.value += 1
     modelForm.value = emptyModelForm()
@@ -2039,7 +2382,7 @@ function modelConnectionPayload() {
   return {
     display_name: resolvedDisplayName(),
     provider_key: form.providerKey.trim(),
-    model_id: form.modelId.trim(),
+    model_id: normalizedModelId(form.providerKey, form.apiBaseUrl, form.modelId),
     api_key: form.apiKey.trim(),
     capabilities,
     cost_tier: form.costTier,
@@ -2049,6 +2392,38 @@ function modelConnectionPayload() {
     provider_website_url: websiteUrl || null
   }
 }
+
+function isOfficialKimiConnection(providerKey, configuredUrl) {
+  if (String(providerKey ?? '').trim().toLowerCase() === 'kimi') return true
+  try {
+    return ['api.moonshot.cn', 'api.moonshot.ai'].includes(
+      new URL(String(configuredUrl ?? '').trim()).hostname.toLowerCase()
+    )
+  } catch {
+    return false
+  }
+}
+
+function normalizedModelId(providerKey, configuredUrl, modelId) {
+  const original = String(modelId ?? '').trim()
+  if (!isOfficialKimiConnection(providerKey, configuredUrl)) return original
+  const candidate = original.toLowerCase().replace(/[\s_]+/g, '-')
+  return ['kimi-k3', 'kimi-k2.7-code', 'kimi-k2.7-code-highspeed', 'kimi-k2.6'].includes(candidate)
+    ? candidate
+    : original
+}
+
+const kimiModelIdHint = computed(() => {
+  const original = modelForm.value.modelId.trim()
+  const normalized = normalizedModelId(
+    modelForm.value.providerKey,
+    modelForm.value.apiBaseUrl,
+    original
+  )
+  return original && normalized !== original
+    ? `Kimi 模型 ID 将按官方标识保存为 ${normalized}。`
+    : ''
+})
 
 function resolvedDisplayName() {
   const configuredName = modelForm.value.displayName.trim()
@@ -2161,11 +2536,22 @@ onMounted(() => {
     window.localStorage.getItem(HISTORY_PAGE_SIZE_STORAGE_KEY),
     window.innerHeight
   )
+  // 保留原 File 对象与引用，不转成 JSON 或持久化到浏览器存储。
+  if (props.initialWorkspace) {
+    for (const [key, state] of Object.entries(workspaceFields)) {
+      if (Object.hasOwn(props.initialWorkspace, key)) state.value = props.initialWorkspace[key]
+    }
+  }
   const storedContextRailWidth = Number(window.localStorage.getItem(CONTEXT_RAIL_WIDTH_STORAGE_KEY))
   if (Number.isFinite(storedContextRailWidth) && storedContextRailWidth > 0) {
     contextRailWidth.value = clampContextRailWidth(storedContextRailWidth)
   }
   const workspaceElement = careerWorkspaceRef.value
+  if (mobileBrowser) {
+    careerViewportElement = workspaceElement?.closest('.main')
+    syncVisualViewport()
+    window.visualViewport?.addEventListener('resize', syncVisualViewport)
+  }
   if (workspaceElement && typeof ResizeObserver !== 'undefined') {
     careerResizeObserver = new ResizeObserver(([entry]) => {
       syncCareerWorkspaceWidth(entry?.contentRect?.width ?? workspaceElement.clientWidth)
@@ -2175,7 +2561,7 @@ onMounted(() => {
   }
   document.addEventListener('keydown', handleCareerPanelKeydown)
   document.addEventListener('pointerdown', handleConversationActionPointerDown)
-  void refreshData()
+  void refreshData({ preserveConversation: Boolean(props.initialWorkspace) })
 })
 </script>
 
@@ -2185,6 +2571,7 @@ onMounted(() => {
     class="career-workspace"
     :class="{
       'has-context-rail': conversationContext,
+      'compact-layout': layoutMode !== 'wide',
       'history-collapsed': historyCollapsed,
       'resizing-context-rail': resizingContextRail,
       'compact-history-open': compactPanel === 'history',
@@ -2193,7 +2580,9 @@ onMounted(() => {
     :style="{ '--context-rail-width': `${visibleContextRailWidth}px` }"
     aria-label="求职助手"
   >
-    <aside id="career-history-panel" class="career-history-panel" :class="{ collapsed: historyCollapsed }">
+    <aside id="career-history-panel" class="career-history-panel" :class="{ collapsed: historyCollapsed }"
+      :inert="(layoutMode === 'single' && compactPanel !== 'history') || compactPanel === 'context'"
+      :aria-hidden="layoutMode === 'single' && compactPanel !== 'history'">
       <button
         ref="historyDrawerClose"
         class="compact-panel-close"
@@ -2293,20 +2682,18 @@ onMounted(() => {
               :current-page="historyPage"
               :page-size="historyPageSize"
               :page-sizes="HISTORY_PAGE_SIZE_OPTIONS"
-              :pager-count="5"
               :total="historyTotal"
               :disabled="historyLoading"
-              layout="total, sizes, prev, pager, next"
+              layout="total, sizes, prev, jumper, next"
               @current-change="goToHistoryPage"
               @size-change="changeHistoryPageSize"
             />
           </ElConfigProvider>
         </nav>
-        <div class="privacy-note"><span aria-hidden="true">盾</span><p>简历原文件不入库，仅保留配置允许的历史文本</p></div>
       </template>
     </aside>
 
-    <section class="career-chat-panel">
+    <section class="career-chat-panel" :inert="Boolean(compactPanel)">
       <header class="chat-header">
         <div>
           <h2>{{ selectedConversation?.title || '求职助手' }}</h2>
@@ -2335,6 +2722,10 @@ onMounted(() => {
             @click="toggleCompactPanel('context')"
           >职位信息</button>
         </div>
+        <button v-if="!selectedConversation" type="button" class="chat-material-button" title="查看 BOSS 会话与 HR 回复" @click="emit('navigate', '/career/messages')">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v12H9l-5 4V5Z"/><path d="M8 9h8M8 13h5"/></svg>
+          <span>招聘沟通</span>
+        </button>
         <div v-if="selectedConversation" class="chat-material-actions" aria-label="求职资料快捷操作">
           <button
             v-if="onlineAssessmentVisible"
@@ -2367,6 +2758,10 @@ onMounted(() => {
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5h16v10H9l-5 4z"/><path d="M8 9.5h8M8 12.5h5"/></svg>
             <span>一键打招呼</span>
           </button>
+          <button type="button" class="chat-material-button" title="查看 BOSS 会话与 HR 回复" @click="emit('navigate', '/career/messages')">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v12H9l-5 4V5Z"/><path d="M8 9h8M8 13h5"/></svg>
+            <span>招聘沟通</span>
+          </button>
           <button
             ref="jobSearchButton"
             type="button"
@@ -2382,6 +2777,11 @@ onMounted(() => {
         </div>
       </header>
 
+      <section v-if="sharedMaterial" class="shared-material-pending" aria-label="待导入分享资料">
+        <div><strong>有一份{{ sharedMaterial.type === 'resume' ? '简历' : '岗位' }}资料待导入</strong><p>{{ selectedConversation ? '将导入到当前会话，请在表单中解析、校对并确认。' : '先选择已有会话，或开启新对话，再导入分享资料。' }}</p></div>
+        <button type="button" :disabled="!selectedConversation || creating" @click="importSharedMaterial">导入到当前会话</button>
+        <button type="button" @click="emit('shared-material-used')">取消导入</button>
+      </section>
       <section v-if="feedback" class="notice success">{{ feedback }}</section>
 
       <section v-if="!selectedConversation" class="empty-state">
@@ -2391,20 +2791,37 @@ onMounted(() => {
       </section>
 
       <section v-else ref="messageListRef" class="message-list" aria-live="polite">
-        <article v-if="!messages.length" class="agent-message">
+        <article v-if="!visibleMessages.length && !sending" class="agent-message">
           <header class="message-role"><i aria-hidden="true">职</i><strong>求职助手</strong></header>
           <CareerMessageContent :content="welcomeMessage" />
         </article>
-        <article v-for="message in messages" :key="message.id" class="message" :class="[message.role === 'user' ? 'from-user' : 'from-agent', message.local_state ? `message-${message.local_state}` : '']" :aria-label="message.role === 'user' ? '你的消息' : '求职助手消息'">
+        <article v-for="message in visibleMessages" :key="message.id" class="message" :class="[message.role === 'user' ? 'from-user' : 'from-agent', message.local_state ? `message-${message.local_state}` : '', { 'message-with-job-search': message.ui_payload?.type === 'job_search' }]" :aria-label="message.role === 'user' ? '你的消息' : '求职助手消息'">
           <header v-if="message.role !== 'user'" class="message-role">
             <i aria-hidden="true">职</i><strong>求职助手</strong>
             <span v-if="messageModelLabel(message)" class="message-model-label" title="本条回复的实际调用模型">{{ messageModelLabel(message) }}</span>
           </header>
           <CareerMessageContent :content="message.content" />
+          <div v-if="message.role === 'assistant' && messageJobRefs(message).length" class="job-reference-actions">
+            <button v-for="jobRef in messageJobRefs(message)" :key="jobRef" type="button" @click="openJobReference(message, jobRef)">查看岗位 {{ jobRef }}</button>
+          </div>
+          <CareerJobSearchCard v-if="referencedSearch?.messageId === message.id" :key="referencedSearch.card.id"
+            :message="referencedSearch.card" :search-session="currentSearchSession()" :active="false"
+            @confirm="confirmJobFromLibrary($event)" />
+          <CareerJobSearchCard
+            v-if="message.ui_payload?.type === 'job_search'"
+            :message="message"
+            :search-session="currentSearchSession()"
+            :active="message.id === activeJobSearchCardId"
+            :fresh="freshJobSearchCards.has(message.id)"
+            :busy="confirmingJobCardId === message.id"
+            :error="jobCardErrors[message.id] || ''"
+            @confirm="confirmJobFromLibrary($event, message)"
+            @state-change="saveJobSearchCard(message, $event)"
+          />
           <small class="message-time">{{ formatDate(message.created_at) }}<template v-if="message.local_state === 'sending'"> · 正在发送</template><template v-else-if="message.local_state === 'queued'"> · 等待回复</template><template v-else-if="message.local_state === 'failed'"> · 发送失败</template></small>
         </article>
         <article v-if="sending" class="agent-message agent-pending">
-          <div class="stream-pending-heading"><div class="message-role"><i aria-hidden="true">职</i><strong>求职助手</strong></div><span>正在思考</span></div>
+          <div class="stream-pending-heading"><div class="message-role"><i aria-hidden="true">职</i><strong>求职助手</strong></div><span>{{ readingResume ? '正在阅读简历' : '正在思考' }}</span></div>
           <ol v-if="streamProgress.length" class="stream-progress-list" aria-label="处理进展">
             <li v-for="progress in streamProgress" :key="progress.key" class="stream-progress-item" :class="progress.state"><i></i><span>{{ progress.label }}</span></li>
           </ol>
@@ -2424,37 +2841,53 @@ onMounted(() => {
       </section>
 
       <footer class="composer">
-        <div class="composer-toolbar" aria-label="会话与材料工具">
-          <div class="input-tools">
-            <button v-if="selectedConversation" class="chip-button active-context-chip" :class="{ active: conversationContext }" type="button" @click="openContextSetup">{{ contextButtonLabel }}</button>
-            <select class="model-select" :value="modelSelectionValue" :disabled="!hasReadyModel" aria-label="本轮模型选择" @change="chooseModel">
-              <option v-if="!hasReadyModel" value="">尚未配置可用模型</option>
-              <option v-if="hasReadyFreeModel" value="free_quota_first">【免费】自动选择</option>
-              <optgroup v-if="readyFreeModelProfiles.length" label="已接入的免费模型">
-                <option v-for="item in readyFreeModelProfiles" :key="item.profile.id" :value="item.profile.id">【免费】{{ modelChoiceLabel(item) }}</option>
-              </optgroup>
-              <optgroup v-if="readyPaidModelProfiles.length" label="已接入的付费模型">
-                <option v-for="item in readyPaidModelProfiles" :key="item.profile.id" :value="item.profile.id">【付费】{{ modelChoiceLabel(item) }}</option>
-              </optgroup>
-              <optgroup v-if="readyLocalModelProfiles.length" label="已接入的本地模型">
-                <option v-for="item in readyLocalModelProfiles" :key="item.profile.id" :value="item.profile.id">【本地】{{ modelChoiceLabel(item) }}</option>
-              </optgroup>
-            </select>
-            <button class="chip-button free-model-entry-button" type="button" @click="openFreeModelDirectory">{{ hasReadyModel ? '免费模型' : '配置模型' }}</button>
+        <div class="composer-card">
+          <div class="composer-materials" aria-label="对话资料">
+            <button class="composer-material-button active-context-chip" :class="{ active: hasCandidateContext }" :disabled="!selectedConversation || turnInputBlocked" type="button" :title="contextButtonLabel" @click="openComposerMaterial('resume')"><Document aria-hidden="true" /><span>{{ hasCandidateContext ? '简历已添加' : '添加简历' }}</span><Plus aria-hidden="true" /></button>
+            <button class="composer-material-button" :class="{ active: hasTargetContext }" :disabled="!selectedConversation || turnInputBlocked" type="button" @click="openComposerMaterial('target')"><Briefcase aria-hidden="true" /><span>{{ hasTargetContext ? '目标岗位已添加' : '添加目标岗位' }}</span><Plus aria-hidden="true" /></button>
+            <div v-if="currentUser?.role === 'admin'" class="composer-settings" @keydown.esc.stop="mobileToolsOpen = false">
+              <button class="composer-material-button composer-model-config" type="button" :aria-expanded="mobileToolsOpen" aria-controls="career-composer-tools" @click="mobileToolsOpen = !mobileToolsOpen"><Setting aria-hidden="true" /><span>模型配置</span><ArrowDown aria-hidden="true" /></button>
+              <div v-show="mobileToolsOpen" id="career-composer-tools" class="composer-toolbar composer-tools-menu" :class="{ 'mobile-tools-open': mobileToolsOpen }" aria-label="会话与材料工具">
+                <button class="chip-button free-model-entry-button" type="button" @click="openFreeModelDirectory">{{ hasReadyModel ? '免费模型' : '配置模型' }}</button>
+                <button class="quiet-button model-manager-button" type="button" @click="openModelDialog">模型连接</button>
+              </div>
+            </div>
           </div>
-          <div class="session-tools">
-            <button class="quiet-button model-manager-button" type="button" @click="openModelDialog">模型连接</button>
+          <input ref="resumeInput" class="resume-input" type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png,.webp,.bmp,.tif,.tiff" @change="handleResumeFile" />
+          <div v-if="resumeFile" class="composer-attachment" role="status"><Paperclip aria-hidden="true" /><span>{{ resumeFile.name }}</span><button type="button" aria-label="移除附件" @click="clearResumeFile"><Close aria-hidden="true" /></button></div>
+          <div class="composer-input-shell">
+            <div ref="composerHighlightLayer" class="composer-highlight-layer" aria-hidden="true">
+              <template v-for="(segment, index) in composerHighlightSegments" :key="`${index}-${segment.kind}`">
+                <mark v-if="segment.kind !== 'plain'" :class="`composer-highlight-${segment.kind}`">{{ segment.text }}</mark>
+                <span v-else>{{ segment.text }}</span>
+              </template>
+              <br v-if="composerDisplayText.endsWith('\n')" />
+            </div>
+            <textarea v-model="messageText" aria-label="求职咨询内容" :disabled="!selectedConversation || turnInputBlocked" :placeholder="composerPlaceholder" rows="3" @input="syncComposerHighlightInput" @scroll="syncComposerHighlightScroll" @keydown="handleComposerKeydown" />
           </div>
-        </div>
-        <div class="composer-input-shell">
-          <div ref="composerHighlightLayer" class="composer-highlight-layer" aria-hidden="true">
-            <template v-for="(segment, index) in composerHighlightSegments" :key="`${index}-${segment.kind}`">
-              <mark v-if="segment.kind !== 'plain'" :class="`composer-highlight-${segment.kind}`">{{ segment.text }}</mark>
-              <span v-else>{{ segment.text }}</span>
-            </template>
-            <br v-if="composerDisplayText.endsWith('\n')" />
+          <div class="composer-controls">
+            <div class="composer-primary-tools">
+              <button class="composer-icon-button" type="button" aria-label="添加附件" title="添加附件" :disabled="!selectedConversation || turnInputBlocked" @click="resumeInput?.click()"><Paperclip aria-hidden="true" /></button>
+              <select class="model-select" :value="modelSelectionValue" :disabled="!hasReadyModel" aria-label="本轮模型选择" @change="chooseModel">
+                <option v-if="platformDefaultProfile" :value="platformDefaultProfile.profile.id">{{ platformDefaultLabel }}</option>
+                <option v-else value="platform_default">{{ platformDefaultLabel }}（暂不可用，请联系管理员）</option>
+                <option v-if="hasReadyFreeModel" value="free_quota_first">【免费】自动选择</option>
+                <optgroup v-if="readyFreeModelProfiles.length" label="已接入的免费模型">
+                  <option v-for="item in readyFreeModelProfiles" :key="item.profile.id" :value="item.profile.id">【免费】{{ modelChoiceLabel(item) }}</option>
+                </optgroup>
+                <optgroup v-if="readyPaidModelProfiles.length" label="已接入的付费模型">
+                  <option v-for="item in readyPaidModelProfiles" :key="item.profile.id" :value="item.profile.id">【付费】{{ modelChoiceLabel(item) }}</option>
+                </optgroup>
+                <optgroup v-if="readyLocalModelProfiles.length" label="已接入的本地模型">
+                  <option v-for="item in readyLocalModelProfiles" :key="item.profile.id" :value="item.profile.id">【本地】{{ modelChoiceLabel(item) }}</option>
+                </optgroup>
+              </select>
+            </div>
+            <div class="composer-submit-tools">
+              <CareerContextMeter v-if="contextUsage" :usage="contextUsage" :loading="contextUsageLoading" class="composer-context-meter" />
+              <button class="send-button" type="button" :disabled="!selectedConversation || turnInputBlocked" :aria-label="sending ? '回复中' : '发送'" :title="sending ? '回复中' : '发送'" :aria-busy="sending" @click="sendMessage"><Top aria-hidden="true" /></button>
+            </div>
           </div>
-          <textarea v-model="messageText" aria-label="求职咨询内容" :disabled="!selectedConversation || turnInputBlocked" :placeholder="composerPlaceholder" rows="3" @input="syncComposerHighlightInput" @scroll="syncComposerHighlightScroll" @keydown.enter.exact.prevent="sendMessage" />
         </div>
         <div v-if="skillMentionResults.length" class="interview-mention-menu skill-invocation-menu" role="listbox" aria-label="Skill 候选">
           <p class="suggestion-menu-label">技能库 · 选择后将 SKILL.md 挂载到本轮模型上下文</p>
@@ -2473,17 +2906,14 @@ onMounted(() => {
           <span>{{ sending ? '当前回复完成后可继续发送' : turnLimitView.message }}</span>
           <button v-if="turnLimitView.blocked" class="quiet-button" type="button" @click="startNewConversation">开启新对话</button>
         </div>
-        <div class="composer-footer">
-          <small>当前模型：{{ modelLabel }}。输入 @ 可引用面经，输入 / 可调用 Skill；每条消息都会保存，并按发送顺序回复。</small>
-          <div class="composer-submit-tools">
-            <CareerContextMeter :usage="contextUsage" :loading="contextUsageLoading" class="composer-context-meter" />
-            <button class="send-button" type="button" :disabled="!selectedConversation || turnInputBlocked" @click="sendMessage">{{ sending ? '回复中' : '发送' }}</button>
-          </div>
-        </div>
+        <div class="composer-suggestions" aria-label="快捷提问"><button v-for="suggestion in composerSuggestions" :key="suggestion.label" type="button" :disabled="!selectedConversation || turnInputBlocked" @click="applyComposerSuggestion(suggestion.text)"><component :is="suggestion.icon" aria-hidden="true" />{{ suggestion.label }}</button></div>
+        <div class="composer-footer"><small>{{ mobileBrowser ? 'Enter 换行 · 点击发送' : 'Enter 发送 · Shift+Enter 换行 · ↑/↓ 历史输入' }}</small><small>@ 引用面经 · / 调用技能</small></div>
       </footer>
     </section>
 
-    <div v-if="conversationContext" id="career-context-panel" class="context-rail-slot">
+    <div v-if="conversationContext" id="career-context-panel" class="context-rail-slot"
+      :inert="layoutMode !== 'wide' && compactPanel !== 'context'"
+      :aria-hidden="layoutMode !== 'wide' && compactPanel !== 'context'">
       <button
         ref="contextDrawerClose"
         class="compact-panel-close context-panel-close"
@@ -2509,6 +2939,8 @@ onMounted(() => {
       ><i></i></button>
       <CareerContextRail
         :context="conversationContext"
+        :retrying="retryingAssessment"
+        :retry-error="assessmentRetryError"
         :selected-conversation="selectedConversation"
         :wide="visibleContextRailWidth >= 580"
         @adjust="openTargetAdjustment"
@@ -2526,10 +2958,15 @@ onMounted(() => {
   </section>
 
   <CareerContextSetupDialog
+    ref="contextSetupRef"
     :open="showContextSetup"
     :busy="creating"
     :candidate-profiles="candidateProfiles"
+    :show-resume-owner="currentUser?.role === 'admin'"
     :initial-context="contextSetupInitial"
+    :initial-entry="contextSetupEntry"
+    :initial-draft="contextSetupDraft?.draft"
+    @preserve-draft="preserveContextSetupDraft"
     @cancel="closeContextSetup"
     @ready="applyCareerContext"
     @profile-created="addCandidateProfile"
@@ -2656,6 +3093,7 @@ onMounted(() => {
               <label v-if="!usesPresetEndpoint" class="full-width">请求地址（API Base URL）<span>填写到 API Base URL 层级，不要附加 /chat/completions。</span><input v-model="modelForm.apiBaseUrl" placeholder="https://your-api-endpoint/v1" @input="invalidateConnectionTest" /></label>
             </div>
             <fieldset class="capability-fieldset"><legend>模型能力</legend><label class="capability-option"><input v-model="modelForm.text" type="checkbox" @change="invalidateConnectionTest" /> <span><strong>文字与 PDF 文本</strong><small>用于职位匹配、简历建议和面试准备</small></span></label><label class="capability-option"><input v-model="modelForm.vision" type="checkbox" @change="invalidateConnectionTest" /> <span><strong>图片简历</strong><small>仅在当前模型确实支持视觉输入时勾选</small></span></label><label class="capability-option"><input v-model="modelForm.tools" type="checkbox" @change="invalidateConnectionTest" /> <span><strong>Tool Calling</strong><small>模型确认支持 function tools 时勾选；未支持时只能执行 Skill 的文字工作流</small></span></label></fieldset>
+            <p v-if="kimiModelIdHint" class="model-id-normalization-hint">{{ kimiModelIdHint }}</p>
             <p v-if="connectionTestMessage" class="connection-test-success">{{ connectionTestMessage }}</p>
             <p v-if="connectionTestError" class="connection-test-error" role="alert"><strong>连接测试未通过</strong>{{ connectionTestError }}</p>
             <p v-if="connectionSaveError" class="connection-test-error" role="alert"><strong>保存模型连接失败</strong>{{ connectionSaveError }}</p>
@@ -2673,14 +3111,15 @@ onMounted(() => {
 </template>
 
 <style scoped>
-.career-workspace { display:grid; height:100%; min-height:0; flex:1; grid-template-columns:300px minmax(0,1fr); gap:14px; overflow:hidden; }
-.career-workspace.has-context-rail { grid-template-columns:300px minmax(560px,1fr) var(--context-rail-width,620px); }
+.shared-material-pending{display:flex;flex-wrap:wrap;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid var(--ui-line);background:var(--ui-surface-active);color:var(--ui-text);font-size:14px;flex:none}.shared-material-pending>div{flex:1 1 220px;min-width:0}.shared-material-pending p{margin:4px 0 0;line-height:1.5;color:var(--ui-text-secondary)}.shared-material-pending button{min-height:40px;padding:8px 12px;border:1px solid var(--ui-line-strong);border-radius:8px;background:var(--ui-surface);color:var(--ui-accent-ink);font:inherit;cursor:pointer}.shared-material-pending button:disabled{opacity:.5;cursor:default}
+.career-workspace { display:grid; height:100%; min-height:0; flex:1; grid-template-columns:220px minmax(0,1fr); gap:8px; overflow:hidden; }
+.career-workspace.has-context-rail { grid-template-columns:220px minmax(640px,1fr) var(--context-rail-width,620px); }
 .career-workspace.history-collapsed { grid-template-columns:52px minmax(0,1fr); }
-.career-workspace.has-context-rail.history-collapsed { grid-template-columns:52px minmax(560px,1fr) var(--context-rail-width,620px); }
+.career-workspace.has-context-rail.history-collapsed { grid-template-columns:52px minmax(640px,1fr) var(--context-rail-width,620px); }
 .career-history-panel,.career-chat-panel { border:1px solid #e0e6d8; border-radius:20px; background:#fff; box-shadow:none; }
 .compact-panel-triggers,.compact-panel-close,.career-panel-scrim{display:none}
 .compact-panel-trigger,.compact-panel-close{min-width:40px;min-height:40px;border:1px solid #dbe5d2;border-radius:11px;background:#fff;color:#557044;font-size:12px;font-weight:850}
-.context-rail-slot{position:relative;height:100%;min-width:0;min-height:0;overflow:visible}.context-rail-slot>:deep(.context-rail){height:100%;max-height:100%}.context-rail-resizer{position:absolute;z-index:30;top:0;bottom:0;left:-13px;width:12px;border:0;background:transparent;padding:0;cursor:col-resize;touch-action:none}.context-rail-resizer:before{position:absolute;top:0;bottom:0;left:5px;width:2px;border-radius:999px;background:transparent;content:"";transition:background .15s ease,box-shadow .15s ease}.context-rail-resizer i{position:absolute;top:50%;left:1px;display:block;width:10px;height:42px;transform:translateY(-50%);border:1px solid var(--ui-line-strong);border-radius:999px;background:var(--ui-surface);box-shadow:0 3px 12px rgba(31,60,96,.1)}.context-rail-resizer i:after{position:absolute;top:50%;left:3px;width:2px;height:18px;transform:translateY(-50%);border-radius:999px;background:var(--ui-accent);content:""}.context-rail-resizer:hover:before,.context-rail-resizer:focus-visible:before,.resizing-context-rail .context-rail-resizer:before{background:var(--ui-accent);box-shadow:0 0 0 3px var(--ui-focus)}.context-rail-resizer:focus-visible{outline:0}
+.context-rail-slot{position:relative;height:100%;min-width:0;min-height:0;overflow:visible}.context-rail-slot>:deep(.context-rail){height:100%;max-height:100%}.context-rail-resizer{position:absolute;z-index:30;top:0;bottom:0;left:-8px;width:8px;border:0;background:transparent;padding:0;cursor:col-resize;touch-action:none}.context-rail-resizer:before{position:absolute;top:0;bottom:0;left:3px;width:2px;border-radius:999px;background:transparent;content:"";transition:background .15s ease,box-shadow .15s ease}.context-rail-resizer i{position:absolute;top:50%;left:1px;display:block;width:6px;height:42px;transform:translateY(-50%);border:1px solid var(--ui-line-strong);border-radius:999px;background:var(--ui-surface);box-shadow:0 3px 12px rgba(31,60,96,.1)}.context-rail-resizer i:after{position:absolute;top:50%;left:1px;width:2px;height:18px;transform:translateY(-50%);border-radius:999px;background:var(--ui-accent);content:""}.context-rail-resizer:hover:before,.context-rail-resizer:focus-visible:before,.resizing-context-rail .context-rail-resizer:before{background:var(--ui-accent);box-shadow:0 0 0 3px var(--ui-focus)}.context-rail-resizer:focus-visible{outline:0}
 .career-history-panel { display:flex; height:100%; min-height:0; flex-direction:column; gap:0; overflow:hidden; padding:14px; }
 .career-history-panel.collapsed{align-items:center;gap:9px;padding:10px 7px;border-radius:16px}.history-actions{display:grid;grid-template-columns:minmax(0,1fr) 34px;gap:7px;margin-bottom:14px}.history-collapse-button,.history-rail-button{display:grid;place-items:center;border:1px solid var(--ui-line);border-radius:10px;background:var(--ui-surface-soft);color:var(--ui-text-secondary);font-size:22px;font-weight:850;cursor:pointer}.history-collapse-button:hover,.history-rail-button:hover{border-color:var(--ui-accent);background:var(--ui-surface-active);color:var(--ui-accent-ink)}.history-rail-button{width:36px;height:36px}.history-rail-button.primary{border-color:var(--ui-accent);background:var(--ui-accent);color:#fff;font-size:18px}.history-rail-button:disabled{cursor:wait;opacity:.6}.history-rail-count{display:grid;min-width:25px;height:25px;place-items:center;border-radius:999px;background:var(--ui-surface-soft);color:var(--ui-text-muted);font-size:10px;font-weight:850}
 .primary-button,.send-button { border:0; border-radius:13px; background:#89a93e; color:#fff; font-weight:800; }
@@ -2693,8 +3132,8 @@ onMounted(() => {
 .conversation-menu-button { align-self:center; border:0; border-radius:7px; background:transparent; color:var(--ui-text-muted); padding:5px 7px; font-size:15px; font-weight:900; line-height:1; opacity:0; cursor:pointer; transition:opacity .14s ease,background .14s ease,color .14s ease; }.conversation-item:hover .conversation-menu-button,.conversation-item.active .conversation-menu-button,.conversation-menu-button:focus-visible,.conversation-menu-button[aria-expanded="true"]{opacity:1}.conversation-menu-button:hover,.conversation-menu-button[aria-expanded="true"] { background:var(--ui-surface); color:var(--ui-accent-ink); }.conversation-menu-button:focus-visible{outline:3px solid var(--ui-focus);outline-offset:1px}.conversation-menu-button:disabled { cursor:not-allowed; opacity:.45; }
 .conversation-action-menu { display:grid; grid-column:1 / -1; gap:9px; border-top:1px solid var(--ui-line); background:var(--ui-surface); padding:10px; }.conversation-action-menu label { display:grid; gap:5px; color:var(--ui-text-secondary); font-size:11px; font-weight:800; }.conversation-action-menu input { width:100%; box-sizing:border-box; border:1px solid var(--ui-line); border-radius:8px; background:var(--ui-surface); color:var(--ui-text); padding:8px 9px; font:inherit; }.conversation-action-menu input:focus { border-color:var(--ui-accent); box-shadow:0 0 0 3px var(--ui-focus); outline:0; }.conversation-action-menu p { display:grid; gap:3px; margin:0; }.conversation-action-menu p strong { color:var(--ui-text); font-size:12px; }.conversation-action-menu p span { color:var(--ui-text-muted); font-size:11px; line-height:1.5; }
 .conversation-action-options,.conversation-action-buttons { display:flex; gap:7px; }.conversation-action-buttons { justify-content:flex-end; }.conversation-action-menu button { border:1px solid var(--ui-line); border-radius:7px; background:var(--ui-surface); color:var(--ui-text-secondary); padding:7px 9px; font-size:11px; font-weight:800; cursor:pointer; }.conversation-action-options button { flex:1; }.conversation-action-menu button:hover { background:var(--ui-surface-soft); }.conversation-action-menu button.primary { border-color:var(--ui-accent); background:var(--ui-accent); color:#fff; }.conversation-action-menu button.danger { border-color:#efcaca; background:#fff6f6; color:#b54747; }.conversation-action-menu button:disabled { cursor:wait; opacity:.6; }
-.history-pagination-shell{min-height:76px;flex:0 0 auto;margin-top:10px;border-top:1px solid var(--ui-line);border-bottom:1px solid var(--ui-line);padding:8px 4px}.history-pagination-shell :deep(.el-pagination){display:grid;width:100%;box-sizing:border-box;grid-template-columns:28px minmax(0,1fr) 28px;grid-template-rows:28px 28px;align-items:center;gap:6px 4px;--el-color-primary:var(--ui-accent);--el-pagination-button-width:28px;--el-pagination-button-height:28px;--el-pagination-button-bg-color:var(--ui-surface-soft);--el-pagination-hover-color:var(--ui-accent-ink);font-family:inherit}.history-pagination-shell :deep(.el-pagination__total){grid-column:1 / 3;grid-row:1;justify-self:start;margin:0;color:var(--ui-text-muted);font-size:11px;font-weight:750}.history-pagination-shell :deep(.el-pagination__sizes){grid-column:2 / 4;grid-row:1;justify-self:end;margin:0}.history-pagination-shell :deep(.el-pagination__sizes .el-select){width:94px}.history-pagination-shell :deep(.el-pagination__sizes .el-select__wrapper){min-height:28px;border-radius:6px;box-shadow:0 0 0 1px var(--ui-line) inset}.history-pagination-shell :deep(.btn-prev){grid-column:1;grid-row:2}.history-pagination-shell :deep(.el-pager){grid-column:2;grid-row:2;min-width:0;justify-self:center}.history-pagination-shell :deep(.btn-next){grid-column:3;grid-row:2}.history-pagination-shell :deep(.btn-prev),.history-pagination-shell :deep(.btn-next),.history-pagination-shell :deep(.el-pager li){border-radius:6px;font-weight:750}.history-pagination-shell :deep(.el-pager li.is-active){box-shadow:0 3px 8px rgba(8,103,217,.2)}.history-pagination-shell :deep(button:focus-visible),.history-pagination-shell :deep(.el-select__wrapper.is-focused){outline:3px solid var(--ui-focus);outline-offset:1px}.privacy-note{display:flex;min-height:44px;flex:0 0 auto;align-items:center;gap:7px;padding:8px 7px 0;color:var(--ui-text-muted)}.privacy-note>span{display:grid;width:20px;height:20px;flex:0 0 auto;place-items:center;border-radius:6px;background:var(--ui-surface-active);color:var(--ui-accent-ink);font-size:9px;font-weight:850}.privacy-note p{margin:0;font-size:9px;line-height:1.45}.eyebrow { color:var(--ui-accent-ink); font-size:9px; font-weight:900; letter-spacing:.08em; }
-.career-chat-panel { display:flex; height:100%; min-height:0; flex-direction:column; overflow:hidden; }.chat-header { display:flex; min-height:68px; align-items:center; border-bottom:1px solid #e3ebf5; padding:10px 14px 10px 20px; background:#fbfdff; }.chat-header>div:first-child{min-width:0}.chat-header h2,.model-settings h3,.empty-state h2 { margin:3px 0 0; color:#10294c; }.active-context-line{display:flex;align-items:center;gap:7px;margin:5px 0 0;color:#6d7f98;font-size:11px;font-weight:750}.active-context-line span{max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.active-context-line i{color:#0a67db;font-style:normal}.eyebrow { margin:0; }
+.history-pagination-shell{min-height:76px;flex:0 0 auto;margin-top:10px;border-top:1px solid var(--ui-line);border-bottom:1px solid var(--ui-line);padding:8px 4px}.history-pagination-shell :deep(.el-pagination){display:grid;width:100%;box-sizing:border-box;grid-template-columns:28px minmax(0,1fr) 28px;grid-template-rows:28px 28px;align-items:center;gap:6px 4px;--el-color-primary:var(--ui-accent);--el-pagination-button-width:28px;--el-pagination-button-height:28px;--el-pagination-button-bg-color:var(--ui-surface-soft);--el-pagination-hover-color:var(--ui-accent-ink);font-family:inherit}.history-pagination-shell :deep(.el-pagination__total){grid-column:1 / 3;grid-row:1;justify-self:start;margin:0;color:var(--ui-text-muted);font-size:11px;font-weight:750}.history-pagination-shell :deep(.el-pagination__sizes){grid-column:2 / 4;grid-row:1;justify-self:end;margin:0}.history-pagination-shell :deep(.el-pagination__sizes .el-select){width:94px}.history-pagination-shell :deep(.el-pagination__sizes .el-select__wrapper){min-height:28px;border-radius:6px;box-shadow:0 0 0 1px var(--ui-line) inset}.history-pagination-shell :deep(.btn-prev){grid-column:1;grid-row:2}.history-pagination-shell :deep(.el-pagination__jump){grid-column:2;grid-row:2;min-width:0;justify-self:center;margin:0;font-size:11px}.history-pagination-shell :deep(.el-pagination__editor){width:36px;min-width:36px;margin-inline:4px}.history-pagination-shell :deep(.btn-next){grid-column:3;grid-row:2}.history-pagination-shell :deep(.btn-prev),.history-pagination-shell :deep(.btn-next),.history-pagination-shell :deep(.el-pager li){border-radius:6px;font-weight:750}.history-pagination-shell :deep(.el-pager li.is-active){box-shadow:0 3px 8px rgba(8,103,217,.2)}.history-pagination-shell :deep(button:focus-visible),.history-pagination-shell :deep(.el-select__wrapper.is-focused){outline:3px solid var(--ui-focus);outline-offset:1px}.eyebrow { color:var(--ui-accent-ink); font-size:9px; font-weight:900; letter-spacing:.08em; }
+.career-chat-panel { display:flex; height:100%; min-height:0; flex-direction:column; overflow:hidden; }.chat-header { display:flex; min-height:52px; flex-wrap:wrap; align-items:center; border-bottom:1px solid #e3ebf5; padding:7px 14px 7px 16px; background:#fbfdff; }.chat-header>div:first-child{min-width:0;flex:1 1 220px}.model-settings h3,.empty-state h2 { margin:3px 0 0; color:#10294c; }.chat-header h2 { margin:0; color:#10294c; font-size:18px; line-height:1.4; }.active-context-line{display:flex;align-items:center;gap:7px;margin:5px 0 0;color:#6d7f98;font-size:11px;font-weight:750}.active-context-line span{max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.active-context-line i{color:#0a67db;font-style:normal}.eyebrow { margin:0; }
 .chat-material-actions{display:flex;flex:none;align-items:center;gap:7px}.chat-material-button{position:relative;display:inline-flex;min-height:38px;align-items:center;justify-content:center;gap:7px;border:1px solid var(--ui-line-strong,#bfd2ea);border-radius:9px;background:var(--ui-surface,#fff);color:var(--ui-text-secondary,#526078);padding:8px 12px;font:800 12px/1 var(--ui-font-body,"Segoe UI",sans-serif);white-space:nowrap;cursor:pointer;transition:border-color .15s ease,background .15s ease,color .15s ease,box-shadow .15s ease}.chat-material-button svg{width:16px;height:16px;flex:none;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}.chat-material-button:hover:not(:disabled),.chat-material-button:focus-visible{border-color:var(--ui-accent,#0869d8);background:var(--ui-surface-active,#eaf3ff);color:var(--ui-accent-ink,#004aa8);box-shadow:0 0 0 3px var(--ui-focus,rgba(8,105,216,.14));outline:0}.chat-material-button.primary{border-color:var(--ui-accent,#0869d8);background:var(--ui-accent,#0869d8);color:#fff;padding-right:14px;padding-left:14px}.chat-material-button.primary:hover:not(:disabled),.chat-material-button.primary:focus-visible{background:var(--ui-accent-strong,#0056bd);color:#fff}.chat-material-button:disabled{cursor:wait;opacity:.58}.material-state-dot{width:6px;height:6px;flex:none;border-radius:50%;background:var(--ui-success,#21855b);box-shadow:0 0 0 2px var(--ui-success-soft,#e8f7f0)}
 .chat-material-button.interview-master{border-color:#9fc4f0;background:#edf6ff;color:#075dbd}.chat-material-button.interview-master:hover:not(:disabled),.chat-material-button.interview-master:focus-visible{border-color:#0869d8;background:#deedff;color:#004da8}
 .chat-material-button.online-assessment{border-color:#a8c5ea;background:#f1f6fd;color:#165aab}.chat-material-button.online-assessment:hover:not(:disabled),.chat-material-button.online-assessment:focus-visible{border-color:#176fe5;background:#e6f1ff;color:#0d4fa8}
@@ -2709,6 +3148,7 @@ onMounted(() => {
 .message-list { display:flex; flex:1; flex-direction:column; gap:16px; overflow-y:auto; overscroll-behavior:contain; padding:22px 24px; }
 .message,.agent-message { box-sizing:border-box; max-width:min(820px,86%); padding:14px 16px; }
 .agent-message,.message.from-agent { align-self:flex-start; border:1px solid var(--ui-line); border-left:3px solid var(--ui-accent); border-radius:5px 13px 13px 5px; background:var(--ui-surface); box-shadow:0 8px 24px rgba(27,51,92,.045); }
+.message.message-with-job-search { width:100%; max-width:100%; }
 .message.from-user { width:fit-content; max-width:min(620px,72%); align-self:flex-end; border:1px solid #cfe0f5; border-radius:14px 14px 4px 14px; background:#edf5ff; padding:12px 15px 9px; box-shadow:none; }
 .message-role { display:flex; align-items:center; gap:7px; margin-bottom:10px; color:var(--ui-text-secondary); }
 .message-role i { display:grid; width:24px; height:24px; flex:0 0 auto; place-items:center; border-radius:7px; background:var(--ui-surface-active); color:var(--ui-accent-ink); font-size:11px; font-style:normal; font-weight:900; }
@@ -2720,7 +3160,7 @@ onMounted(() => {
 .message-scroll-anchor { display:block; width:100%; height:1px; pointer-events:none; }
 .turn-queue-preview{display:grid;width:min(560px,86%);gap:7px;border:1px dashed var(--ui-line-strong);border-radius:12px;background:var(--ui-surface-soft);padding:10px 12px;color:var(--ui-text-secondary)}.turn-queue-preview>strong{font-size:11px}.turn-queue-preview article{display:grid;grid-template-columns:20px minmax(0,1fr) auto;align-items:start;gap:7px}.turn-queue-preview article span{display:grid;width:18px;height:18px;place-items:center;border-radius:50%;background:var(--ui-surface-active);color:var(--ui-accent-ink);font-size:10px;font-weight:850}.turn-queue-preview article p{overflow:hidden;margin:0;font-size:12px;line-height:1.45;text-overflow:ellipsis;white-space:nowrap}.turn-queue-preview article small{border-radius:999px;background:#fff;padding:2px 6px;color:var(--ui-text-muted);font-size:10px;font-weight:800}
 @keyframes career-thinking-spin { to { transform:rotate(360deg); } }
-.composer { border-top:1px solid #edf0e7; background:#fff; padding:12px 16px 14px; }.composer-toolbar { min-height:36px; flex-wrap:wrap; border-bottom:1px solid #edf0e7; padding-bottom:9px; }.input-tools,.session-tools { display:flex; min-width:0; flex-wrap:wrap; align-items:center; gap:7px; }.session-tools { margin-left:auto; justify-content:flex-end; }.job-url-row { display:grid; grid-template-columns:auto 1fr; align-items:center; gap:8px; margin:10px 0 9px; color:#738068; font-size:12px; font-weight:800; }.job-url-row input,.composer textarea { padding:10px 11px; }.composer textarea { display:block; min-height:68px; resize:vertical; }.composer-footer { margin-top:9px; }.composer-submit-tools { display:flex; flex:none; align-items:center; gap:10px; }.input-tools { justify-content:flex-start; }.resume-input { display:none; }.chip-button.active { max-width:240px; overflow:hidden; background:#eaf4d4; color:#5a7d21; text-overflow:ellipsis; white-space:nowrap; }.file-clear-button { border-color:#f0d5d5; background:#fff8f8; color:#a65a5a; }.free-model-entry-button { border-style:dashed; background:#fff; color:#62812d; }.free-model-entry-button:hover { border-color:#9fbd67; background:#f5f9ed; }.model-select { width:auto; max-width:300px; padding:7px 9px; color:#65775a; font-size:12px; font-weight:700; }.send-button { min-width:88px; padding:9px 13px; }.composer-footer > small { color:#98a18e; font-size:11px; }
+.composer { border-top:1px solid #edf0e7; background:#fff; padding:12px 16px 14px; }.composer-toolbar { min-height:36px; flex-wrap:wrap; border-bottom:1px solid #edf0e7; padding-bottom:9px; }.input-tools,.session-tools { display:flex; min-width:0; flex-wrap:wrap; align-items:center; gap:7px; }.session-tools { margin-left:auto; justify-content:flex-end; }.job-url-row { display:grid; grid-template-columns:auto 1fr; align-items:center; gap:8px; margin:10px 0 9px; color:#738068; font-size:12px; font-weight:800; }.job-url-row input,.composer textarea { padding:10px 11px; }.composer textarea { display:block; min-height:68px; resize:vertical; }.composer-footer { margin-top:9px; }.composer-submit-tools { display:flex; flex:none; align-items:center; gap:10px; }.input-tools { justify-content:flex-start; }.resume-input { display:none; }.chip-button.active { max-width:240px; overflow:hidden; background:#eaf4d4; color:#5a7d21; text-overflow:ellipsis; white-space:nowrap; }.file-clear-button { border-color:#f0d5d5; background:#fff8f8; color:#a65a5a; }.free-model-entry-button { border-style:dashed; background:#fff; color:#62812d; }.free-model-entry-button:hover { border-color:#9fbd67; background:#f5f9ed; }.model-select { width:auto; max-width:300px; padding:7px 9px; color:#65775a; font-size:12px; font-weight:700; }.send-button { min-width:88px; padding:9px 13px; }.composer-footer > small { min-width:0; color:var(--ui-text-muted,#98a18e); font-size:10px; line-height:1.5; }
 .turn-limit-notice { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-top:9px; border-radius:10px; background:#f7f4e6; padding:8px 10px; color:#75672d; font-size:12px; }.turn-limit-notice.blocked { background:#fff0ee; color:#9a4b40; }
 .composer-toolbar{min-height:32px;flex-wrap:nowrap;gap:6px;border:1px solid var(--ui-line);border-radius:10px;background:var(--ui-surface-soft);padding:5px 6px}.composer-toolbar .input-tools,.composer-toolbar .session-tools{flex-wrap:nowrap;gap:5px}.composer-toolbar .input-tools{flex:1}.composer-toolbar :is(.chip-button,.quiet-button,.model-select){height:30px;border-color:var(--ui-line);border-radius:8px;background:var(--ui-surface);padding:5px 9px;color:var(--ui-text-secondary);font-size:11px}.composer-toolbar .active-context-chip{max-width:132px!important;flex:none;border-color:var(--ui-line-strong)!important;background:var(--ui-surface-active)!important;color:var(--ui-accent-ink)!important}.composer-toolbar .model-select{min-width:132px;max-width:230px;flex:1 1 164px}.composer-toolbar .free-model-entry-button{flex:none;border-style:solid;background:var(--ui-surface);color:var(--ui-accent-ink)}.composer-toolbar .model-manager-button{flex:none}.conversation-action-options button{min-width:0;padding-right:6px;padding-left:6px}
 .composer-context-meter{flex:none}
@@ -2750,6 +3190,7 @@ onMounted(() => {
 .api-key-visibility-button svg { width:19px; height:19px; fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; }
 .api-key-visibility-button:hover { background:#f0f6e7; color:#5f7f28; }
 .api-key-visibility-button:focus-visible { outline:3px solid rgba(137,169,62,.2); color:#5f7f28; }
+.model-id-normalization-hint { margin:10px 0 0; color:#6b7f3e; font-size:11px; font-weight:700; line-height:1.45; }
 .connection-toolbar-actions { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:8px; }
 .provider-catalog-section { padding-bottom:22px; border-bottom:1px solid #edf0e7; }
 .provider-picker-grid-expanded { grid-template-columns:repeat(4,minmax(0,1fr)); }
@@ -2847,91 +3288,94 @@ onMounted(() => {
   }
 }
 
-@container app-main (max-width:1239px) {
-  .career-workspace,
-  .career-workspace.has-context-rail {
-    grid-template-columns:280px minmax(0,1fr);
-    gap:10px;
-  }
+@media (min-width:641px) {
+  .chat-header h2 { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+}
 
-  .career-workspace.history-collapsed,
-  .career-workspace.has-context-rail.history-collapsed {
-    grid-template-columns:48px minmax(0,1fr);
-  }
+/* 展示样式与布局状态一致，导航收起不会意外切换成三栏。 */
+.career-workspace:where(.compact-layout),
+.career-workspace:where(.compact-layout).has-context-rail {
+  grid-template-columns:200px minmax(0,1fr);
+  gap:6px;
+}
 
-  .career-history-panel {
-    padding:11px;
-  }
+.career-workspace:where(.compact-layout).history-collapsed,
+.career-workspace:where(.compact-layout).has-context-rail.history-collapsed {
+  grid-template-columns:48px minmax(0,1fr);
+}
 
-  .career-history-panel.collapsed {
-    padding:8px 5px;
-  }
+:where(.compact-layout) .career-history-panel {
+  padding:11px;
+}
 
-  .chat-header {
-    gap:10px;
-    padding-right:14px;
-    padding-left:14px;
-  }
+:where(.compact-layout) .career-history-panel.collapsed {
+  padding:8px 5px;
+}
 
-  .message-list {
-    padding-right:14px;
-    padding-left:14px;
-  }
+:where(.compact-layout) .chat-header {
+  gap:10px;
+  padding-right:14px;
+  padding-left:14px;
+}
 
-  .compact-panel-triggers {
-    display:flex;
-    flex:0 0 auto;
-    gap:8px;
-    margin-left:auto;
-  }
+:where(.compact-layout) .message-list {
+  padding-right:14px;
+  padding-left:14px;
+}
 
-  .compact-panel-trigger.history-trigger {
-    display:none;
-  }
+:where(.compact-layout) .compact-panel-triggers {
+  display:flex;
+  flex:0 0 auto;
+  gap:8px;
+  margin-left:auto;
+}
 
-  .context-rail-slot {
-    position:fixed;
-    z-index:930;
-    top:12px;
-    right:12px;
-    bottom:12px;
-    width:min(420px,calc(100vw - 24px));
-    height:auto;
-    overflow:visible;
-    border-radius:20px;
-    background:#fff;
-    box-shadow:0 24px 72px rgba(25,44,20,.24);
-    transform:translateX(calc(100% + 28px));
-    transition:transform .2s ease;
-  }
+:where(.compact-layout) .compact-panel-trigger.history-trigger {
+  display:none;
+}
 
-  .compact-context-open .context-rail-slot {
-    transform:translateX(0);
-  }
+:where(.compact-layout) .context-rail-slot {
+  position:fixed;
+  z-index:930;
+  top:12px;
+  right:12px;
+  bottom:12px;
+  width:min(420px,calc(100vw - 24px));
+  height:auto;
+  overflow:visible;
+  border-radius:20px;
+  background:#fff;
+  box-shadow:0 24px 72px rgba(25,44,20,.24);
+  transform:translateX(calc(100% + 28px));
+  transition:transform .2s ease;
+}
 
-  .context-rail-resizer {
-    display:none;
-  }
+.compact-context-open:where(.compact-layout) .context-rail-slot {
+  transform:translateX(0);
+}
 
-  .compact-panel-close.context-panel-close {
-    position:absolute;
-    z-index:40;
-    top:10px;
-    right:10px;
-    display:grid;
-    place-items:center;
-    font-size:22px;
-  }
+:where(.compact-layout) .context-rail-resizer {
+  display:none;
+}
 
-  .career-panel-scrim {
-    position:fixed;
-    z-index:920;
-    inset:0;
-    display:block;
-    border:0;
-    background:rgba(18,35,18,.3);
-    cursor:default;
-  }
+:where(.compact-layout) .compact-panel-close.context-panel-close {
+  position:absolute;
+  z-index:40;
+  top:10px;
+  right:10px;
+  display:grid;
+  place-items:center;
+  font-size:22px;
+}
+
+:where(.compact-layout) .career-panel-scrim {
+  position:fixed;
+  z-index:920;
+  inset:0;
+  display:block;
+  border:0;
+  background:rgba(18,35,18,.3);
+  cursor:default;
 }
 
 @container app-main (max-width:819px) {
@@ -3036,5 +3480,271 @@ onMounted(() => {
   .context-rail-slot {
     transition:none;
   }
+}
+
+/* 输入区整体成卡片：资料在上，附件与模型在下，发送只保留主色箭头。 */
+.composer {
+  flex: none;
+  border-top: 0;
+  padding: 12px 16px 14px;
+}
+.composer-card {
+  min-width: 0;
+  border: 1px solid color-mix(in srgb, var(--ui-text-muted) 28%, var(--ui-surface));
+  border-radius: 20px;
+  background: var(--ui-surface);
+  padding: 16px;
+  box-shadow: 0 8px 30px rgba(31, 51, 82, .04);
+}
+.composer-card:focus-within {
+  border-color: var(--ui-accent);
+}
+.composer .composer-materials {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.composer .composer-material-button {
+  display: inline-flex;
+  min-height: 30px;
+  max-width: 100%;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid var(--ui-line);
+  border-radius: 7px;
+  background: var(--ui-surface-soft);
+  color: var(--ui-text-secondary);
+  padding: 5px 9px;
+  font: inherit;
+  font-size: 12px;
+}
+.composer .composer-material-button.active {
+  border-color: var(--ui-line-strong);
+  background: var(--ui-surface-active);
+  color: var(--ui-accent-ink);
+}
+.composer .composer-material-button:hover:not(:disabled) {
+  border-color: var(--ui-accent);
+  color: var(--ui-accent-ink);
+}
+.composer .composer-material-button:disabled,
+.composer-suggestions button:disabled,
+.composer-icon-button:disabled {
+  cursor: default;
+  opacity: .65;
+}
+.composer svg {
+  width: 17px;
+  height: 17px;
+  flex: none;
+}
+.composer .composer-input-shell {
+  margin-top: 0;
+}
+.composer .composer-input-shell textarea,
+.composer .composer-highlight-layer {
+  min-height: 76px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 0;
+  font-size: 14px;
+  line-height: 1.7;
+}
+.composer .composer-input-shell textarea {
+  background: transparent;
+  color: var(--ui-text);
+  caret-color: var(--ui-accent);
+  box-shadow: none;
+}
+.composer .composer-input-shell textarea:focus-visible {
+  outline: 0;
+}
+.composer .composer-controls {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 12px;
+}
+.composer-primary-tools {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  gap: 10px;
+}
+.composer .composer-icon-button {
+  display: inline-flex;
+  width: 32px;
+  height: 32px;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--ui-text-muted);
+  padding: 5px;
+}
+.composer .composer-icon-button:hover:not(:disabled) {
+  background: var(--ui-surface-soft);
+  color: var(--ui-accent);
+}
+.composer .model-select {
+  width: auto;
+  min-width: 0;
+  max-width: min(280px, 100%);
+  height: 32px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--ui-text-secondary);
+  padding: 3px 20px 3px 0;
+  font-size: 12px;
+  font-weight: 400;
+  text-overflow: ellipsis;
+}
+.composer .composer-submit-tools {
+  gap: 8px;
+}
+.composer .send-button {
+  display: inline-flex;
+  width: 38px;
+  min-width: 38px;
+  height: 38px;
+  min-height: 38px;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  align-self: center;
+  border-radius: 11px;
+  background: var(--ui-accent);
+  padding: 8px;
+}
+.composer .send-button svg {
+  width: 22px;
+  height: 22px;
+}
+.composer .send-button[aria-busy="true"] {
+  opacity: .55;
+}
+.composer-settings {
+  position: relative;
+  flex: none;
+}
+.composer .composer-model-config {
+  border-color: var(--ui-accent);
+  background: var(--ui-surface-active);
+  color: var(--ui-accent-ink);
+  font-weight: 650;
+}
+.composer .composer-model-config > svg:last-child {
+  width: 12px;
+  height: 12px;
+}
+.composer .composer-toolbar.composer-tools-menu {
+  position: absolute;
+  z-index: 60;
+  left: 0;
+  top: calc(100% + 6px);
+  display: grid;
+  width: 142px;
+  gap: 5px;
+  border: 1px solid var(--ui-line);
+  border-radius: 10px;
+  background: var(--ui-surface);
+  padding: 7px;
+  box-shadow: var(--ui-shadow);
+}
+.composer .composer-tools-menu > button {
+  width: 100%;
+  height: auto;
+  min-height: 32px;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  font-weight: 500;
+}
+.composer .composer-tools-menu > button:hover {
+  background: var(--ui-surface-soft);
+}
+.composer-attachment {
+  display: inline-flex;
+  max-width: 100%;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 10px;
+  border-radius: 6px;
+  background: var(--ui-surface-active);
+  color: var(--ui-accent-ink);
+  padding: 5px 7px;
+  font-size: 12px;
+}
+.composer-attachment > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.composer-attachment > button {
+  display: inline-flex;
+  flex: none;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  padding: 2px;
+}
+.composer-suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+.composer-suggestions > button {
+  display: inline-flex;
+  min-height: 30px;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  border-radius: 7px;
+  background: var(--ui-surface-soft);
+  color: var(--ui-text-secondary);
+  padding: 6px 10px;
+  font: inherit;
+  font-size: 12px;
+}
+.composer-suggestions > button:hover:not(:disabled) {
+  background: var(--ui-surface-active);
+  color: var(--ui-accent);
+}
+.composer .composer-footer {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 16px;
+  margin-top: 12px;
+}
+.composer .composer-footer > small {
+  color: var(--ui-text-muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.composer button:focus-visible,
+.composer select:focus-visible {
+  outline: 2px solid var(--ui-accent);
+  outline-offset: 2px;
+}
+@media (max-height: 600px) and (min-width: 641px) {
+  .composer { padding: 6px 10px 8px; }
+  .composer-card { border-radius: 14px; padding: 10px; }
+  .composer .composer-materials { margin-bottom: 8px; }
+  .composer .composer-input-shell textarea,
+  .composer .composer-highlight-layer { min-height: 44px; max-height: 66px; }
+  .composer .composer-controls { margin-top: 6px; }
+  .composer-suggestions { margin-top: 6px; gap: 5px; }
+  .composer-suggestions > button { min-height: 26px; padding: 4px 7px; font-size: 11px; }
+  .composer .composer-footer { display: none; }
 }
 </style>

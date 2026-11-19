@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref } from 'vue'
 
 defineProps({
   currentUser: { type: Object, default: null }
@@ -19,6 +19,7 @@ const rightPane = ref('suggestions')
 const workspacePane = ref('assistant')
 const historyPane = ref('optimized')
 const resumePreviewUrl = ref('')
+const dateFiltersOpen = ref(false)
 
 const filters = ref({ jobTitle: '', startDate: '', endDate: '' })
 const resumeFile = ref(null)
@@ -29,6 +30,8 @@ const selectedProfileId = ref('')
 const analysis = ref(null)
 const selectedSuggestionIds = ref([])
 const optimizedMarkdown = ref('')
+let initialized = false
+const hasWorkspace = computed(() => Boolean(resumeFile.value || screenshotFiles.value.length || jobDescription.value || extraPrompt.value || analysis.value || optimizedMarkdown.value))
 
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize)))
 const readyProfiles = computed(() => profiles.value.filter((item) => item.readiness === 'ready'))
@@ -113,9 +116,15 @@ function resetWorkspace() {
 }
 
 function openNewTask() {
+  if (hasWorkspace.value && !window.confirm('开始新任务会清空当前未保存的简历工作区，确定继续？')) return
   resetMessages()
   resetWorkspace()
   detailRecord.value = null
+  mode.value = 'workspace'
+  window.history.pushState({}, '', '/resume-assistant/new')
+}
+
+function continueTask() {
   mode.value = 'workspace'
   window.history.pushState({}, '', '/resume-assistant/new')
 }
@@ -283,10 +292,18 @@ function formatDate(value) {
 }
 
 function handlePopState() {
+  if (!window.location.pathname.startsWith('/resume-assistant')) return
   void restoreRoute()
 }
 
+onActivated(() => {
+  window.addEventListener('popstate', handlePopState)
+  if (initialized) void restoreRoute()
+})
+onDeactivated(() => { window.removeEventListener('popstate', handlePopState) })
+
 async function restoreRoute() {
+  if (!window.location.pathname.startsWith('/resume-assistant')) return
   const match = window.location.pathname.match(/^\/resume-assistant\/([0-9a-f-]{36})$/i)
   if (match) {
     await openRecord(match[1], { replace: true })
@@ -301,7 +318,6 @@ async function restoreRoute() {
 }
 
 onMounted(async () => {
-  window.addEventListener('popstate', handlePopState)
   loading.value = true
   try {
     await loadProfiles()
@@ -309,6 +325,7 @@ onMounted(async () => {
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '简历助手初始化失败'
   } finally {
+    initialized = true
     loading.value = false
   }
 })
@@ -333,19 +350,23 @@ onBeforeUnmount(() => {
           <h2>简历优化记录</h2>
           <p>按目标岗位查找已保存的优化结果</p>
         </div>
-        <button type="button" class="primary-button" @click="openNewTask">＋ 新建优化任务</button>
+        <div class="search-actions">
+          <button v-if="hasWorkspace" type="button" class="secondary-button" @click="continueTask">继续当前任务</button>
+          <button type="button" class="primary-button" @click="openNewTask">＋ 新建优化任务</button>
+        </div>
       </header>
 
-      <form class="resume-search" @submit.prevent="loadRecords(1)">
+      <form class="resume-search" :class="{ 'show-date-filters': dateFiltersOpen }" @submit.prevent="loadRecords(1)">
         <label class="search-keyword">
           <span>岗位名称</span>
           <input v-model="filters.jobTitle" type="search" placeholder="搜索目标岗位" />
         </label>
-        <label>
+        <button type="button" class="mobile-filter-toggle" :aria-expanded="dateFiltersOpen" aria-controls="resume-start-date-filter resume-end-date-filter" @click="dateFiltersOpen = !dateFiltersOpen">{{ dateFiltersOpen ? '收起日期筛选' : '日期筛选' }}{{ filters.startDate || filters.endDate ? ' · 已设置' : '' }}</button>
+        <label id="resume-start-date-filter" class="resume-date-filter">
           <span>开始日期</span>
           <input v-model="filters.startDate" type="date" />
         </label>
-        <label>
+        <label id="resume-end-date-filter" class="resume-date-filter">
           <span>结束日期</span>
           <input v-model="filters.endDate" type="date" />
         </label>

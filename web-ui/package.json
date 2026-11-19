@@ -8,9 +8,10 @@
     "build": "vite build",
     "preview": "vite preview --host 127.0.0.1 --port 4173",
     "test": "node --test src/*.test.js",
-    "test:e2e:responsive": "playwright test e2e/responsive-gate-one.spec.js"
+    "test:e2e:responsive": "playwright test e2e/responsive-gate-one.spec.js e2e/composer-reliability.spec.js e2e/mobile-platform.spec.js e2e/grill-regression.spec.js e2e/career-workspace-retention.spec.js e2e/context-material-layout.spec.js e2e/material-import.spec.js e2e/pwa-share-import.spec.js e2e/sidebar-layout.spec.js e2e/composer-redesign.spec.js"
   },
   "dependencies": {
+    "@element-plus/icons-vue": "^2.3.2",
     "@vitejs/plugin-vue": "^6.0.0",
     "element-plus": "^2.14.5",
     "v-region": "^3.5.2",

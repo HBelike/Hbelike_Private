@@ -89,6 +89,8 @@ class MessageRecord:
     content_text: str
     is_redacted: bool
     created_at: datetime
+    is_automatic: bool = False
+    ui_payload: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)

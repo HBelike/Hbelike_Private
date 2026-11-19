@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from uuid import UUID
 
@@ -26,6 +26,7 @@ from src.observability.langsmith_runtime import trace_operation
 class ModelResolutionReason(StrEnum):
     """向前端说明本轮模型为何被选择的安全枚举。"""
 
+    PLATFORM_DEFAULT = "platform_default"
     FREE_QUOTA_PRIORITY = "free_quota_priority"
     USER_SELECTED = "user_selected"
 
@@ -125,9 +126,38 @@ class ModelGateway:
         """执行原始路由逻辑，组织、档案及凭证标识均不进入 Trace。"""
 
         selection.validate()
+        if selection.mode is ModelSelectionMode.PLATFORM_DEFAULT:
+            availability = self._platform_default_candidate(self.list_availability(organization_id))
+            if availability is None:
+                raise LookupError("平台默认模型尚未配置，请联系管理员；无需个人配置模型。")
+            if availability.readiness is not ModelReadiness.READY:
+                raise PermissionError("平台默认模型暂不可用，请联系管理员；无需个人配置模型。")
+            resolution = self._resolve_specific_profile(
+                organization_id,
+                replace(selection, mode=ModelSelectionMode.SPECIFIC_PROFILE, profile_id=availability.profile.id),
+            )
+            return replace(resolution, reason=ModelResolutionReason.PLATFORM_DEFAULT)
         if selection.mode is ModelSelectionMode.SPECIFIC_PROFILE:
             return self._resolve_specific_profile(organization_id, selection)
         return self._resolve_free_quota_first(organization_id, selection)
+
+    def _platform_default_candidate(self, availability):
+        candidates = [item for item in availability
+                      if item.profile.provider_key == self._settings.default_provider_key
+                      and item.profile.model_id == self._settings.default_model_id]
+        return min(candidates, key=lambda item: (
+            item.readiness is not ModelReadiness.READY, item.profile.priority, item.profile.profile_key,
+        ), default=None)
+
+    def platform_default_descriptor(self, availability) -> dict[str, object]:
+        """返回平台共享默认档案的展示信息，不返回凭证或要求用户自行接入。"""
+        candidate = self._platform_default_candidate(availability)
+        return {
+            "provider_key": self._settings.default_provider_key,
+            "model_id": self._settings.default_model_id,
+            "profile_id": str(candidate.profile.id) if candidate else None,
+            "readiness": candidate.readiness.value if candidate else "missing",
+        }
 
     @staticmethod
     def _summarize_resolution(resolution: ModelResolution) -> dict[str, str]:

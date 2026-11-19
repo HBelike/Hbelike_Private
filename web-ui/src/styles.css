@@ -1,5 +1,5 @@
 :root {
-  --app-sidebar-width: 248px;
+  --app-sidebar-width: 136px;
   --app-page-gutter: clamp(14px, 2vw, 28px);
   color: #253024;
   background: #f5f6f0;
@@ -857,12 +857,213 @@ button {
 }
 
 .shell {
-  --app-sidebar-width: 248px;
+  --app-sidebar-width: 136px;
+  position: relative;
   display: grid;
   height: 100vh;
   height: 100dvh;
   grid-template-columns: var(--app-sidebar-width) minmax(0, 1fr);
   overflow: hidden;
+}
+
+.sidebar-toggle {
+  display: none;
+}
+
+/* 导航采用统一图标与轻量分组，低频模块收纳到“更多模块”。 */
+.shell .sidebar {
+  background: var(--ui-canvas);
+  border-right-color: var(--ui-line);
+}
+.shell .sidebar .brand-icon {
+  border-radius: 8px;
+  background: var(--ui-accent);
+  box-shadow: none;
+}
+.shell .sidebar .brand-copy > span {
+  display: none;
+}
+.shell .sidebar .nav-list {
+  gap: 5px;
+}
+.shell .sidebar .nav-item {
+  min-height: 36px;
+  gap: 8px;
+  border-radius: 6px;
+  color: var(--ui-text-secondary);
+  font-size: 13px;
+}
+.shell .sidebar .nav-copy strong {
+  font-weight: 500;
+}
+.shell .sidebar .nav-icon {
+  color: var(--ui-text-muted);
+}
+.shell .sidebar .nav-icon svg {
+  display: block;
+  width: 17px;
+  height: 17px;
+}
+.shell .sidebar .nav-item.active {
+  background: var(--ui-surface-active);
+  color: var(--ui-accent-ink);
+}
+.shell .sidebar .nav-item.active .nav-icon {
+  color: var(--ui-accent);
+}
+.shell .sidebar .nav-item.active::before {
+  display: none;
+}
+.secondary-navigation {
+  display: grid;
+  gap: 5px;
+  border-top: 1px solid var(--ui-line);
+  margin-top: 10px;
+  padding-top: 10px;
+}
+.sidebar-bottom {
+  display: grid;
+  flex: none;
+  gap: 5px;
+  margin-top: auto;
+}
+.shell .sidebar .nav-more {
+  color: var(--ui-text-muted);
+}
+
+/* PC 导航尽量让出正文空间，折叠后仍能从图标直接切换模块。 */
+@media (min-width: 1024px) {
+  .shell.sidebar-collapsed {
+    --app-sidebar-width: 56px;
+  }
+
+  .shell .sidebar.sidebar {
+    gap: 10px;
+    padding: 16px 8px;
+  }
+
+  .shell .main.main {
+    padding: 10px 10px 12px;
+  }
+
+  .shell .sidebar .brand {
+    flex: none;
+    gap: 7px;
+    padding: 0 3px 8px;
+  }
+
+  .shell .sidebar .brand-icon {
+    width: 28px;
+    height: 32px;
+    flex-basis: 28px;
+    border-radius: 8px;
+  }
+
+  .shell .sidebar .brand-icon svg {
+    width: 26px;
+    height: 26px;
+  }
+
+  .shell .sidebar .brand strong {
+    font-size: 15px;
+    white-space: nowrap;
+  }
+
+  .shell .sidebar .brand span {
+    font-size: 9px;
+  }
+
+  .shell .sidebar .nav-list {
+    min-height: 0;
+    flex: 1;
+    align-content: start;
+    overflow-y: auto;
+    scrollbar-width: thin;
+  }
+
+  .shell .sidebar .nav-item {
+    min-height: 36px;
+    gap: 8px;
+    padding: 7px 5px;
+    font-size: 13px;
+  }
+
+  .shell .sidebar .nav-icon {
+    width: 20px;
+    height: 20px;
+    font-size: 14px;
+  }
+
+  .shell .sidebar .nav-copy strong {
+    white-space: nowrap;
+  }
+
+  .shell .sidebar .sidebar-card {
+    flex: none;
+    margin-top: 0;
+    padding: 10px 3px 0;
+    font-size: 10px;
+    overflow-wrap: anywhere;
+  }
+
+  .shell .sidebar .sidebar-toggle {
+    display: flex;
+    width: 100%;
+    height: 32px;
+    flex: none;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--ui-text-secondary);
+    padding: 6px 4px;
+    font-size: 12px;
+  }
+
+  .sidebar-toggle svg {
+    width: 16px;
+    height: 16px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.8;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  .shell .sidebar-toggle:hover,
+  .shell .sidebar-toggle:focus-visible {
+    border-color: var(--ui-accent);
+    background: var(--ui-surface-active);
+    color: var(--ui-accent-ink);
+  }
+
+  .sidebar-toggle:focus-visible {
+    outline: 3px solid var(--ui-focus);
+    outline-offset: 2px;
+  }
+
+  .shell.sidebar-collapsed .sidebar {
+    padding-inline: 5px;
+  }
+
+  .shell.sidebar-collapsed .brand {
+    justify-content: center;
+    padding-inline: 0;
+  }
+
+  .shell.sidebar-collapsed .brand-copy,
+  .shell.sidebar-collapsed .nav-copy,
+  .shell.sidebar-collapsed .sidebar-toggle-label,
+  .shell.sidebar-collapsed .sidebar-card {
+    display: none;
+  }
+
+  .shell.sidebar-collapsed .nav-item {
+    justify-content: center;
+    padding-inline: 0;
+  }
 }
 
 .sidebar {
@@ -1006,6 +1207,21 @@ button {
   overflow: hidden;
 }
 
+/* 分享确认页仅让资料卡滚动，避免短屏正文从固定顶栏边缘露出。 */
+.main.material-share-route {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+}
+.main.material-share-route > .topbar {
+  flex-shrink: 0;
+}
+.main.material-share-route > .material-share-page {
+  min-height: 0;
+  overflow: auto;
+}
+
 .main.career-route {
   display: flex;
   min-height: 0;
@@ -1075,13 +1291,14 @@ button {
 
 .topbar {
   position: relative;
-  min-height: 56px;
-  margin-bottom: 12px;
+  min-height: 44px;
+  flex-shrink: 0;
+  margin-bottom: 10px;
   border: 1px solid var(--ui-line);
   border-radius: 12px;
   background: var(--ui-surface);
   box-shadow: var(--ui-shadow);
-  padding: 9px 12px 9px 18px;
+  padding: 2px 12px 2px 14px;
   transition: border-color .16s ease, box-shadow .16s ease;
 }
 
@@ -1094,6 +1311,54 @@ button {
   border-radius: 0 3px 3px 0;
   background: var(--ui-accent);
   content: "";
+}
+
+.topbar h1 {
+  font-size: 20px;
+  line-height: 1.4;
+}
+
+/* 会话面板已有标题，PC 顶部只保留轻量的导航与账户入口。 */
+@media (min-width: 641px) {
+  .shell .main.career-route {
+    padding-top: 10px;
+  }
+
+  .main.career-route > .topbar {
+    min-height: 32px;
+    margin: 0 0 8px;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+    padding: 0;
+    backdrop-filter: none;
+  }
+
+  .main.career-route > .topbar::before {
+    display: none;
+  }
+
+  .main.career-route > .topbar h1 {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .main.career-route .account-breadcrumb {
+    min-height: 32px;
+    padding: 3px 8px 3px 5px;
+    font-size: 12px;
+  }
+
+  .main.career-route .account-breadcrumb-avatar {
+    width: 22px;
+    height: 22px;
+    font-size: 11px;
+  }
 }
 
 .topbar-account {
@@ -4167,7 +4432,7 @@ pre {
 
 @media (min-width: 1024px) and (max-width: 1279px) {
   .shell {
-    --app-sidebar-width: 216px;
+    --app-sidebar-width: 128px;
   }
 
   .sidebar {

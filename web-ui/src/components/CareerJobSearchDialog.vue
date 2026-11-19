@@ -1,5 +1,6 @@
 <script setup>
 import { computed, ref, watch } from 'vue'
+import { useDialogFocus } from '../use-dialog-focus.js'
 import JobSearchWorkspace from './JobSearchWorkspace.vue'
 
 const props = defineProps({
@@ -10,6 +11,7 @@ const props = defineProps({
 })
 
 const emit = defineEmits(['cancel', 'confirm'])
+useDialogFocus(() => props.open, '.career-job-dialog', cancel, () => !props.busy)
 const selectedJob = ref(null)
 
 const canConfirm = computed(() => Boolean(
@@ -85,5 +87,16 @@ function confirm() {
 .career-job-confirmation{display:grid;grid-template-columns:minmax(280px,1fr) minmax(220px,auto) auto;align-items:center;gap:18px;border-top:1px solid var(--ui-line,#d7e4f6);background:var(--ui-surface,#fff);padding:12px 18px}.selected-job-summary{display:flex;min-width:0;align-items:center;gap:10px}.selected-job-summary>span:last-child{display:grid;min-width:0;gap:2px}.selected-job-summary small{color:var(--ui-text-muted,#7b879c);font-size:9px;font-weight:800}.selected-job-summary strong{overflow:hidden;color:var(--ui-text-secondary,#526078);font-size:12px;text-overflow:ellipsis;white-space:nowrap}.selected-job-summary.ready strong{color:var(--ui-text,#14213d)}.selected-job-mark{display:grid;width:34px;height:34px;flex:none;place-items:center;border-radius:11px;background:var(--ui-surface-active,#eaf3ff);color:var(--ui-accent-ink,#004aa8);font-size:12px;font-weight:900}.career-job-confirmation>p{margin:0;color:var(--ui-text-muted,#7b879c);font-size:10px}.career-job-dialog-actions{display:flex;gap:9px}.career-job-dialog-actions button{min-width:104px;min-height:40px;border-radius:10px;padding:8px 15px;font-size:12px;font-weight:850;cursor:pointer}.career-job-dialog-actions .secondary{border:1px solid var(--ui-line-strong,#b9cfed);background:var(--ui-surface,#fff);color:var(--ui-text-secondary,#526078)}.career-job-dialog-actions .primary{border:1px solid var(--ui-accent,#0869d8);background:var(--ui-accent,#0869d8);color:#fff;box-shadow:0 8px 20px color-mix(in srgb,var(--ui-accent,#0869d8) 22%,transparent)}.career-job-dialog-actions button:disabled,.career-job-dialog-header>button:disabled{cursor:not-allowed;opacity:.48}
 @keyframes career-job-dialog-in{from{opacity:0}to{opacity:1}}
 @media(max-width:900px){.career-job-dialog-backdrop{align-items:end;padding:0}.career-job-dialog{width:100%;height:94dvh;min-height:0;border-radius:20px 20px 0 0}.career-job-dialog-header{padding:13px 14px}.career-job-dialog-body{padding:10px}.career-job-confirmation{grid-template-columns:minmax(0,1fr) auto;padding:10px 12px}.career-job-confirmation>p{display:none}.career-job-dialog-actions .secondary{display:none}.career-job-dialog-actions button{min-width:112px}.career-job-dialog-body :deep(.job-browser){grid-template-columns:1fr}.career-job-dialog-body :deep(.job-detail){display:none}}
+@media(max-width:640px){
+  .career-job-dialog{width:100%;height:var(--career-visible-height,100dvh);max-height:var(--career-visible-height,100dvh);border-radius:0;border:0}
+  .career-job-dialog-header{padding:max(8px,env(safe-area-inset-top)) 16px 8px}
+  .career-job-dialog-header>button{width:44px;height:44px}
+  .career-job-dialog-header nav{font-size:14px}
+  .career-job-dialog-body{overflow:auto;padding:12px 16px}
+  .career-job-dialog-body :deep(.job-browser){min-height:280px;height:50dvh}
+  .career-job-dialog-body :deep(.job-browser.show-compact-detail .job-detail){display:block}
+  .career-job-dialog-actions button{min-height:48px;font-size:15px}
+  .career-job-confirmation{padding-bottom:max(12px,env(safe-area-inset-bottom))}
+}
 @media(prefers-reduced-motion:reduce){.career-job-dialog{animation:none}}
 </style>

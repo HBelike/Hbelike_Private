@@ -242,6 +242,7 @@ class CareerConversationRepository:
         *,
         turn_id: UUID | None = None,
         is_redacted: bool,
+        ui_payload: dict[str, object] | None = None,
     ) -> MessageRecord:
         """追加一条历史消息，并如实记录当前部署是否执行过脱敏。"""
 
@@ -260,13 +261,13 @@ class CareerConversationRepository:
                 text(
                     """
                     INSERT INTO career_assistant.messages
-                        (id, conversation_id, turn_id, role, content_text, is_redacted)
-                    SELECT :id, id, :turn_id, :role, :content_text, :is_redacted
+                        (id, conversation_id, turn_id, role, content_text, is_redacted, ui_payload)
+                    SELECT :id, id, :turn_id, :role, :content_text, :is_redacted, CAST(:ui_payload AS jsonb)
                     FROM career_assistant.conversations
                     WHERE id = :conversation_id
                       AND status = 'active'
                     RETURNING id, conversation_id, turn_id, role, content_text,
-                              is_redacted, created_at
+                              is_redacted, created_at, ui_payload
                     """,
                 ),
                 {
@@ -276,6 +277,7 @@ class CareerConversationRepository:
                     "role": role.value,
                     "content_text": normalized_content,
                     "is_redacted": is_redacted,
+                    "ui_payload": json.dumps(ui_payload, ensure_ascii=False) if ui_payload is not None else None,
                 },
             ).mappings().one_or_none()
 
@@ -310,7 +312,11 @@ class CareerConversationRepository:
             query = """
                 SELECT message.id, message.conversation_id, message.turn_id,
                        message.role, message.content_text, message.is_redacted,
-                       message.created_at
+                       message.created_at, message.ui_payload,
+                       EXISTS (SELECT 1 FROM career_assistant.agent_turns AS origin
+                               WHERE origin.id = message.turn_id
+                                 AND (origin.input_kind_codes @> '["resume_review"]'::jsonb
+                                      OR origin.input_kind_codes @> '["job_search_auto_analysis"]'::jsonb)) AS is_automatic
                 FROM career_assistant.messages AS message
                 INNER JOIN career_assistant.conversations AS conversation
                     ON conversation.id = message.conversation_id
@@ -326,11 +332,15 @@ class CareerConversationRepository:
         else:
             query = """
                 SELECT id, conversation_id, turn_id, role, content_text,
-                       is_redacted, created_at
+                       is_redacted, created_at, is_automatic, ui_payload
                 FROM (
                     SELECT message.id, message.conversation_id, message.turn_id,
                            message.role, message.content_text, message.is_redacted,
-                           message.created_at
+                           message.created_at, message.ui_payload,
+                           EXISTS (SELECT 1 FROM career_assistant.agent_turns AS origin
+                                   WHERE origin.id = message.turn_id
+                                     AND (origin.input_kind_codes @> '["resume_review"]'::jsonb
+                                          OR origin.input_kind_codes @> '["job_search_auto_analysis"]'::jsonb)) AS is_automatic
                     FROM career_assistant.messages AS message
                     INNER JOIN career_assistant.conversations AS conversation
                         ON conversation.id = message.conversation_id
@@ -354,6 +364,36 @@ class CareerConversationRepository:
             ).mappings().all()
 
         return [self._to_message_record(row) for row in rows]
+
+    def update_job_search_card(
+        self, actor_id: UUID, conversation_id: UUID, message_id: UUID, patch: dict,
+    ) -> MessageRecord:
+        """锁定用户自己的卡片后合并状态，避免搜索和条件保存相互覆盖。"""
+        from src.career_assistant.job_search_cards import patch_job_search_card
+
+        with self._database.transaction() as connection:
+            row = connection.execute(text("""
+                SELECT message.*
+                FROM career_assistant.messages AS message
+                JOIN career_assistant.conversations AS conversation
+                  ON conversation.id = message.conversation_id
+                WHERE message.id = :message_id AND message.conversation_id = :conversation_id
+                  AND conversation.actor_id = :actor_id AND conversation.status = 'active'
+                  AND message.role = 'assistant'
+                FOR UPDATE OF message
+            """), {"message_id": message_id, "conversation_id": conversation_id,
+                    "actor_id": actor_id}).mappings().one_or_none()
+            if row is None:
+                raise LookupError("求职卡片不存在或无访问权限")
+            payload = patch_job_search_card(row["ui_payload"] or {}, patch)
+            updated = connection.execute(text("""
+                UPDATE career_assistant.messages
+                SET ui_payload = CAST(:ui_payload AS jsonb)
+                WHERE id = :message_id
+                RETURNING *
+            """), {"message_id": message_id,
+                    "ui_payload": json.dumps(payload, ensure_ascii=False)}).mappings().one()
+        return self._to_message_record(updated)
 
     def upsert_redacted_summary(
         self,
@@ -467,7 +507,7 @@ class CareerConversationRepository:
                     """
                     SELECT message.id, message.conversation_id, message.turn_id,
                            message.role, message.content_text, message.is_redacted,
-                           message.created_at
+                           message.created_at, message.ui_payload
                     FROM career_assistant.messages AS message
                     INNER JOIN career_assistant.agent_turns AS turn
                       ON turn.id = message.turn_id
@@ -479,7 +519,7 @@ class CareerConversationRepository:
                       AND conversation.status <> 'deleted'
                       AND turn.status = 'succeeded'
                       AND message.role IN ('user', 'assistant')
-                      AND (:exclude_turn_id IS NULL OR turn.id <> :exclude_turn_id)
+                      AND (CAST(:exclude_turn_id AS uuid) IS NULL OR turn.id <> CAST(:exclude_turn_id AS uuid))
                     ORDER BY message.created_at ASC, message.id ASC
                     LIMIT :limit
                     """,
@@ -854,11 +894,27 @@ class CareerConversationRepository:
                           AND conversation.actor_id = :actor_id
                           AND conversation.status <> 'deleted'
                           AND turn.status = 'succeeded'
+                          AND NOT (turn.input_kind_codes @> '["job_search_auto_analysis"]'::jsonb)
                         """,
                     ),
                     {"conversation_id": conversation_id, "actor_id": actor_id},
                 ).scalar_one(),
             )
+
+    def cancel_job_search_batch(self, actor_id, conversation_id, batch_id):
+        """取消批次及其内部分析，不影响其他批次与用户资料绑定。"""
+        from src.career_assistant.persistence.job_search_repository import JobSearchRepository
+        from src.career_assistant.persistence.turn_job_repository import CareerTurnJobRepository
+        result = JobSearchRepository(self._database).complete(actor_id, conversation_id, batch_id,
+            {"request_id": str(uuid4()), "status": "cancelled"})
+        analysis_id = result["batch"].get("analysis_turn_id")
+        if analysis_id:
+            turns = CareerTurnJobRepository(self._database)
+            status = turns.request_cancel(actor_id, UUID(str(analysis_id)))
+            if status is not None:
+                turns.append_event(UUID(str(analysis_id)),
+                    "cancelled" if status.value == "cancelled" else "cancel_requested", {"state": status.value})
+        return result
 
     def get_last_model_selection(
         self,
@@ -886,6 +942,7 @@ class CareerConversationRepository:
                       AND turn.actor_id = :actor_id
                       AND conversation.actor_id = :actor_id
                       AND conversation.status <> 'deleted'
+                      AND NOT (turn.input_kind_codes @> '["job_search_auto_analysis"]'::jsonb)
                     ORDER BY turn.created_at DESC, turn.id DESC
                     LIMIT 1
                     """,
@@ -1026,6 +1083,8 @@ class CareerConversationRepository:
             content_text=row["content_text"],
             is_redacted=row["is_redacted"],
             created_at=row["created_at"],
+            is_automatic=bool(row.get("is_automatic", False)),
+            ui_payload=row.get("ui_payload"),
         )
 
     @staticmethod

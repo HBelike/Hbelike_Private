@@ -1,0 +1,181 @@
+/* 两端共用主题；这里只收纳手机的布局与触控规范。 */
+.mobile-tools-toggle,.mobile-filter-toggle,.mobile-library-back,.mobile-library-import-toggle,.mobile-skill-tabs{display:none}
+.mobile-skill-reader{display:none}
+
+@media (max-width:640px) {
+  .login-page input{font-size:16px}
+  .login-page .login-submit{min-height:48px;font-size:16px}
+  .career-job-dialog[role=dialog],.greeting-dialog[role=dialog],.model-dialog[role=dialog]{height:var(--dialog-visible-height,var(--career-visible-height,100dvh));max-height:var(--dialog-visible-height,var(--career-visible-height,100dvh))}
+  .import-dialog[role=dialog],.collection-dialog[role=dialog]{max-height:var(--dialog-visible-height,100dvh)}
+  .model-dialog[role=dialog]{width:100%;border:0;border-radius:0}
+  .model-dialog[role=dialog] .model-dialog-header,.model-dialog[role=dialog] .model-dialog-footer{flex:none;padding:12px 16px}
+  .model-dialog[role=dialog] .model-dialog-body{min-height:0;flex:1;overflow:auto;padding:16px}
+  .model-dialog[role=dialog] button,.import-dialog[role=dialog] button,.collection-dialog[role=dialog] button{min-height:44px}
+  .model-dialog[role=dialog] input,.model-dialog[role=dialog] select,.model-dialog[role=dialog] textarea,.import-dialog[role=dialog] input,.import-dialog[role=dialog] textarea,.collection-dialog[role=dialog] input,.collection-dialog[role=dialog] textarea{max-width:100%;font-size:16px}
+  .import-dialog[role=dialog]>header,.collection-dialog[role=dialog]>header{flex:none}
+  .import-dialog[role=dialog] .import-form,.collection-dialog[role=dialog] .collection-form{min-height:0;overflow:auto}
+  .import-dialog[role=dialog] footer,.collection-dialog[role=dialog] footer{position:sticky;bottom:0;z-index:1;background:var(--ui-surface);padding-bottom:max(12px,env(safe-area-inset-bottom))}
+  .main{--message-font-size:16px;padding:12px 16px max(16px,env(safe-area-inset-bottom));scroll-behavior:auto}
+  .main .topbar{flex-shrink:0;gap:10px;min-height:56px;margin:0 0 12px;padding:5px 8px}
+  .main .topbar h1{font-size:20px;line-height:1.4}
+  .main .mobile-nav-toggle,.main .account-breadcrumb{min-width:44px;min-height:44px}
+  .main .account-menu{max-width:calc(100vw - 32px)}
+  .main input:not([type=checkbox]):not([type=radio]),.main select,.main textarea{font-size:16px}
+  .main button{touch-action:manipulation}
+  .main .primary-button,.main .secondary-button,.main .primary-action,.main .quiet-action{min-height:44px;font-size:15px;white-space:normal}
+  .main .alert,.main .notice{overflow-wrap:anywhere}
+  .shell .sidebar .nav-item{min-height:44px}
+  .main .mobile-filter-toggle{display:inline-flex;align-items:center;justify-content:center;min-height:44px;border:1px solid var(--ui-line);border-radius:10px;background:var(--ui-surface);color:var(--ui-accent-ink);padding:8px 14px;font:inherit}
+
+  /* 聊天只让消息区滚动，避免输入区被固定最小高度推出视口。 */
+  .shell .main.career-route{display:flex;height:var(--career-visible-height,100dvh);min-height:0;flex-direction:column;overflow:hidden;padding-bottom:max(8px,env(safe-area-inset-bottom))}
+  .main.career-route .career-workspace,.main.career-route .career-workspace.has-context-rail{height:auto;min-height:0;flex:1;grid-template-rows:minmax(0,1fr);overflow:hidden}
+  .main.career-route .career-chat-panel{height:100%;min-height:0;overflow:hidden}
+  .main.career-route .chat-header{min-height:0;gap:8px;padding:10px 12px}
+  .main.career-route .chat-header h2{font-size:17px;line-height:1.5;overflow-wrap:anywhere}
+  .main.career-route .chat-header>div:first-child{flex:1 1 150px;min-width:0}
+  .main.career-route .compact-panel-trigger{min-height:44px;padding:8px 12px;font-size:14px}
+  .main.career-route .active-context-line{display:none}
+  .main.career-route .chat-material-actions{gap:8px;margin-top:0;max-height:52px;overflow:auto}
+  .main.career-route .chat-material-button{min-height:44px;font-size:13px;flex:none}
+  .main.career-route .empty-state{min-height:0;flex:1;overflow:auto;padding:24px 16px}
+  .main.career-route .career-chat-panel:has(.empty-state) .composer{display:none}
+  .main.career-route .message-list{min-height:0;flex:1;overflow:auto;padding:16px 12px}
+  .main.career-route .message,.main.career-route .agent-message{max-width:100%;font-size:16px;line-height:1.7}
+  .main.career-route .composer{position:relative;flex:none;max-height:60%;overflow:auto;padding:8px 12px max(8px,env(safe-area-inset-bottom));box-shadow:none}
+  .main.career-route .composer-card{border-radius:16px;padding:10px}
+  .main.career-route .composer-materials{gap:6px;margin-bottom:8px}
+  .main.career-route .composer-material-button{min-height:30px;gap:5px;padding:5px 7px;font-size:12px}
+  .main.career-route .composer-primary-tools{gap:4px}
+  .main.career-route .composer-controls{gap:6px;margin-top:6px}
+  .main.career-route .model-select{max-width:145px}
+  .main.career-route .composer-suggestions{gap:6px;margin-top:8px}
+  .main.career-route .composer-suggestions>button{padding:6px 8px}
+  .main.career-route .composer-toolbar{display:none;margin:8px 0}
+  .main.career-route .composer-toolbar.mobile-tools-open{display:flex}
+  .main.career-route .composer-toolbar .input-tools{gap:8px}
+  .main.career-route .composer-toolbar button,.main.career-route .composer-toolbar select{min-height:44px;max-width:100%;font-size:14px}
+  .main.career-route .composer-input-shell{margin-top:0}
+  .main.career-route .composer-input-shell textarea,.main.career-route .composer-highlight-layer{min-height:52px;max-height:120px;padding:0;font-size:16px;line-height:1.6}
+  .main.career-route .composer-footer{flex-direction:row;align-items:center;gap:8px;margin-top:8px}
+  .main.career-route .composer-footer>small{display:none}
+  .main.career-route .composer-submit-tools{width:auto;justify-content:flex-end;gap:5px}
+  .main.career-route .send-button{align-self:center;width:40px;height:40px;min-width:40px;min-height:40px;padding:8px}
+  .main.career-route .context-rail-slot{inset:0;width:100%;max-width:none;border-radius:0;padding-top:52px;padding-bottom:env(safe-area-inset-bottom)}
+  .main.career-route .context-panel-close{top:max(6px,env(safe-area-inset-top));right:12px;min-width:44px;min-height:44px}
+  .main.career-route .career-history-panel{max-height:calc(100dvh - 24px)}
+  .main.career-route .career-history-panel button{min-height:44px}
+  .main.career-route .career-history-panel .conversation-list{min-height:0;overflow:auto}
+
+  /* 评测、管理与内容页避免压缩文字来维持桌面多列。 */
+  .main .evaluation-heading{align-items:stretch;flex-direction:column}
+  .main .evaluation-heading h2{font-size:24px;line-height:1.4}
+  .main .evaluation-actions{display:flex;flex-wrap:wrap;gap:8px}
+  .main .evaluation-actions button{flex:1;min-height:44px;white-space:nowrap}
+  .main .evaluation-section-heading>button{flex:none;min-height:44px;white-space:nowrap}
+  .main .evaluation-tabs{display:flex;max-width:100%;overflow-x:auto;flex-shrink:0}
+  .main .evaluation-tabs button{flex:none;min-height:44px;white-space:nowrap;font-size:14px}
+  .main .evaluation-chain{grid-template-columns:minmax(0,1fr)}
+  .main .evaluation-chain article{min-height:0;gap:5px;padding:16px 20px}
+  .main .evaluation-chain>i{transform:rotate(90deg);padding:0}
+  .main .evaluation-overview-grid,.main .evaluation-experiment-layout,.main .evaluation-form,.main .evaluation-metric-dictionary,.main .evaluation-metric-results{grid-template-columns:minmax(0,1fr)}
+  .main .evaluation-panel{min-height:0;padding:16px}
+  .main .evaluation-panel>header{flex-wrap:wrap}
+  .main .evaluation-version-list>div{grid-template-columns:minmax(0,1fr);gap:8px;padding:14px}
+  .main .evaluation-experiment-list>button,.main .evaluation-experiment-list.compact>button{grid-template-columns:minmax(0,1fr) auto;gap:8px}
+  .main .evaluation-experiment-list strong{white-space:normal}
+  .main .evaluation-inline-form{grid-template-columns:minmax(0,1fr)}
+  .main .evaluation-run-table{max-width:100%;overflow-x:auto}
+  .main .evaluation-run-table>div{min-width:480px}
+  .main .evaluation-page p,.main .evaluation-page label{overflow-wrap:anywhere}
+  .main .admin-config-form,.main .admin-config-card{min-width:0}
+  .main .admin-config-card{padding:16px}
+  .main .admin-field-grid,.main .admin-prompt-grid,.main .admin-media-control-grid{grid-template-columns:minmax(0,1fr)}
+  .main .admin-console-heading,.main .admin-card-heading,.main .observability-heading{flex-wrap:wrap;gap:12px}
+  .main .admin-console-subnav{display:flex;max-width:100%;overflow:auto}
+  .main .admin-console-subnav button{flex:none;min-height:44px}
+  .main .admin-media-textarea{font-size:16px}
+  .main .article-detail{padding:20px 16px}
+  .main .wechat-article-header h2{font-size:24px;line-height:1.5;overflow-wrap:anywhere}
+  .main .article-body{min-width:0;font-size:16px;line-height:1.8;overflow-wrap:anywhere}
+  .main .article-body img,.main .media-preview img{max-width:100%;height:auto}
+  .main pre{max-width:100%;overflow-x:auto}
+  .main .article-body table{display:block;max-width:100%;overflow-x:auto}
+  .main .review-home-scroll{overflow:visible;padding-right:0}
+  .main .detail-toolbar,.main .module-card-header,.main .review-page-header{flex-wrap:wrap}
+
+  .main .resume-search .resume-date-filter{display:none}
+  .main .resume-search.show-date-filters .resume-date-filter{display:grid}
+  .main .resume-search .search-actions{flex-direction:row;gap:8px}
+  .main .resume-search .search-actions button{width:auto;flex:1;min-height:48px}
+  .main .resume-assistant .record-summary{margin-top:20px}
+  .main .resume-assistant .resume-history-card strong{white-space:normal;overflow-wrap:anywhere}
+  .main .resume-assistant .document-pane,.main .resume-assistant .assistant-pane{min-width:0}
+  .main .resume-assistant .resume-pane-switcher button{min-height:44px;font-size:14px}
+  .main .resume-assistant .task-input-panel textarea{resize:vertical}
+
+  .main .interview-library-shell .library-header{padding:16px;gap:12px}
+  .main .interview-library-shell .library-description{font-size:14px;line-height:1.7}
+  .main .mobile-library-import-toggle,.main .mobile-library-back{display:inline-flex;align-items:center;justify-content:center;min-height:44px;border:1px solid var(--ui-line);border-radius:9px;padding:8px 14px;background:var(--ui-surface);color:var(--ui-accent-ink);font:inherit;font-size:15px}
+  .main .interview-library-shell .library-actions{display:none}
+  .main .interview-library-shell.show-mobile-imports .library-actions{display:flex}
+  .main .interview-library-shell .interview-detail-pane{display:none}
+  .main .interview-library-shell .interview-tree-pane{max-height:none;min-height:240px}
+  .main .interview-library-shell .company-tree{max-height:none;overflow:visible}
+  .main .interview-library-shell .tree-leaf{min-height:64px}
+  .main .interview-library-shell.show-mobile-detail .interview-tree-pane,.main .interview-library-shell.show-mobile-detail>.library-header{display:none}
+  .main .interview-library-shell.show-mobile-detail .interview-detail-pane{display:block;overflow:visible}
+  .main .mobile-library-back{margin:12px 16px}
+  .main .interview-library-shell .markdown-reading{font-size:16px;line-height:1.8;padding:18px 16px}
+  .main .interview-library-shell .experience-header{gap:12px;padding:16px}
+  .main .interview-library-shell .experience-header h3{font-size:21px;overflow-wrap:anywhere}
+  .main .interview-library-shell .experience-context-strip{flex-wrap:wrap}
+  .main .interview-library-shell .editor-layout{padding:16px;grid-template-columns:minmax(0,1fr)}
+
+  .main .mobile-skill-tabs{display:flex;gap:8px;min-height:44px;margin-bottom:12px;flex-shrink:0}
+  .main .mobile-skill-tabs button{flex:1;min-width:0;min-height:44px;border:1px solid var(--ui-line);border-radius:9px;background:var(--ui-surface);color:var(--ui-text-secondary);padding:8px;font:inherit;font-size:14px}
+  .main .mobile-skill-tabs button[aria-pressed=true]{background:var(--ui-surface-active);border-color:var(--ui-accent);color:var(--ui-accent-ink)}
+  .main .skills-workspace{display:block;min-height:0;margin:0}
+  .main .skills-workspace .skill-sub-sidebar,.main .skills-workspace .skill-search-panel,.main .skills-workspace .skill-editor-panel{display:none;min-width:0}
+  .main .skills-workspace.show-mobile-skill-list .skill-sub-sidebar{display:block;max-height:none}
+  .main .skills-workspace.show-mobile-skill-search .skill-search-panel{display:flex;max-height:none}
+  .main .skills-workspace.show-mobile-skill-editor .skill-editor-panel{display:flex}
+  .main .skills-workspace.show-mobile-skill-list .skills-main-panel{display:none}
+  .main .skills-main-panel{min-height:0;overflow:visible}
+  .main .skill-editor-panel .panel-header{flex-direction:column;align-items:stretch}
+  .main .skill-editor-panel .panel-header h2{font-size:20px;overflow-wrap:anywhere}
+  .main .skill-detail-meta{overflow-wrap:anywhere;font-size:13px}
+  .main .skill-editor-panel.is-reading .skill-markdown-editor,.main .skill-editor-panel.is-reading .skill-save-row{display:none}
+  .main .skill-editor-panel.is-reading .mobile-skill-reader{display:block;min-width:0;font-size:16px;line-height:1.8;overflow-wrap:anywhere}
+  .main .skill-markdown-editor{min-height:280px;height:50dvh;font-size:16px;line-height:1.6}
+  .main .skill-save-row{position:sticky;bottom:0;z-index:2;display:flex;flex-direction:column;align-items:stretch;gap:8px;background:var(--ui-surface);padding:12px 0 max(12px,env(safe-area-inset-bottom))}
+  .main .skill-save-row button{min-height:48px}
+  .main.skills-route>.alert{position:sticky;top:0;z-index:6;flex-shrink:0}
+  .main .context-rail-slot .job-match-grid span,.main .context-rail-slot .job-match-grid small{font-size:13px;white-space:normal}
+  .main .context-rail-slot .job-match-grid strong{font-size:23px}
+  .main .context-rail-slot .job-meta span,.main .context-rail-slot .job-company{font-size:14px}
+  .main .observability-status-grid{grid-template-columns:minmax(0,1fr)}
+  .main .observability-actions{display:flex;flex-wrap:wrap;gap:8px}
+  .main .observability-actions>*{min-height:44px}
+  .main .observability-console-card{grid-template-columns:minmax(0,1fr);padding:16px}
+  .main .observability-console-link{min-height:44px;white-space:normal;text-align:center}
+}
+
+@media(max-width:640px) and (max-height:600px){
+  .main.career-route .composer-suggestions{display:none}
+}
+
+@media (max-width:900px) and (max-height:500px) {
+  .shell .main.career-route{display:flex;height:var(--career-visible-height,100dvh);flex-direction:column;overflow:hidden;padding:6px 12px}
+  .main.career-route .topbar{min-height:44px;margin:0 0 6px;padding-block:2px}
+  .main.career-route .career-workspace{min-height:0;height:auto;flex:1}
+  .main.career-route .chat-header{display:grid;grid-template-columns:minmax(0,1fr) auto;min-height:44px;flex:none;gap:6px;padding:6px 12px}
+  .main.career-route .chat-header>div:first-child{min-width:0}
+  .main.career-route .chat-header h2{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .main.career-route .chat-material-actions{grid-column:1/-1;width:100%;max-width:100%;margin:0;overflow-x:auto;flex-shrink:0}
+  .main.career-route .active-context-line,.main.career-route .composer-footer>small{display:none}
+  .main.career-route .career-chat-panel{min-height:0}
+  .main.career-route .empty-state{min-height:0;flex:1;overflow:auto;padding:12px}
+  .main.career-route .composer{flex:none;padding:6px 10px;max-height:65%;overflow:auto}
+  .main.career-route .composer-input-shell textarea,.main.career-route .composer-highlight-layer{min-height:44px;max-height:70px}
+}

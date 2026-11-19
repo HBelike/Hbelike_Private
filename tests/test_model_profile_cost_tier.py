@@ -21,6 +21,13 @@ def test_deepseek_is_always_normalized_to_paid() -> None:
     )
 
 
+def test_kimi_is_always_normalized_to_paid() -> None:
+    assert (
+        normalize_model_cost_tier(" Kimi ", ModelCostTier.FREE_QUOTA)
+        is ModelCostTier.PAID
+    )
+
+
 def test_other_provider_keeps_declared_cost_tier() -> None:
     """其他服务商仍由免费目录或管理员提交的费用属性决定。"""
 

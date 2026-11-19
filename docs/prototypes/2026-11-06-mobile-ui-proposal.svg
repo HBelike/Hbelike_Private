@@ -1,0 +1,104 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="1120" viewBox="0 0 1440 1120">
+  <defs>
+    <style>
+      text{font-family:"Segoe UI Variable Text","PingFang SC","Microsoft YaHei",sans-serif;fill:#17223b;font-size:16px}
+      .title{font-size:28px;font-weight:700}.heading{font-size:20px;font-weight:700}.section{font-size:18px;font-weight:700}.small{font-size:14px;fill:#526078}.muted{fill:#526078}.accent{fill:#0064dd}.white{fill:white}.bold{font-weight:650}.line{stroke:#d7e4f6;stroke-width:1}.surface{fill:white;stroke:#d7e4f6}.soft{fill:#f4f8fe}.button{fill:#0064dd}.chip{fill:#eaf3ff}.center{text-anchor:middle}
+    </style>
+    <filter id="shadow" x="-20%" y="-10%" width="140%" height="130%"><feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#17345b" flood-opacity=".08"/></filter>
+    <g id="menu"><path d="M0 0h18M0 6h18M0 12h18" stroke="#17223b" stroke-width="1.8" stroke-linecap="round"/></g>
+    <g id="back"><path d="m9 0-8 8 8 8" fill="none" stroke="#17223b" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></g>
+    <g id="arrow"><path d="m0 0 6 6-6 6" fill="none" stroke="#0064dd" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></g>
+  </defs>
+  <rect width="1440" height="1120" fill="#edf3fb"/>
+  <text x="40" y="52" class="title">移动端 UI 改造方案</text>
+  <text x="40" y="83" class="muted">同一套业务状态，按当前任务重排界面 · 以下为设计示例，非已实现页面</text>
+  <text x="40" y="125" class="section">求职对话</text><text x="525" y="125" class="section">职位信息</text><text x="1010" y="125" class="section">匹配分析</text>
+
+  <!-- 对话始终是主任务；辅助资料从明确入口打开。 -->
+  <g transform="translate(40 146)">
+    <rect width="390" height="844" rx="24" fill="#f5f8fd" stroke="#cfddf0" filter="url(#shadow)"/>
+    <path d="M24 0h342a24 24 0 0 1 24 24v32H0V24A24 24 0 0 1 24 0" fill="white"/>
+    <use href="#menu" x="20" y="23"/><text x="56" y="35" class="heading">求职助手</text>
+    <circle cx="354" cy="28" r="18" fill="#eaf3ff"/><text x="354" y="34" class="accent center bold">陈</text>
+    <path d="M0 56h390" class="line"/>
+    <text x="16" y="86" class="section">Agent 工程师求职准备</text>
+    <rect x="16" y="102" width="96" height="44" rx="10" class="surface"/><text x="64" y="130" class="accent center">历史会话</text>
+    <rect x="122" y="102" width="112" height="44" rx="10" class="surface"/><text x="178" y="130" class="accent center">职位信息</text>
+    <text x="16" y="183" class="small">今天 14:30</text>
+    <rect x="93" y="201" width="281" height="83" rx="14" fill="#eaf3ff"/>
+    <text x="109" y="231"><tspan x="109">请结合我的项目经历，帮我准备</tspan><tspan x="109" dy="28">这个岗位的面试。</tspan></text>
+    <circle cx="31" cy="321" r="15" fill="#0064dd"/><text x="31" y="327" class="white center bold">职</text>
+    <text x="56" y="327" class="bold">求职助手</text>
+    <rect x="16" y="347" width="358" height="255" rx="14" class="surface"/>
+    <text x="32" y="379">这个岗位重点关注三个方面：</text>
+    <text x="32" y="418" class="bold">项目职责</text><text x="32" y="445" class="muted">说清楚你负责的模块和关键取舍。</text>
+    <text x="32" y="484" class="bold">工程交付</text><text x="32" y="511" class="muted">用真实结果说明验证和协作过程。</text>
+    <text x="32" y="550" class="bold">待核实要求</text><text x="32" y="577" class="muted">查看岗位信息中的要求与简历证据。</text>
+    <rect x="0" y="660" width="390" height="160" fill="white"/><path d="M0 660h390" class="line"/>
+    <rect x="16" y="674" width="358" height="79" rx="12" class="surface"/>
+    <text x="30" y="704" class="muted">继续提问，或补充项目细节…</text>
+    <text x="28" y="735" class="small">Enter 换行</text>
+    <rect x="16" y="763" width="120" height="44" rx="10" class="soft"/><text x="76" y="791" class="accent center">资料与工具</text>
+    <rect x="278" y="763" width="96" height="44" rx="10" class="button"/><text x="326" y="791" class="white center bold">发送</text>
+    <rect x="143" y="830" width="104" height="4" rx="2" fill="#b9c9df"/>
+  </g>
+
+  <!-- 手机复用已有会话绑定资料；实时检索能力单独提示。 -->
+  <g transform="translate(525 146)">
+    <rect width="390" height="844" rx="24" fill="#f5f8fd" stroke="#cfddf0" filter="url(#shadow)"/>
+    <path d="M24 0h342a24 24 0 0 1 24 24v32H0V24A24 24 0 0 1 24 0" fill="white"/>
+    <use href="#back" x="22" y="20"/><text x="55" y="35" class="heading">职位信息</text><text x="340" y="34" class="small center">关闭</text>
+    <path d="M0 56h390" class="line"/>
+    <rect x="16" y="72" width="358" height="151" rx="12" class="surface"/>
+    <text x="32" y="105" class="section">Agent 软件开发工程师</text>
+    <text x="32" y="139" class="accent heading">25–40K</text><text x="32" y="168" class="muted">示例科技 · 北京 · 本科 · 3–5 年</text>
+    <text x="32" y="200" class="small">当前对话已绑定的目标岗位</text>
+    <rect x="16" y="239" width="358" height="64" rx="10" fill="#fff8e8"/>
+    <text x="30" y="264" class="small" style="fill:#946012"><tspan x="30">实时岗位检索与招呼发送需要电脑端</tspan><tspan x="30" dy="23">浏览器助手；当前可查看已绑定资料。</tspan></text>
+    <rect x="16" y="319" width="358" height="376" rx="12" class="surface"/>
+    <text x="32" y="351" class="section">岗位描述</text>
+    <text x="32" y="387"><tspan x="32">负责 Agent 应用的设计与交付，</tspan><tspan x="32" dy="28">与产品、后端协作验证核心流程。</tspan></text>
+    <path d="M32 440h326" class="line"/>
+    <text x="32" y="473" class="section">任职要求</text>
+    <text x="32" y="509"><tspan x="32">熟悉 Python 和服务端开发，能够</tspan><tspan x="32" dy="28">说明项目中的技术选型与工程取舍。</tspan></text>
+    <text x="32" y="583"><tspan x="32">理解模型调用、工具协作和任务</tspan><tspan x="32" dy="28">状态处理，有可核对的项目经历。</tspan></text>
+    <text x="32" y="664" class="small">展开完整原文</text><use href="#arrow" x="343" y="653"/>
+    <rect x="16" y="711" width="358" height="44" rx="10" class="surface"/><text x="32" y="739" class="small">基准简历：示例简历 · 版本 1</text>
+    <rect x="0" y="766" width="390" height="55" fill="white"/>
+    <rect x="16" y="771" width="358" height="48" rx="10" class="button"/><text x="195" y="801" class="white center bold">查看岗位匹配分析</text>
+    <rect x="143" y="830" width="104" height="4" rx="2" fill="#b9c9df"/>
+  </g>
+
+  <!-- 分数、要求和证据按阅读顺序呈现，手机不保留右侧证据栏。 -->
+  <g transform="translate(1010 146)">
+    <rect width="390" height="844" rx="24" fill="#f5f8fd" stroke="#cfddf0" filter="url(#shadow)"/>
+    <path d="M24 0h342a24 24 0 0 1 24 24v32H0V24A24 24 0 0 1 24 0" fill="white"/>
+    <use href="#back" x="22" y="20"/><text x="55" y="35" class="heading">岗位匹配分析</text><text x="331" y="34" class="small accent center">重新分析</text>
+    <path d="M0 56h390" class="line"/>
+    <text x="16" y="88" class="small">示例岗位 × 基准简历 v1</text>
+    <rect x="16" y="105" width="358" height="179" rx="12" class="surface"/>
+    <text x="32" y="140">硬性条件</text><text x="355" y="140" text-anchor="end" style="fill:#946012" class="bold">有条件待核实</text>
+    <path d="M32 160h326" class="line"/>
+    <text x="32" y="194">核心要求</text><text x="355" y="194" text-anchor="end" class="accent heading">75–100%</text>
+    <path d="M32 215h326" class="line"/>
+    <text x="32" y="251">加分项</text><text x="355" y="251" text-anchor="end" class="bold">1 / 1 项</text>
+    <text x="16" y="314" class="small">当前简历证据支持的范围，含待确认项。</text>
+    <rect x="0" y="332" width="390" height="50" fill="white"/>
+    <text x="57" y="362" class="accent center bold">要求对照</text><text x="151" y="362" class="small center">JD 原文</text><text x="240" y="362" class="small center">简历原文</text><text x="334" y="362" class="small center">计算规则</text>
+    <path d="M16 380h82" stroke="#0064dd" stroke-width="3"/>
+    <rect x="16" y="398" width="358" height="304" rx="12" class="surface"/>
+    <rect x="32" y="414" width="68" height="28" rx="6" fill="#edf9f4"/><text x="66" y="434" class="small center" style="fill:#247a5a">有证据</text>
+    <text x="32" y="473" class="section">独立完成 Agent 应用交付</text>
+    <text x="32" y="504" class="muted">简历中有服务实现与项目交付经历。</text>
+    <rect x="32" y="522" width="326" height="140" rx="8" class="soft"/>
+    <text x="46" y="550" class="small bold">简历依据</text>
+    <text x="46" y="581"><tspan x="46">“负责 Agent 服务实现，</tspan><tspan x="46" dy="28">协调团队并完成质量验证。”</tspan></text>
+    <text x="46" y="645" class="small accent">定位简历原文</text><use href="#arrow" x="330" y="633"/>
+    <text x="32" y="686" class="small accent">收起依据</text>
+    <rect x="16" y="718" width="358" height="85" rx="12" class="surface"/>
+    <text x="32" y="748" class="small" style="fill:#946012">待核实</text><text x="32" y="780" class="bold">是否有生产环境交付经历？</text><use href="#arrow" x="341" y="764"/>
+    <rect x="143" y="830" width="104" height="4" rx="2" fill="#b9c9df"/>
+  </g>
+  <text x="40" y="1036" class="bold">布局原则</text><text x="140" y="1036" class="muted">主任务占满可用宽度 · 辅助资料按需打开 · 重要操作至少 44px · 中文输入法组词不触发发送</text>
+  <text x="40" y="1073" class="small">PC 保留多栏工作区；手机切换布局时保留草稿、当前会话和已选资料。软键盘与真实业务仍须独立验收。</text>
+</svg>

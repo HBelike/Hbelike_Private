@@ -21,6 +21,14 @@
       "source": "inference-sh/skills",
       "sourceType": "github",
       "sourceUrl": "https://github.com/inference-sh/skills.git"
+    },
+    "resume-builder": {
+      "source": "reactive-resume/reactive-resume",
+      "sourceType": "github",
+      "sourceUrl": "https://github.com/reactive-resume/reactive-resume.git",
+      "commit": "19a4133e326b5f6b6ad09862b6b0f7b6002e1924",
+      "path": "plugins/reactive-resume/skills/resume-builder",
+      "license": "MIT"
     }
   },
   "dismissed": {}

@@ -1,3 +1,5 @@
+import { evaluationViewForRoute, evaluationRouteForView } from './evaluation-navigation.js'
+
 export const DEFAULT_APP_ROUTE = '/career'
 
 const AUTH_ROUTES = new Set(['/login', '/register', '/forgot-password'])
@@ -7,6 +9,8 @@ export function normalizeAppRoute(pathname, reviewRoutes = []) {
   if (!pathname || pathname === '/') return DEFAULT_APP_ROUTE
   if (AUTH_ROUTES.has(pathname)) return pathname
   if (pathname === '/career') return '/career'
+  if (pathname === '/career/messages') return '/career/messages'
+  if (pathname === '/career/import') return '/career/import'
   if (pathname === '/career/interview-master') return '/career/interview-master'
   if (pathname === '/career/online-assessment') return '/career/online-assessment'
   if (pathname === '/resume-assistant' || pathname.startsWith('/resume-assistant/')) return '/resume-assistant'
@@ -14,7 +18,7 @@ export function normalizeAppRoute(pathname, reviewRoutes = []) {
   if (pathname === '/interviews') return '/interviews'
   if (pathname === '/skills' || pathname.startsWith('/skills/')) return '/skills'
   if (pathname === '/observability') return '/observability'
-  if (pathname === '/evaluations' || pathname.startsWith('/evaluations/')) return '/evaluations'
+  if (pathname === '/evaluations' || pathname.startsWith('/evaluations/')) return evaluationRouteForView(evaluationViewForRoute(pathname))
   if (pathname === '/admin') return '/admin/modules'
   if (ADMIN_ROUTES.has(pathname)) return pathname
   if (pathname.startsWith('/admin/')) return '/admin/modules'

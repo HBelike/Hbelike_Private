@@ -9,5 +9,5 @@ test('职位信息栏拖拽手柄不被外层容器裁切', async () => {
 
   assert.match(source, /\.context-rail-slot\{[^}]*overflow:visible[^}]*\}/)
   assert.doesNotMatch(source, /\.context-rail-slot\{[^}]*overflow:hidden[^}]*\}/)
-  assert.match(source, /\.context-rail-resizer\{[^}]*left:-13px[^}]*cursor:col-resize[^}]*\}/)
+  assert.match(source, /\.context-rail-resizer\{[^}]*left:-8px[^}]*cursor:col-resize[^}]*\}/)
 })

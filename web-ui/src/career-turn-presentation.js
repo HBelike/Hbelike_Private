@@ -1,3 +1,5 @@
+import { isResumeReviewTurn } from './career-resume-review.js'
+
 const PREPARING_STEPS = new Set([
   'validate_input',
   'build_context',
@@ -69,6 +71,9 @@ export function submissionFeedback(ahead) {
 }
 
 export function observedTurnStatus(turn) {
+  if (isResumeReviewTurn(turn)) {
+    return turn?.status === 'queued' ? '简历已确认，即将为你阅读并给出建议…' : '正在阅读简历，整理改进建议…'
+  }
   if (turn?.status !== 'queued') return '正在分析并组织回复…'
   const ahead = Math.max(0, Number(turn?.conversation_position) || 0)
   return ahead > 0

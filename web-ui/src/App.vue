@@ -1,6 +1,8 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef } from 'vue'
+import { ChatDotRound, Document, Notebook, Briefcase, Grid, Monitor, DataAnalysis, Connection, Setting, MoreFilled } from '@element-plus/icons-vue'
 import CareerAssistantPage from './components/CareerAssistantPage.vue'
+import CareerMessagesPage from './components/CareerMessagesPage.vue'
 import BrowserInterviewMasterPage from './components/BrowserInterviewMasterPage.vue'
 import OnlineAssessmentAssistantPage from './components/OnlineAssessmentAssistantPage.vue'
 import ResumeAssistantPage from './components/ResumeAssistantPage.vue'
@@ -13,6 +15,13 @@ import AdminConsolePage from './components/AdminConsolePage.vue'
 import ManualPipelinePanel from './components/ManualPipelinePanel.vue'
 import ThemeSwitcher from './components/ThemeSwitcher.vue'
 import ImagePreviewDialog from './components/ImagePreviewDialog.vue'
+import DesktopCapabilityNotice from './components/DesktopCapabilityNotice.vue'
+import MaterialSharePage from './components/MaterialSharePage.vue'
+import { shareInboxRequest, shareReturnLocation } from './material-share.js'
+import { isMobileBrowser } from './platform-capabilities.js'
+import { EVALUATION_VIEWS, evaluationViewForRoute } from './evaluation-navigation.js'
+import CareerMessageContent from './components/CareerMessageContent.vue'
+import { dismissHistoryLayers, useHistoryLayer } from './use-history-layer.js'
 import { decorateOpenableImages, resolveImagePreviewRequest } from './image-preview.js'
 import { formatWeekRange } from './article-time.js'
 import {
@@ -30,6 +39,7 @@ import {
 } from './navigation-access.js'
 
 const preview = ref(null)
+const mobileBrowser = isMobileBrowser()
 const mediaLibrary = ref({ items: [], pending_video_clips: [], summary: {} })
 const executionHistory = ref([])
 const executionHistoryLoading = ref(false)
@@ -48,6 +58,8 @@ const operatorName = ref('content-reviewer')
 const mainViewport = ref(null)
 const skills = ref([])
 const selectedSkill = ref(null)
+const mobileSkillPane = ref('list')
+const skillContentMode = ref('read')
 const installedSkillQuery = ref('')
 const skillSearchQuery = ref('')
 const skillSearchResults = ref([])
@@ -59,11 +71,49 @@ const skillEditorMarkdown = ref('')
 const skillSaveName = ref('')
 const skillMessage = ref('')
 const skillErrorMessage = ref('')
+const skillDrafts = new Map()
+let skillDetailRevision = 0
+
+function rememberSkillDraft() {
+  if (!selectedSkill.value?.id) return
+  skillDrafts.set(selectedSkill.value.id, { markdown: skillEditorMarkdown.value, name: skillSaveName.value })
+}
 const starPopoverSkill = ref(null)
 const starPopoverPosition = ref({ left: '0px', top: '0px' })
 const authReady = ref(false)
 const authUser = ref(null)
+const careerWorkspace = shallowRef(null)
+const pendingSharedMaterial = shallowRef(null)
+const transferringShare = ref(false)
+const sharedImportError = ref('')
+const initialShareLocation = shareReturnLocation(window.location)
+const shareRouteKey = ref(window.location.search)
+
+async function acceptSharedMaterial(material) {
+  if (transferringShare.value) return
+  if (pendingSharedMaterial.value && !window.confirm('还有一份分享资料待导入，是否用这份资料替换？')) return
+  transferringShare.value = true
+  sharedImportError.value = ''
+  try {
+    await navigateTo('/career')
+    if (currentRoute.value !== '/career' || !authUser.value) return
+    pendingSharedMaterial.value = material
+    await shareInboxRequest('share:delete', material.id)
+  } catch (error) {
+    sharedImportError.value = error.message
+  } finally {
+    transferringShare.value = false
+  }
+}
+function preserveCareerWorkspace(workspace) {
+  // 退出登录后的子组件卸载不能重新写回旧账户工作区。
+  if (authUser.value) careerWorkspace.value = workspace
+}
 const mobileNavOpen = ref(false)
+const mobileNavToggle = ref(null)
+const sidebarCollapsed = ref(window.localStorage.getItem('find-job-sidebar-collapsed') === '1')
+const secondaryNavigationOpen = ref(false)
+let routeNavigationRevision = 0
 const isMobileViewport = ref(false)
 const uiTheme = ref(document.documentElement.dataset.uiTheme === 'green' ? 'green' : 'blue')
 const navigationModules = ref([])
@@ -187,7 +237,14 @@ const appNavItems = [
 ]
 
 const currentRoute = ref(normalizeRoute(window.location.pathname))
+useHistoryLayer(() => mobileNavOpen.value, closeMobileNavigation)
+useHistoryLayer(() => mobileSkillPane.value !== 'list' && currentRoute.value === '/skills', () => { mobileSkillPane.value = 'list' })
 const visibleAppNavItems = computed(() => appNavItems.filter(canAccessNavItem))
+const primaryNavigationKeys = ['career_assistant', 'resume_assistant', 'interview_library', 'job_library', 'skill_library']
+const primaryAppNavItems = computed(() => primaryNavigationKeys.flatMap(key => visibleAppNavItems.value.filter(item => item.moduleKey === key)))
+const secondaryAppNavItems = computed(() => visibleAppNavItems.value.filter(item => !primaryNavigationKeys.includes(item.moduleKey)))
+const showSecondaryNavigation = computed(() => secondaryNavigationOpen.value || secondaryAppNavItems.value.some(isAppNavActive))
+const navigationIcons = { career_assistant: ChatDotRound, resume_assistant: Document, interview_library: Notebook, job_library: Briefcase, skill_library: Grid, workbench: Monitor, evaluation_center: DataAnalysis, langsmith: Connection, admin_console: Setting }
 const firstAccessibleRoute = computed(() => visibleAppNavItems.value[0]?.path ?? '')
 const canAccessCurrentRoute = computed(() => canAccessRoute(currentRoute.value))
 
@@ -248,11 +305,15 @@ const wechatTitle = computed(() => {
 })
 
 const activeRoute = computed(() => {
+  if (currentRoute.value === '/career/import') return { path: '/career/import', label: '分享资料导入', description: '接收并校对分享资料' }
   if (isAuthRoute(currentRoute.value)) {
     return { path: '/login', label: '登录', description: '平台账号访问' }
   }
   if (currentRoute.value === '/career') {
     return { path: '/career', label: '求职助手', description: '简历匹配与职业咨询' }
+  }
+  if (currentRoute.value === '/career/messages') {
+    return { path: '/career/messages', label: '招聘沟通', description: '查看 BOSS 会话与 HR 回复' }
   }
   if (currentRoute.value === '/career/online-assessment') {
     return { path: '/career/online-assessment', label: '线上笔试助手', description: '识别题面、生成代码并运行可见测试' }
@@ -272,8 +333,8 @@ const activeRoute = computed(() => {
   if (currentRoute.value === '/observability') {
     return { path: '/observability', label: '可观测性', description: 'LangSmith 模型链路监控' }
   }
-  if (currentRoute.value === '/evaluations') {
-    return { path: '/evaluations', label: '评测中心', description: '真实数据、实验对比与发布门槛' }
+  if (currentRoute.value.startsWith('/evaluations')) {
+    return { path: currentRoute.value, label: EVALUATION_VIEWS[evaluationViewForRoute(currentRoute.value)].label, description: '真实数据、实验对比与发布门槛' }
   }
   if (currentRoute.value.startsWith('/admin/')) {
     return { path: currentRoute.value, label: '管理台', description: '平台模块与内容工作流配置' }
@@ -435,6 +496,8 @@ function isAuthRoute(route) {
 }
 
 async function navigateTo(path) {
+  const requestId = ++routeNavigationRevision
+  if (!await dismissHistoryLayers() || requestId !== routeNavigationRevision) return
   closeMobileNavigation()
   const nextUrl = new URL(path, window.location.origin)
   const nextRoute = normalizeRoute(nextUrl.pathname)
@@ -443,6 +506,7 @@ async function navigateTo(path) {
   const currentLocation = `${window.location.pathname}${window.location.search}${window.location.hash}`
   if (currentRoute.value === nextRoute && currentLocation === nextLocation) return
   window.history.pushState({}, '', nextLocation)
+  shareRouteKey.value = nextUrl.search
   currentRoute.value = nextRoute
   if (currentRoute.value === '/skills' && !skills.value.length) {
     await loadSkills()
@@ -457,6 +521,7 @@ async function navigateTo(path) {
 
 function handlePopState() {
   closeMobileNavigation()
+  shareRouteKey.value = window.location.search
   currentRoute.value = normalizeRoute(window.location.pathname)
   if (!canAccessRoute(currentRoute.value)) {
     if (ensureCurrentRouteAccess()) void refreshCurrentPage()
@@ -473,12 +538,27 @@ function handlePopState() {
 }
 
 function closeMobileNavigation() {
+  const wasOpen = mobileNavOpen.value
   mobileNavOpen.value = false
+  if (wasOpen) nextTick(() => mobileNavToggle.value?.focus())
+}
+
+function toggleSidebar() {
+  sidebarCollapsed.value = !sidebarCollapsed.value
+  window.localStorage.setItem('find-job-sidebar-collapsed', sidebarCollapsed.value ? '1' : '0')
+}
+
+function toggleSecondaryNavigation() {
+  if (sidebarCollapsed.value && !isMobileViewport.value) toggleSidebar()
+  secondaryNavigationOpen.value = !secondaryNavigationOpen.value
 }
 
 function toggleMobileNavigation() {
   if (!isMobileViewport.value) return
-  mobileNavOpen.value = !mobileNavOpen.value
+  if (mobileNavOpen.value) { closeMobileNavigation(); return }
+  closeAccountMenu()
+  mobileNavOpen.value = true
+  nextTick(() => document.querySelector('#app-navigation button')?.focus())
 }
 
 function syncMobileViewport() {
@@ -492,6 +572,12 @@ function handleViewportResize() {
 }
 
 function handleGlobalKeydown(event) {
+  if (event.key === 'Tab' && mobileNavOpen.value) {
+    const controls = [...document.querySelectorAll('#app-navigation button:not(:disabled)')]
+    const target = event.shiftKey && document.activeElement === controls[0] ? controls.at(-1)
+      : !event.shiftKey && document.activeElement === controls.at(-1) ? controls[0] : null
+    if (target) { event.preventDefault(); target.focus() }
+  }
   if (event.key === 'Escape') {
     closeMobileNavigation()
     closeStarPopover()
@@ -504,6 +590,7 @@ function isAppNavActive(item) {
   if (item.path === '/review') return currentRoute.value.startsWith('/review')
   if (item.moduleKey === 'career_assistant') return currentRoute.value.startsWith('/career')
   if (item.moduleKey === 'admin_console') return currentRoute.value.startsWith('/admin/')
+  if (item.moduleKey === 'evaluation_center') return currentRoute.value.startsWith('/evaluations')
   return currentRoute.value === item.path
 }
 
@@ -513,12 +600,15 @@ function canAccessNavItem(item) {
 }
 
 function navItemForRoute(route) {
+  if (route === '/career/import') return appNavItems.find((item) => item.moduleKey === 'career_assistant')
   if (route.startsWith('/review')) return appNavItems.find((item) => item.moduleKey === 'workbench')
+  if (route === '/career/messages') return appNavItems.find((item) => item.moduleKey === 'career_assistant')
   if (route === '/career/interview-master') return appNavItems.find((item) => item.moduleKey === 'career_assistant')
   if (route === '/career/online-assessment') return appNavItems.find((item) => item.moduleKey === 'career_assistant')
   if (route === '/interviews/jobs') return appNavItems.find((item) => item.moduleKey === 'job_library')
   if (route === '/interviews') return appNavItems.find((item) => item.moduleKey === 'interview_library')
   if (route.startsWith('/admin/')) return appNavItems.find((item) => item.moduleKey === 'admin_console')
+  if (route.startsWith('/evaluations')) return appNavItems.find((item) => item.moduleKey === 'evaluation_center')
   return appNavItems.find((item) => item.path === route)
 }
 
@@ -585,10 +675,10 @@ async function loadCurrentUser() {
     const payload = await response.json()
     authUser.value = payload.user ?? null
     if (authUser.value) {
-      const authenticatedRoute = resolveAuthenticatedRoute(currentRoute.value)
+      const authenticatedRoute = shareReturnLocation(window.location) || resolveAuthenticatedRoute(currentRoute.value)
       if (authenticatedRoute !== currentRoute.value) {
         window.history.replaceState({}, '', authenticatedRoute)
-        currentRoute.value = authenticatedRoute
+        currentRoute.value = normalizeRoute(new URL(authenticatedRoute, window.location.origin).pathname)
       }
     }
   } catch {
@@ -601,19 +691,30 @@ async function loadCurrentUser() {
 async function handleAuthenticated(user) {
   authUser.value = user
   authReady.value = true
-  const nextPath = resolveAuthenticatedRoute(currentRoute.value)
+  const nextPath = shareReturnLocation(window.location) || resolveAuthenticatedRoute(currentRoute.value)
   window.history.replaceState({}, '', nextPath)
-  currentRoute.value = nextPath
+  currentRoute.value = normalizeRoute(new URL(nextPath, window.location.origin).pathname)
   await loadNavigationConfig()
   ensureCurrentRouteAccess()
   await refreshCurrentPage()
 }
 
 async function logoutPlatform() {
+  if (!await dismissHistoryLayers()) return
   closeAccountMenu()
   try {
     await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' })
   } finally {
+    skillDetailRevision += 1
+    skillDrafts.clear()
+    selectedSkill.value = null
+    skillEditorMarkdown.value = ''
+    skillSaveName.value = ''
+    skills.value = []
+    careerWorkspace.value = null
+    pendingSharedMaterial.value = null
+    sharedImportError.value = ''
+    await shareInboxRequest('share:clear').catch(() => {})
     authUser.value = null
     navigationModules.value = []
     navigationReady.value = false
@@ -625,7 +726,8 @@ async function logoutPlatform() {
 
 async function refreshCurrentPage() {
   if (!canAccessCurrentRoute.value) return
-  if (currentRoute.value === '/career' || currentRoute.value.startsWith('/interviews') || currentRoute.value.startsWith('/admin/')) return
+  if (currentRoute.value.startsWith('/evaluations')) return
+  if (currentRoute.value.startsWith('/career') || currentRoute.value.startsWith('/interviews') || currentRoute.value.startsWith('/admin/')) return
   if (currentRoute.value === '/skills') {
     await loadSkills(selectedSkillId.value)
     return
@@ -734,7 +836,7 @@ async function loadSkills(preferredSkillId = '') {
       skills.value[0]
 
     if (preferredSkill) {
-      await loadSkillDetail(preferredSkill.id)
+      await loadSkillDetail(preferredSkill.id, false)
     } else {
       selectedSkill.value = null
       skillEditorMarkdown.value = ''
@@ -747,22 +849,32 @@ async function loadSkills(preferredSkillId = '') {
   }
 }
 
-async function loadSkillDetail(skillId) {
+async function loadSkillDetail(skillId, openEditor = true) {
   if (!skillId) return
+  const requestId = ++skillDetailRevision
+  if (selectedSkill.value?.id === skillId) {
+    if (openEditor) mobileSkillPane.value = 'editor'
+    return
+  }
+  rememberSkillDraft()
   skillErrorMessage.value = ''
   skillMessage.value = ''
 
   try {
     const response = await fetch(`/api/skills/${encodeURIComponent(skillId)}`)
     const payload = await response.json().catch(() => ({}))
+    if (requestId !== skillDetailRevision) return
     if (!response.ok) {
       throw new Error(payload.detail ?? `Skill.md 读取失败：${response.status}`)
     }
 
     selectedSkill.value = payload.skill
-    skillEditorMarkdown.value = payload.markdown ?? ''
-    skillSaveName.value = payload.skill?.name ?? ''
+    if (openEditor) mobileSkillPane.value = 'editor'
+    const draft = skillDrafts.get(skillId)
+    skillEditorMarkdown.value = draft?.markdown ?? payload.markdown ?? ''
+    skillSaveName.value = draft?.name ?? payload.skill?.name ?? ''
   } catch (error) {
+    if (requestId !== skillDetailRevision) return
     skillErrorMessage.value = error instanceof Error ? error.message : 'Skill.md 读取失败'
   }
 }
@@ -842,9 +954,13 @@ function skillSnapshotTime(value) {
 async function selectSearchResult(result) {
   if (!result?.skill) return
   if (result.markdown) {
+    skillDetailRevision += 1
+    rememberSkillDraft()
     selectedSkill.value = result.skill
-    skillEditorMarkdown.value = result.markdown
-    skillSaveName.value = result.skill.name
+    mobileSkillPane.value = 'editor'
+    const draft = skillDrafts.get(result.skill.id)
+    skillEditorMarkdown.value = draft?.markdown ?? result.markdown
+    skillSaveName.value = draft?.name ?? result.skill.name
     skillMessage.value = `已加载 GitHub Skill：${result.skill.name}`
     skillErrorMessage.value = ''
     return
@@ -853,6 +969,7 @@ async function selectSearchResult(result) {
 }
 
 async function saveSkill() {
+  const savingSkillId = selectedSkill.value?.id
   skillSaving.value = true
   skillErrorMessage.value = ''
   skillMessage.value = ''
@@ -876,13 +993,18 @@ async function saveSkill() {
       throw new Error(payload.detail ?? `Skill 保存失败：${response.status}`)
     }
 
-    selectedSkill.value = payload.skill
-    skillEditorMarkdown.value = payload.markdown ?? skillEditorMarkdown.value
-    skillSaveName.value = payload.skill?.name ?? skillSaveName.value
+    if (selectedSkill.value?.id === savingSkillId) {
+      skillDetailRevision += 1
+      selectedSkill.value = payload.skill
+      skillEditorMarkdown.value = payload.markdown ?? skillEditorMarkdown.value
+      skillSaveName.value = payload.skill?.name ?? skillSaveName.value
+      skillDrafts.delete(savingSkillId)
+      skillDrafts.delete(payload.skill?.id)
+    }
+    await loadSkills(selectedSkill.value?.id)
     skillMessage.value = payload.created
       ? `已新增本地 Skill：${payload.skill?.name}`
       : `已更新本地 Skill：${payload.skill?.name}`
-    await loadSkills(payload.skill?.id)
   } catch (error) {
     skillErrorMessage.value = error instanceof Error ? error.message : 'Skill 保存失败'
   } finally {
@@ -1265,7 +1387,8 @@ onMounted(async () => {
   await loadCurrentUser()
   if (!authUser.value) {
     if (!isAuthRoute(currentRoute.value)) {
-      window.history.replaceState({}, '', '/login')
+      const shareQuery = initialShareLocation ? new URL(initialShareLocation, window.location.origin).search : ''
+      window.history.replaceState({}, '', `/login${shareQuery}`)
       currentRoute.value = '/login'
     }
     return
@@ -1311,11 +1434,18 @@ onBeforeUnmount(() => {
     <button type="button" class="secondary-button" @click="retryNavigationConfig">重新加载模块</button>
   </section>
 
+  <DesktopCapabilityNotice
+    v-else-if="mobileBrowser && canAccessCurrentRoute && ['/career/interview-master', '/career/online-assessment'].includes(currentRoute)"
+    :title="currentRoute === '/career/online-assessment' ? '线上笔试需要电脑端' : '实时面试需要电脑端'"
+    :description="currentRoute === '/career/online-assessment' ? '题面识别与可见测试依赖电脑浏览器助手。请在电脑端打开题目页后启动。' : '实时面试依赖电脑端的共享音频授权。请使用桌面版 Chrome、Edge 或 Firefox 开启。'"
+    @navigate="navigateTo"
+  />
+
   <BrowserInterviewMasterPage v-else-if="currentRoute === '/career/interview-master' && canAccessCurrentRoute" />
 
   <OnlineAssessmentAssistantPage v-else-if="currentRoute === '/career/online-assessment' && canAccessCurrentRoute" />
 
-  <div v-else class="shell" :class="{ 'mobile-nav-open': mobileNavOpen }">
+  <div v-else class="shell" :class="{ 'mobile-nav-open': mobileNavOpen, 'sidebar-collapsed': sidebarCollapsed }">
     <button
       type="button"
       class="mobile-nav-scrim"
@@ -1347,37 +1477,59 @@ onBeforeUnmount(() => {
 
       <nav class="nav-list" aria-label="应用主导航">
         <button
-          v-for="item in visibleAppNavItems"
+          v-for="item in primaryAppNavItems"
           :key="item.label"
           type="button"
           class="nav-item"
           :class="{ active: isAppNavActive(item), disabled: !item.enabled }"
+          :aria-label="item.label"
+          :title="item.label"
           :disabled="!item.enabled"
           @click="item.enabled && item.path && navigateTo(item.path)"
         >
-          <span class="nav-icon">{{ item.icon }}</span>
+          <span class="nav-icon"><component :is="navigationIcons[item.moduleKey]" aria-hidden="true" /></span>
           <span class="nav-copy">
             <strong>{{ item.label }}</strong>
           </span>
         </button>
+        <div v-if="showSecondaryNavigation" id="secondary-navigation" class="secondary-navigation" role="group" aria-label="更多模块">
+          <button v-for="item in secondaryAppNavItems" :key="item.moduleKey" type="button" class="nav-item" :class="{ active: isAppNavActive(item) }" :aria-label="item.label" :title="item.label" :disabled="!item.enabled" @click="item.path && navigateTo(item.path)">
+            <span class="nav-icon"><component :is="navigationIcons[item.moduleKey]" aria-hidden="true" /></span><span class="nav-copy"><strong>{{ item.label }}</strong></span>
+          </button>
+        </div>
       </nav>
 
-      <div class="sidebar-card">
-        <p>周五 08:00 生产内容</p>
-        <p>周五 09:00 创建公众号草稿</p>
-        <p>审核动作统一进入任务链</p>
+      <div class="sidebar-bottom">
+        <button v-if="secondaryAppNavItems.length" type="button" class="nav-item nav-more" aria-label="更多模块" title="更多模块" :aria-expanded="showSecondaryNavigation" aria-controls="secondary-navigation" @click="toggleSecondaryNavigation">
+          <span class="nav-icon"><MoreFilled aria-hidden="true" /></span><span class="nav-copy"><strong>更多模块</strong></span>
+        </button>
+        <button
+          v-if="!isMobileViewport"
+          type="button"
+          class="sidebar-toggle"
+          :aria-label="sidebarCollapsed ? '展开导航栏' : '收起导航栏'"
+          :title="sidebarCollapsed ? '展开导航栏' : '收起导航栏'"
+          :aria-expanded="!sidebarCollapsed"
+          aria-controls="app-navigation"
+          @click="toggleSidebar"
+        >
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path :d="sidebarCollapsed ? 'm6 4 4 4-4 4' : 'm10 4-4 4 4 4'" /></svg>
+          <span class="sidebar-toggle-label">收起导航</span>
+        </button>
       </div>
     </aside>
 
     <main
       ref="mainViewport"
+      :inert="mobileNavOpen"
       class="main"
       :class="{
         'skills-route': currentRoute === '/skills',
-        'career-route': currentRoute === '/career',
+        'career-route': currentRoute === '/career' || currentRoute === '/career/messages',
+        'material-share-route': currentRoute === '/career/import',
         'resume-assistant-route': currentRoute === '/resume-assistant',
         'interview-library-route': currentRoute.startsWith('/interviews'),
-        'evaluation-route': currentRoute === '/evaluations',
+        'evaluation-route': currentRoute.startsWith('/evaluations'),
         'prompt-preview-route': currentRoute === '/review/prompts',
         'review-home-route': currentRoute === '/review'
       }"
@@ -1386,6 +1538,7 @@ onBeforeUnmount(() => {
         <button
           type="button"
           class="mobile-nav-toggle"
+          ref="mobileNavToggle"
           :aria-expanded="mobileNavOpen"
           aria-controls="app-navigation"
           aria-label="打开导航"
@@ -1446,6 +1599,10 @@ onBeforeUnmount(() => {
             <div v-if="accountMenuSection === 'theme'" class="account-menu-panel account-theme-panel">
               <ThemeSwitcher :model-value="uiTheme" @update:model-value="handleAccountThemeChange" />
             </div>
+            <button v-if="canAccessRoute('/career/import')" type="button" class="account-menu-option" role="menuitem" @click="closeAccountMenu(); navigateTo('/career/import')">
+              <span class="account-menu-option-icon" aria-hidden="true">↓</span>
+              <span><strong>手机分享导入</strong><small>安装与分享使用方法</small></span>
+            </button>
           </div>
         </div>
       </header>
@@ -1457,6 +1614,10 @@ onBeforeUnmount(() => {
         {{ actionMessage }}
       </section>
 
+      <KeepAlive>
+        <ResumeAssistantPage v-if="currentRoute === '/resume-assistant' && canAccessCurrentRoute" :current-user="authUser" />
+      </KeepAlive>
+
       <section v-if="!canAccessCurrentRoute" class="route-access-state">
         <span aria-hidden="true">—</span>
         <h2>当前没有可访问的模块</h2>
@@ -1466,21 +1627,28 @@ onBeforeUnmount(() => {
 
       <CareerAssistantPage
         v-else-if="currentRoute === '/career'"
+        :current-user="authUser"
+        :navigation-collapsed="sidebarCollapsed"
+        :initial-workspace="careerWorkspace"
+        :shared-material="pendingSharedMaterial"
         :interview-master-visible="careerInterviewMasterVisible"
         :online-assessment-visible="careerOnlineAssessmentVisible"
         @navigate="navigateTo"
+        @preserve-workspace="preserveCareerWorkspace"
+        @shared-material-used="pendingSharedMaterial = null"
       />
 
-      <ResumeAssistantPage
-        v-else-if="currentRoute === '/resume-assistant'"
-        :current-user="authUser"
-      />
+      <MaterialSharePage v-else-if="currentRoute === '/career/import'" :key="shareRouteKey" :busy="transferringShare" :error="sharedImportError" @continue="acceptSharedMaterial" @navigate="navigateTo" />
+
+      <template v-else-if="currentRoute === '/resume-assistant'"></template>
+
+      <CareerMessagesPage v-else-if="currentRoute === '/career/messages'" @navigate="navigateTo" />
 
       <InterviewLibraryPage v-else-if="currentRoute === '/interviews'" />
 
-      <JobSearchWorkspace v-else-if="currentRoute === '/interviews/jobs'" />
+      <JobSearchWorkspace v-else-if="currentRoute === '/interviews/jobs'" @navigate="navigateTo" />
 
-      <EvaluationCenterPage v-else-if="currentRoute === '/evaluations'" />
+      <EvaluationCenterPage v-else-if="currentRoute.startsWith('/evaluations')" :current-route="currentRoute" @navigate="navigateTo" />
 
       <ObservabilityPage v-else-if="currentRoute === '/observability'" />
 
@@ -1492,11 +1660,16 @@ onBeforeUnmount(() => {
       />
 
       <template v-else-if="currentRoute === '/skills'">
-        <section class="skills-workspace">
+        <section v-if="skillErrorMessage" class="alert danger" role="alert">{{ skillErrorMessage }}</section>
+        <section v-if="skillMessage" class="alert success" role="status">{{ skillMessage }}</section>
+        <nav class="mobile-skill-tabs" aria-label="技能库视图">
+          <button v-for="pane in [{ key: 'list', label: '已安装' }, { key: 'search', label: '搜索技能' }, { key: 'editor', label: '内容与编辑' }]" :key="pane.key" type="button" :aria-pressed="mobileSkillPane === pane.key" @click="mobileSkillPane = pane.key">{{ pane.label }}</button>
+        </nav>
+        <section class="skills-workspace" :class="`show-mobile-skill-${mobileSkillPane}`">
           <aside class="skill-sub-sidebar">
             <div class="skill-sidebar-title">
               <div>
-                <p class="eyebrow">Skills</p>
+
                 <h2>已安装技能</h2>
               </div>
               <strong>{{ skills.length }}</strong>
@@ -1591,13 +1764,6 @@ onBeforeUnmount(() => {
                 </template>
               </div>
 
-              <section v-if="skillErrorMessage" class="alert danger">
-                {{ skillErrorMessage }}
-              </section>
-              <section v-if="skillMessage" class="alert success">
-                {{ skillMessage }}
-              </section>
-
               <div v-if="skillSearchResults.length" class="skill-result-list">
                 <button
                   v-for="result in skillSearchResults"
@@ -1621,10 +1787,14 @@ onBeforeUnmount(() => {
               </div>
             </section>
 
-            <section class="skill-editor-panel">
+            <section class="skill-editor-panel" :class="{ 'is-reading': skillContentMode === 'read' }">
+              <nav v-if="selectedSkill" class="mobile-skill-tabs" aria-label="技能内容模式">
+                <button type="button" :aria-pressed="skillContentMode === 'read'" @click="skillContentMode = 'read'">阅读当前内容</button>
+                <button type="button" :aria-pressed="skillContentMode === 'edit'" @click="skillContentMode = 'edit'">编辑内容</button>
+              </nav>
               <div class="panel-header">
                 <div>
-                  <p class="eyebrow">SKILL.md</p>
+
                   <h2>{{ selectedSkill?.name ?? '请选择一个 Skill' }}</h2>
                   <p v-if="selectedSkill">
                     {{ skillDescription(selectedSkill) }}
@@ -1655,6 +1825,7 @@ onBeforeUnmount(() => {
                 从左侧列表或搜索结果中选择一个 Skill 后，这里会展示 SKILL.md。
               </div>
               <template v-else>
+                <div class="mobile-skill-reader"><CareerMessageContent :content="skillEditorMarkdown" /></div>
                 <textarea
                   v-model="skillEditorMarkdown"
                   class="skill-markdown-editor"
@@ -1820,7 +1991,7 @@ onBeforeUnmount(() => {
           </header>
           <div class="panel-header">
             <div>
-              <p class="eyebrow">Article Preview</p>
+
               <h2>{{ content?.title ?? '暂无内容' }}</h2>
             </div>
             <span class="week-tag">{{ content?.week_end ?? '等待生成' }}</span>
@@ -1840,7 +2011,7 @@ onBeforeUnmount(() => {
 
         <section v-if="!contentIdFromLocation()" class="review-action-row">
           <div class="review-state">
-            <p class="eyebrow">Approval</p>
+
             <h2>人工审核</h2>
             <span class="status-pill" :class="approvalClass(approval?.decision)">
               {{ approvalText(approval?.decision) }}
@@ -1970,7 +2141,7 @@ onBeforeUnmount(() => {
         <section class="detail-card">
           <div class="panel-header">
             <div>
-              <p class="eyebrow">Assets</p>
+
               <h2>媒体素材</h2>
               <p v-if="activeContentId" class="asset-scope-note">
                 content_id={{ activeContentId }} · {{ shortText(content?.title, 72) }}
@@ -2026,7 +2197,7 @@ onBeforeUnmount(() => {
           <section v-if="pendingVideoClips.length" class="pending-video-section">
             <div class="panel-header compact-panel-header">
               <div>
-                <p class="eyebrow">Video generation</p>
+
                 <h3>尚未产出文件的视频片段</h3>
               </div>
               <span class="asset-count">{{ pendingVideoClips.length }} 段</span>
@@ -2086,7 +2257,7 @@ onBeforeUnmount(() => {
         <section class="detail-card execution-history-card">
           <div class="panel-header execution-history-header">
             <div>
-              <p class="eyebrow">Execution Archive</p>
+
               <h2>执行历史</h2>
               <p>每个 content_id 只保留对应推文与本次生成的专属媒体素材。</p>
             </div>
@@ -2141,7 +2312,7 @@ onBeforeUnmount(() => {
         <section class="detail-card">
           <div class="panel-header">
             <div>
-              <p class="eyebrow">Short Video Blueprint</p>
+
               <h2>短视频蓝图</h2>
             </div>
             <span class="asset-count">{{ videoStoryboard ? '已生成' : '未生成' }}</span>
@@ -2151,11 +2322,11 @@ onBeforeUnmount(() => {
           </div>
           <div v-else class="storyboard-grid">
             <article>
-              <p class="eyebrow">Progressive Script</p>
+
               <pre>{{ videoStoryboard.progressive_script }}</pre>
             </article>
             <article>
-              <p class="eyebrow">Seedance Prompt</p>
+
               <pre>{{ videoStoryboard.seedance_prompt }}</pre>
             </article>
           </div>

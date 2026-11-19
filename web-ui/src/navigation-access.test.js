@@ -47,11 +47,11 @@ test('应用启动恢复登录态后立即解析认证页面，避免渲染空�
   )?.[1]
 
   assert.ok(loadCurrentUserSource, '应能定位登录态恢复函数')
-  assert.match(loadCurrentUserSource, /const authenticatedRoute = resolveAuthenticatedRoute\(currentRoute\.value\)/)
+  assert.match(loadCurrentUserSource, /shareReturnLocation\(window\.location\) \|\| resolveAuthenticatedRoute\(currentRoute\.value\)/)
   assert.match(loadCurrentUserSource, /window\.history\.replaceState\(\{\}, '', authenticatedRoute\)/)
-  assert.match(loadCurrentUserSource, /currentRoute\.value = authenticatedRoute/)
+  assert.match(loadCurrentUserSource, /currentRoute\.value = normalizeRoute\(new URL\(authenticatedRoute, window\.location\.origin\)\.pathname\)/)
   assert.ok(
-    loadCurrentUserSource.indexOf('currentRoute.value = authenticatedRoute')
+    loadCurrentUserSource.indexOf('currentRoute.value = normalizeRoute(')
       < loadCurrentUserSource.indexOf('authReady.value = true'),
     '认证路由必须在开放登录态渲染之前修正'
   )

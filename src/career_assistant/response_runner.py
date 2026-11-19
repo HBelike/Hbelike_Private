@@ -13,6 +13,7 @@ from src.career_assistant.agent_loop import ActiveAgentTurn, CareerAgentLoop
 from src.career_assistant.contracts import (
     CareerInboundMessage,
     ModelCapability,
+    ModelSelectionMode,
     ModelSelectionRequest,
     SkillExecutionTrace,
 )
@@ -44,6 +45,10 @@ from src.career_assistant.prompt_context import (
 )
 from src.career_assistant.privacy import SensitiveDataRedactor
 from src.career_assistant.skill_tools import SkillToolRegistry
+from src.career_assistant.job_search_response import detect_route, materialize_route
+from src.career_assistant.job_search_intent import needs_job_search_semantics
+from src.career_assistant.job_search_context import job_search_context_messages
+from src.career_assistant.job_search_selection import select_search_candidates
 
 
 LOGGER = logging.getLogger(__name__)
@@ -61,6 +66,7 @@ class CareerResponseResult:
     context_usage: ContextUsageSnapshot | None = None
     provider_reported_model_id: str | None = None
     model_was_invoked: bool = False
+    updated_messages: tuple[MessageRecord, ...] = ()
 
 
 @dataclass
@@ -141,6 +147,11 @@ class CareerResponseRunner:
         self._max_persisted_response_characters = max_persisted_response_characters
         self._max_attempts = max_attempts
         self._retry_backoff_seconds = float(retry_backoff_seconds)
+        # 意图判断使用短超时，歧义识别失败时继续普通对话。
+        self._intent_client = (
+            OpenAICompatibleChatClient(request_timeout_seconds=8, completion_max_tokens=500)
+            if type(self._chat_client) is OpenAICompatibleChatClient else self._chat_client
+        )
 
     @staticmethod
     def _model_resolution_label(resolution: ModelResolution) -> str:
@@ -160,6 +171,9 @@ class CareerResponseRunner:
         """解析本轮模型，调用可用免费额度，或生成不伪装为分析结果的配置提示。"""
 
         active_turn = intake_result.active_turn
+        job_route = detect_route(self._agent_loop.repository, active_turn, intake_result.model_context)
+        if job_route.intent.action != "normal_chat" and not job_route.intent.mixed_task and not needs_job_search_semantics(job_route.intent, intake_result.model_context.redacted_user_text):
+            return self._finish_job_search(active_turn, job_route)
         selection = ModelSelectionRequest(
             mode=inbound_message.model_selection.mode,
             profile_id=inbound_message.model_selection.profile_id,
@@ -171,15 +185,21 @@ class CareerResponseRunner:
                 selection,
             )
         except (LookupError, PermissionError, ValueError):
+            if job_route.intent.action != "normal_chat" and not job_route.intent.mixed_task:
+                return self._finish_job_search(active_turn, job_route)
             return self._finish_with_advisory(
                 active_turn,
-                "已安全接收本轮材料。当前没有可用的免费模型档案，暂不生成匹配结论。"
+                ("平台默认模型暂不可用，请联系管理员检查共享模型连接；你无需自行配置 API Key。"
+                 if selection.mode is ModelSelectionMode.PLATFORM_DEFAULT else
+                 "已安全接收本轮材料。当前没有可用的免费模型档案，暂不生成匹配结论。"
                 "请在“模型设置”登记支持本轮能力的免费额度模型后重试；原始文件已删除，"
-                "历史中仅保留脱敏摘要。",
+                "历史中仅保留脱敏摘要。"),
                 None,
             )
 
         if resolution.readiness is not ModelReadiness.READY:
+            if job_route.intent.action != "normal_chat" and not job_route.intent.mixed_task:
+                return self._finish_job_search(active_turn, job_route)
             return self._finish_with_advisory(
                 active_turn,
                 f"已安全接收本轮材料。已选择“{self._model_resolution_label(resolution)}”，"
@@ -188,21 +208,34 @@ class CareerResponseRunner:
                 resolution,
             )
 
+        usage_id, usage_accumulator = self._start_answer_usage(active_turn, resolution)
+        job_route = self._classify_job_search(active_turn, intake_result.model_context, resolution, job_route, usage_accumulator)
+        if job_route.intent.action != "normal_chat" and not job_route.intent.mixed_task:
+            self._finish_answer_usage(usage_id, "succeeded", usage_accumulator)
+            return self._finish_job_search(active_turn, job_route, resolution, usage_accumulator)
         try:
+            selected_context = select_search_candidates(intake_result.model_context, resolution,
+                self._intent_client, usage_accumulator.observe)
+            if selected_context is not intake_result.model_context:
+                intake_result = replace(intake_result, model_context=selected_context)
             prepared = self._prepare_prompt(
                 active_turn,
                 intake_result.model_context,
                 resolution,
             )
         except ContextHardLimitError:
+            self._finish_answer_usage(usage_id, "failed", usage_accumulator)
             return self._finish_with_context_limit(active_turn, resolution)
+        except ModelInvocationError as error:
+            self._finish_answer_usage(usage_id, "failed", usage_accumulator)
+            return self._finish_with_model_failure(active_turn, resolution, error)
 
-        usage_id, usage_accumulator = self._start_answer_usage(active_turn, resolution)
         options = CompletionRequestOptions(
             max_tokens=prepared.context_usage.reserved_output_tokens,
         )
         try:
             prompt = list(prepared.messages)
+            self._add_job_search_instruction(prompt, job_route)
             if self._can_run_skill_tools(resolution, intake_result.model_context):
                 generated_reply, skill_executions = self._complete_skill_agent(
                     resolution,
@@ -233,7 +266,7 @@ class CareerResponseRunner:
                 ModelInvocationError("模型未返回可用文本，请检查模型连接或更换模型后重试。"),
             )
 
-        message = self._append_assistant_message(active_turn, generated_reply)
+        message, updated_messages = self._append_routed_message(active_turn, generated_reply, job_route)
         succeeded_turn = self._agent_loop.mark_turn_succeeded(
             active_turn.conversation.actor_id,
             active_turn.turn.id,
@@ -254,6 +287,7 @@ class CareerResponseRunner:
             prepared.context_usage,
             usage_accumulator.provider_reported_model_id,
             True,
+            updated_messages,
         )
 
     def stream(
@@ -264,6 +298,10 @@ class CareerResponseRunner:
         """真实转发模型增量，并只在流结束时写入一条完整的助手消息。"""
 
         active_turn = intake_result.active_turn
+        job_route = detect_route(self._agent_loop.repository, active_turn, intake_result.model_context)
+        if job_route.intent.action != "normal_chat" and not job_route.intent.mixed_task and not needs_job_search_semantics(job_route.intent, intake_result.model_context.redacted_user_text):
+            yield CareerResponseStreamEvent(event_type="done", result=self._finish_job_search(active_turn, job_route))
+            return
         selection = ModelSelectionRequest(
             mode=inbound_message.model_selection.mode,
             profile_id=inbound_message.model_selection.profile_id,
@@ -275,18 +313,26 @@ class CareerResponseRunner:
                 selection,
             )
         except (LookupError, PermissionError, ValueError):
+            if job_route.intent.action != "normal_chat" and not job_route.intent.mixed_task:
+                yield CareerResponseStreamEvent(event_type="done", result=self._finish_job_search(active_turn, job_route))
+                return
             yield CareerResponseStreamEvent(
                 event_type="done",
                 result=self._finish_with_advisory(
                     active_turn,
-                    "已安全接收本轮材料，但当前没有可用的模型连接，因此暂不生成分析结论。"
-                    "请在“模型与连接”中配置支持本轮能力的模型后重试。",
+                    ("平台默认模型暂不可用，请联系管理员检查共享模型连接；你无需自行配置 API Key。"
+                     if selection.mode is ModelSelectionMode.PLATFORM_DEFAULT else
+                     "已安全接收本轮材料，但当前没有可用的模型连接，因此暂不生成分析结论。"
+                     "请在“模型与连接”中配置支持本轮能力的模型后重试。"),
                     None,
                 ),
             )
             return
 
         if resolution.readiness is not ModelReadiness.READY:
+            if job_route.intent.action != "normal_chat" and not job_route.intent.mixed_task:
+                yield CareerResponseStreamEvent(event_type="done", result=self._finish_job_search(active_turn, job_route))
+                return
             yield CareerResponseStreamEvent(
                 event_type="done",
                 result=self._finish_with_advisory(
@@ -298,22 +344,38 @@ class CareerResponseRunner:
             )
             return
 
+        usage_id, usage_accumulator = self._start_answer_usage(active_turn, resolution)
+        job_route = self._classify_job_search(active_turn, intake_result.model_context, resolution, job_route, usage_accumulator)
+        if job_route.intent.action != "normal_chat" and not job_route.intent.mixed_task:
+            self._finish_answer_usage(usage_id, "succeeded", usage_accumulator)
+            yield CareerResponseStreamEvent(event_type="done", result=self._finish_job_search(active_turn, job_route, resolution, usage_accumulator))
+            return
         try:
+            selected_context = select_search_candidates(intake_result.model_context, resolution,
+                self._intent_client, usage_accumulator.observe)
+            if selected_context is not intake_result.model_context:
+                intake_result = replace(intake_result, model_context=selected_context)
             prepared = self._prepare_prompt(
                 active_turn,
                 intake_result.model_context,
                 resolution,
             )
         except ContextHardLimitError:
+            self._finish_answer_usage(usage_id, "failed", usage_accumulator)
             yield CareerResponseStreamEvent(
                 event_type="error",
                 result=self._finish_with_context_limit(active_turn, resolution),
             )
             return
+        except ModelInvocationError as error:
+            self._finish_answer_usage(usage_id, "failed", usage_accumulator)
+            yield CareerResponseStreamEvent(event_type="error",
+                result=self._finish_with_model_failure(active_turn, resolution, error))
+            return
 
         generated_parts: list[str] = []
         prompt = list(prepared.messages)
-        usage_id, usage_accumulator = self._start_answer_usage(active_turn, resolution)
+        self._add_job_search_instruction(prompt, job_route)
         options = CompletionRequestOptions(
             max_tokens=prepared.context_usage.reserved_output_tokens,
         )
@@ -392,7 +454,7 @@ class CareerResponseRunner:
             )
             return
 
-        message = self._append_assistant_message(active_turn, generated_reply)
+        message, updated_messages = self._append_routed_message(active_turn, generated_reply, job_route)
         succeeded_turn = self._agent_loop.mark_turn_succeeded(
             active_turn.conversation.actor_id,
             active_turn.turn.id,
@@ -414,6 +476,7 @@ class CareerResponseRunner:
                 prepared.context_usage,
                 usage_accumulator.provider_reported_model_id,
                 True,
+                updated_messages,
             ),
         )
 
@@ -533,6 +596,7 @@ class CareerResponseRunner:
                     role="assistant",
                     content=response.content or None,
                     tool_calls=response.tool_calls,
+                    reasoning_content=response.reasoning_content,
                 ),
             )
             for tool_call in response.tool_calls:
@@ -665,16 +729,60 @@ class CareerResponseRunner:
         """把配置性提示作为可追溯助手消息写入，并正常收口已完成的安全处理工作。"""
 
         message = self._append_assistant_message(active_turn, content)
+        if getattr(active_turn, "source", "user") == "job_search_auto_analysis":
+            failed_turn = self._agent_loop.mark_turn_failed(active_turn.conversation.actor_id,
+                active_turn.turn.id, "job_search_model_unavailable", content)
+            return CareerResponseResult(message, failed_turn, resolution)
         succeeded_turn = self._agent_loop.mark_turn_succeeded(
             active_turn.conversation.actor_id,
             active_turn.turn.id,
         )
         return CareerResponseResult(message, succeeded_turn, resolution)
 
-    def _append_assistant_message(self, active_turn, content: str) -> MessageRecord:
+    def _classify_job_search(self, active_turn, context, resolution, route, usage):
+        def classify(prompt):
+            try:
+                return self._intent_client.complete(
+                    resolution.profile, resolution.credential_env_name,
+                    [ChatMessage(role="system", content=prompt)], api_key=resolution.credential,
+                    options=CompletionRequestOptions(temperature=0, max_tokens=500, thinking=False),
+                    usage_callback=usage.observe,
+                )
+            finally:
+                # 仅在 Provider 没有上报用量时标记未知，真实统计正常累加。
+                if not usage.seen:
+                    usage.observe(CompletionUsage(None, None))
+        return detect_route(self._agent_loop.repository, active_turn, context,
+                            previous=route, classify=classify)
+
+    @staticmethod
+    def _add_job_search_instruction(prompt, route):
+        if route.intent.mixed_task and route.intent.action in {"open_job_search", "update_job_search"}:
+            prompt.append(ChatMessage(role="system", content=(
+                "本轮界面会同时展示职位搜索组件。请回答用户的其他诉求；"
+                "不要要求用户另开找工作弹窗，不要声称已经获得尚未返回的职位结果。"
+            )))
+
+    def _append_routed_message(self, active_turn, content, route):
+        prefix, payload, updates = materialize_route(self._agent_loop.repository, active_turn, route, self._redactor)
+        text = f"{prefix}\n\n{content}" if prefix and content else (content or prefix)
+        return self._append_assistant_message(active_turn, text, ui_payload=payload), updates
+
+    def _finish_job_search(self, active_turn, route, resolution=None, usage=None):
+        message, updates = self._append_routed_message(active_turn, "", route)
+        turn = self._agent_loop.mark_turn_succeeded(active_turn.conversation.actor_id, active_turn.turn.id)
+        return CareerResponseResult(message, turn, resolution,
+                                    provider_reported_model_id=usage.provider_reported_model_id if usage else None,
+                                    model_was_invoked=bool(usage and usage.seen), updated_messages=updates)
+
+    def _append_assistant_message(self, active_turn, content: str, *, ui_payload=None) -> MessageRecord:
         """按当前部署的隐私开关处理模型输出后写入会话历史。"""
 
         normalized_content = content.strip()
+        if getattr(active_turn, "source", "user") == "job_search_auto_analysis":
+            ui_payload = {"type": "job_search_analysis", "version": 1,
+                          "batch_id": str(active_turn.job_search_batch_id),
+                          "parent_turn_id": str(active_turn.parent_turn_id)}
         if not normalized_content:
             raise ValueError("助手回复不能为空")
         safe_content = self._redactor.redact(normalized_content)[
@@ -686,6 +794,7 @@ class CareerResponseRunner:
             safe_content,
             turn_id=active_turn.turn.id,
             is_redacted=self._redactor.enabled,
+            **({"ui_payload": ui_payload} if ui_payload is not None else {}),
         )
 
     def _build_prompt(
@@ -757,6 +866,14 @@ class CareerResponseRunner:
             active_turn.conversation.actor_id,
             active_turn.conversation.id,
         )
+        from src.career_assistant.job_search_context import snapshot_context_messages
+        snapshot = getattr(context, "job_search_snapshot", None)
+        if snapshot is not None:
+            window = resolution.profile.context_policy.context_window_tokens if resolution else 32000
+            messages.extend(snapshot_context_messages(snapshot, context.redacted_user_text,
+                token_budget=max(600, min(6000, window // 5))))
+        else:
+            messages.extend(job_search_context_messages(history_messages, active_turn.turn.id))
         for history_message in history_messages:
             if history_message.turn_id == active_turn.turn.id:
                 continue

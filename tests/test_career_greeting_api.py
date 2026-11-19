@@ -17,6 +17,7 @@ from src.career_assistant.greetings import (
     GreetingModelUnavailableError,
 )
 from src.career_assistant.web import router as career_router
+from src.platform_access.contracts import PlatformRole
 
 
 CANDIDATE_ID = uuid4()
@@ -79,6 +80,50 @@ def test_generate_greeting_returns_evidence_and_model() -> None:
     called = greeting_service.generate.call_args.args
     assert called[2] == CANDIDATE_ID
     assert called[3].description == "负责 Java 微服务开发和版本交付。"
+
+
+def test_admin_greeting_can_use_another_users_candidate_profile() -> None:
+    app = FastAPI()
+    app.include_router(career_router.router)
+    greeting_service = Mock()
+    greeting_service.generate.return_value = greeting_result()
+    services = SimpleNamespace(greeting_service=greeting_service)
+    actor = career_router.CareerRequestActor(
+        organization_id=uuid4(),
+        actor_id=uuid4(),
+        role=PlatformRole.ADMIN,
+    )
+
+    with (
+        patch.object(career_router, "get_career_services", return_value=services),
+        patch.object(career_router, "get_request_actor", return_value=actor),
+    ):
+        response = TestClient(app).post(
+            "/api/career/greetings/generate",
+            json=request_payload(),
+        )
+
+    assert response.status_code == 200
+    assert greeting_service.generate.call_args.kwargs["can_manage_all"] is True
+
+
+def test_regeneration_does_not_reject_a_long_previous_message() -> None:
+    app = FastAPI()
+    app.include_router(career_router.router)
+    greeting_service = Mock()
+    greeting_service.generate.return_value = greeting_result()
+    payload = request_payload()
+    payload["previous_message"] = "旧稿" * 1_100
+
+    with patch.object(
+        career_router,
+        "get_career_services",
+        return_value=SimpleNamespace(greeting_service=greeting_service),
+    ):
+        response = TestClient(app).post("/api/career/greetings/generate", json=payload)
+
+    assert response.status_code == 200
+    assert greeting_service.generate.call_args.args[4] == payload["previous_message"]
 
 
 @pytest.mark.parametrize(

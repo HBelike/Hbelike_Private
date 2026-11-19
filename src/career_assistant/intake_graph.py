@@ -92,6 +92,7 @@ class ModelTurnContext:
     candidate_profile_context: str = ""
     target_role_context: str = ""
     context_binding_version: int | None = None
+    job_search_snapshot: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -477,6 +478,17 @@ class CareerIntakeGraph:
         """写入当前部署策略处理后的用户消息，并绑定到当前 running Turn。"""
 
         active_turn = state["active_turn"]
+        if getattr(active_turn, "source", "user") == "job_search_auto_analysis":
+            # 内部续答没有新的用户输入；只返回内存占位，不写伪造的 user 消息。
+            from datetime import UTC, datetime
+            return {
+                "persisted_message": MessageRecord(
+                    active_turn.turn.id, active_turn.conversation.id, active_turn.turn.id,
+                    MessageRole.SYSTEM, state["redacted_user_text"], self._redactor.enabled,
+                    datetime.now(UTC), is_automatic=True,
+                ),
+                **self._append_step(state, AgentStepName.PERSIST_HISTORY),
+            }
         persisted_message = self._agent_loop.repository.append_message(
             active_turn.conversation.id,
             MessageRole.USER,
@@ -649,6 +661,7 @@ class CareerIntakeGraph:
             candidate_profile_context=resume_outline,
             target_role_context=redacted_job_text,
             context_binding_version=inbound_message.context_binding_version,
+            job_search_snapshot=inbound_message.job_search_snapshot,
         )
 
     @staticmethod

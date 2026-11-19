@@ -61,6 +61,7 @@ _MODEL_CONTEXT_LIMITS = {
     ("deepseek", "deepseek-v4-flash"): (1_048_576, 384_000),
     ("deepseek", "deepseek-v4-pro"): (1_048_576, 384_000),
     ("deepseek", "deepseek-v4-flash-vision-exp"): (1_048_576, 384_000),
+    ("kimi", "kimi-k3"): (1_000_000, 131_072),
 }
 
 
@@ -78,7 +79,7 @@ def infer_model_context_policy(provider_key: str, model_id: str) -> ModelContext
     )
 
 
-PAID_ONLY_PROVIDER_KEYS = frozenset({"deepseek"})
+PAID_ONLY_PROVIDER_KEYS = frozenset({"deepseek", "kimi"})
 
 
 def normalize_model_cost_tier(

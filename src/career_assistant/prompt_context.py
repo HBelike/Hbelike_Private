@@ -29,6 +29,7 @@ from src.career_assistant.model_gateway import ModelResolution
 from src.career_assistant.persistence.conversation_repository import CareerConversationRepository
 from src.career_assistant.persistence.model_profile_repository import ModelContextPolicy
 from src.career_assistant.skill_tools import SkillToolRegistry
+from src.career_assistant.job_search_context import job_search_context_messages, snapshot_context_messages
 
 
 SYSTEM_RULES = (
@@ -271,6 +272,18 @@ class PromptContextService:
             ),
         ]
         skill_messages, tool_tokens = self._skill_component(context)
+        snapshot = getattr(context, "job_search_snapshot", None)
+        if snapshot is not None:
+            search_context = snapshot_context_messages(snapshot, context.redacted_user_text,
+                token_budget=max(600, min(6000, resolution.profile.context_policy.context_window_tokens // 5)))
+        else:
+            search_messages = self._conversations.list_messages(
+                active_turn.conversation.actor_id, active_turn.conversation.id, limit=200,
+            )
+            search_context = job_search_context_messages(search_messages, active_turn.turn.id)
+        components.append(PromptComponent.pinned(
+            "job_search", search_context,
+        ))
         components.append(
             PromptComponent.pinned(
                 "skills",
@@ -337,7 +350,7 @@ class PromptContextService:
                 PromptComponent.optional(
                     f"recent_turn:{turn.turn_id}",
                     (
-                        ChatMessage("user", turn.user_message.content_text),
+                        *((ChatMessage("user", turn.user_message.content_text),) if turn.user_message else ()),
                         ChatMessage("assistant", turn.assistant_message.content_text),
                     ),
                     drop_rank=20 + index,

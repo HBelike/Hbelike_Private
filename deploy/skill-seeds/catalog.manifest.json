@@ -1,7 +1,7 @@
 {
   "format": 1,
-  "description": "仅包含可部署 SKILL.md 的名称、相对路径与 SHA-256；不包含本机绝对路径、缓存或凭据。",
-  "total": 57,
+  "description": "记录可部署 SKILL.md、只读引用与许可证的名称、相对路径和 SHA-256；不包含本机绝对路径、缓存或凭据。",
+  "total": 59,
   "skills": [
     {
       "name": "88api-nano-banana",
@@ -146,12 +146,12 @@
     {
       "name": "github-project-blog",
       "path": "github-project-blog/SKILL.md",
-      "sha256": "ee675749bf08783a1ee51e29fc25a81e4c7610ce3256edd92b7b122425df8997"
+      "sha256": "d7a9ecc5d9564586bbcac4e133563e9d56198a3441b2705984e9d516415bc204"
     },
     {
       "name": "grill-me",
       "path": "grill-me/SKILL.md",
-      "sha256": "9c71927d4f0fd32d815247b4ca1fc782d4c5f2f3c1d6d023d188d4a7e0299b21"
+      "sha256": "649d22acc7ddb7656f0eec4f57fc3ef1d5efe903d2dae4c601d6a844ffe502ac"
     },
     {
       "name": "imagegen",
@@ -249,6 +249,21 @@
       "sha256": "b3e351e714f2ae832e822e62c98639a8fb1f35ba7ed3560335d28a5da58e12b3"
     },
     {
+      "name": "resume-builder",
+      "path": "resume-builder/SKILL.md",
+      "sha256": "5b5721372b896fc487dbbcc2122d0acdf9b80c1eae945ea19bfc2fe86ba9d76c",
+      "resources": [
+        {
+          "path": "resume-builder/LICENSE",
+          "sha256": "7a45a3f9b2ecf8ad947694daadfe6e68e5e9004bc1e8a0cd92f30d75e85fa7ed"
+        },
+        {
+          "path": "resume-builder/references/schema.md",
+          "sha256": "3268c459b05b330b2dc081678b7c6f322d31f4832ec48911fb91e43773f41356"
+        }
+      ]
+    },
+    {
       "name": "review-agent",
       "path": "review-agent/SKILL.md",
       "sha256": "bb46315f6bc4b7051c05f807d19b1689b20418ac6c42590406d805c10fa2fd1a"
@@ -277,6 +292,11 @@
       "name": "Spreadsheets",
       "path": "Spreadsheets/SKILL.md",
       "sha256": "de6dae26c7e282dc620180c7c944274abcc30085167dece62df040a2d0e6ffec"
+    },
+    {
+      "name": "tailored-resume-generator",
+      "path": "tailored-resume-generator/SKILL.md",
+      "sha256": "b36bdb84574e52cd50a33bf184ba1793e099bf653f8f9a4f5811bb8a5a2c1cb9"
     },
     {
       "name": "template-creator",

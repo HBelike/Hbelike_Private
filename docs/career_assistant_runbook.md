@@ -31,6 +31,22 @@ WebUI 对话 / PDF / 图片 / 职位链接
 4. 首次开发前安装热更新依赖：`.\.venv\Scripts\python.exe -m pip install -r requirements-development.txt`。本地后端唯一启动命令是 `scripts\start_dev_backend.ps1`：脚本以前台方式启动 Uvicorn API，同时以隐藏的独立进程启动 `career-agent-worker`，API 退出时自动清理对应 Worker。API 使用 `watchfiles` 监视 `src/**/*.py` 与 `config/**/*.yaml`，并在 Windows 工作区强制使用轮询模式；前端通过 `web-ui/vite.config.js` 代理到固定端口 `18080`。不要直接只运行 `preview_server.py`，否则 Turn 会入队但无人消费；也不要同时启动多个本地后端实例，避免浏览器命中旧进程。
 5. 启动前端：在 `web-ui` 下执行 `npm run dev`，访问 `http://127.0.0.1:5173/career`。
 
+### 一键启动
+
+在项目根目录的 Windows PowerShell 中执行自定义平台启动命令，即可启动或重启完整本地开发栈：
+
+```powershell
+npm run platform:start
+```
+
+根目录 `package.json` 的 `scripts["platform:start"]` 统一声明平台开发入口，用 `platform:` 前缀明确命令作用于整个平台，调用仓库 Skill `$local-platform-start` 的 `.agents/skills/local-platform-start/scripts/start-local-platform.ps1`，并通过 npm 返回启动器的退出码。根目录仅管理开发命令，没有新增 npm 依赖，无需在根目录执行 `npm install`；仍需准备 Node.js/npm、`.env.career-assistant`、Python 虚拟环境、`web-ui` 的前端依赖及本地数据库所需的 Docker 环境。前端开发命令仍是在 `web-ui` 目录执行 `npm run dev`，仅启动前端。
+
+启动器复用 `scripts/start_dev_backend.ps1` 管理 API 与 Worker，直接启动仓库 Vite，并复用 `.env.career-assistant` 和 `docker-compose.career-assistant.yml` 管理本地 PostgreSQL。数据库端口未监听时，Docker 可用则启动 `career-postgres`；已有数据库数据卷不会被删除。启动前只会清理可通过仓库 Python/Vite 路径、入口参数及进程父子关系确认归属的本项目服务。端口被其他进程占用或监听者无法确认时会停止并报告，不会按端口号结束未知进程。
+
+成功标准是 `/api/health` 返回当前版本、Worker 进程存活、`/career` 与 Vite 的 `/api/health` 代理均返回 200。日志保存在 `tmp/local-platform/`。2026-11-10 在本机完成连续重复启动验收：旧 API、Worker 和 Vite 被本项目归属规则识别并替换；最终各有一个 API、Worker、Vite 进程，PostgreSQL 容器 healthy，前端与代理返回 200。该 Skill 仅用于本地开发，不执行生产部署或删除数据库卷。
+
+2026-11-15 npm 入口验收：在项目根目录执行 `npm run platform:start` 返回退出码 `0`，API、Worker、前端页面和 Vite API 代理均通过原启动器探活。
+
 ### 长回复配置
 
 `config/career_assistant.yaml` 中的 `response_generation` 用于控制求职助手的单次回复：默认允许模型生成 `4096` Token，模型请求超时为 `90` 秒，完整回复最多持久化 `30000` 字符。使用 `preview_server.py` 启动时，`src/**/*.py` 与 `config/**/*.yaml` 变更会自动重载；新增或修改 `.env.career-assistant` 后应重启一次开发后端，以重新读取 Secret。

@@ -94,6 +94,8 @@ class CareerTurnJobRepository:
         model_selection: ModelSelectionRequest,
         input_kind_codes: frozenset[str],
         payload: TurnPayloadRecord,
+        idempotency_key: str | None = None,
+        allow_queue_when_busy: bool = False,
     ) -> AgentTurnRecord:
         """在一个事务中写入 queued Turn、完整 payload 和 queued 事件。"""
 
@@ -103,6 +105,11 @@ class CareerTurnJobRepository:
         normalized_kinds = sorted({item.strip() for item in input_kind_codes if item.strip()})
         if not normalized_kinds:
             raise ValueError("Agent Turn 至少需要一种输入类型")
+        if idempotency_key is not None and not idempotency_key.strip():
+            raise ValueError("幂等键不能为空")
+        metadata = dict(payload.request_metadata)
+        if idempotency_key is not None:
+            metadata["idempotency_key"] = idempotency_key
 
         with self._database.transaction() as connection:
             conversation = connection.execute(
@@ -120,11 +127,48 @@ class CareerTurnJobRepository:
             ).mappings().one_or_none()
             if conversation is None:
                 raise LookupError("会话不存在、无访问权限、已归档或已删除")
+            if "job_search_view" in metadata:
+                from src.career_assistant.persistence.job_search_repository import JobSearchRepository
+                metadata["job_search_snapshot"] = JobSearchRepository(self._database).capture_snapshot(
+                    actor_id, conversation_id, metadata.pop("job_search_view"), connection=connection,
+                )
+            if idempotency_key is not None:
+                # 会话行锁将相同版本的并发绑定串行化；失败任务也不自动重复调用模型。
+                existing = connection.execute(
+                    text("""
+                        SELECT turn.*
+                        FROM career_assistant.agent_turns AS turn
+                        JOIN career_assistant.agent_turn_payloads AS payload
+                          ON payload.turn_id = turn.id
+                        WHERE turn.conversation_id = :conversation_id
+                          AND turn.actor_id = :actor_id
+                          AND payload.request_metadata_json ->> 'idempotency_key' = :key
+                        ORDER BY turn.queue_sequence LIMIT 1
+                    """),
+                    {"conversation_id": conversation_id, "actor_id": actor_id,
+                     "key": idempotency_key},
+                ).mappings().one_or_none()
+                if existing is not None:
+                    return self._to_turn_record(existing)
+            if "job_search_auto_analysis" in normalized_kinds:
+                # 与取消共用会话锁，不能在取消之后再排入一个未关联的内部任务。
+                batch = connection.execute(text("""
+                    SELECT search_status,analysis_turn_id FROM career_assistant.job_search_batches
+                    WHERE id=CAST(:batch_id AS uuid) AND conversation_id=:conversation_id FOR UPDATE
+                """), {"batch_id": metadata.get("job_search_batch_id"), "conversation_id": conversation_id}).mappings().one_or_none()
+                if batch is None or batch["search_status"] not in {"succeeded", "empty"}:
+                    raise ConversationTurnAdmissionError("job_search_cancelled", "该批岗位已取消或尚未完成，未创建自动分析")
+                if batch["analysis_turn_id"]:
+                    associated = connection.execute(text("SELECT * FROM career_assistant.agent_turns WHERE id=:id"),
+                        {"id": batch["analysis_turn_id"]}).mappings().one_or_none()
+                    if associated is not None and associated["status"] in {"queued", "running", "succeeded"}:
+                        return self._to_turn_record(associated)
             counts = connection.execute(
                 text(
                     """
                     SELECT
-                      COUNT(*) FILTER (WHERE status = 'succeeded') AS successful_turns,
+                      COUNT(*) FILTER (WHERE status = 'succeeded'
+                        AND NOT (input_kind_codes @> '["job_search_auto_analysis"]'::jsonb)) AS successful_turns,
                       COUNT(*) FILTER (WHERE status IN ('queued', 'running')) AS active_turns
                     FROM career_assistant.agent_turns
                     WHERE conversation_id = :conversation_id
@@ -133,12 +177,12 @@ class CareerTurnJobRepository:
                 ),
                 {"conversation_id": conversation_id, "actor_id": actor_id},
             ).mappings().one()
-            if int(counts["active_turns"]) > 0:
+            if int(counts["active_turns"]) > 0 and not allow_queue_when_busy:
                 raise ConversationTurnAdmissionError(
                     "conversation_turn_in_progress",
                     "当前回复完成后可继续发送",
                 )
-            if int(counts["successful_turns"]) >= MAX_SUCCESSFUL_TURNS:
+            if int(counts["successful_turns"]) >= MAX_SUCCESSFUL_TURNS and "job_search_auto_analysis" not in normalized_kinds:
                 raise ConversationTurnAdmissionError(
                     "conversation_turn_limit_reached",
                     "本对话已完成 30 轮，请开启新对话继续。",
@@ -201,7 +245,7 @@ class CareerTurnJobRepository:
                         ensure_ascii=False,
                     ),
                     "request_metadata": json.dumps(
-                        payload.request_metadata,
+                        metadata,
                         ensure_ascii=False,
                     ),
                 },
@@ -212,6 +256,10 @@ class CareerTurnJobRepository:
                 "queued",
                 {"state": "queued", "queue_sequence": row["queue_sequence"]},
             )
+            if "job_search_auto_analysis" in normalized_kinds:
+                connection.execute(text("""UPDATE career_assistant.job_search_batches SET analysis_turn_id=:turn_id
+                    WHERE id=CAST(:batch_id AS uuid) AND conversation_id=:conversation_id"""),
+                    {"turn_id": turn_id, "batch_id": metadata["job_search_batch_id"], "conversation_id": conversation_id})
 
         return self._to_turn_record(row)
 
@@ -233,6 +281,7 @@ class CareerTurnJobRepository:
                       AND conversation.actor_id = :actor_id
                       AND conversation.status <> 'deleted'
                       AND turn.status = 'succeeded'
+                      AND NOT (turn.input_kind_codes @> '["job_search_auto_analysis"]'::jsonb)
                     """,
                 ),
                 {"conversation_id": conversation_id, "actor_id": actor_id},
@@ -243,6 +292,11 @@ class CareerTurnJobRepository:
             remaining_turns=max(0, MAX_SUCCESSFUL_TURNS - successful_turns),
             reached=successful_turns >= MAX_SUCCESSFUL_TURNS,
         )
+
+    def resolve_search_snapshot(self, actor_id, conversation_id, snapshot):
+        """Worker 只还原入队时的岗位版本，不读取当前卡片。"""
+        from src.career_assistant.persistence.job_search_repository import JobSearchRepository
+        return JobSearchRepository(self._database).resolve_snapshot(actor_id, conversation_id, snapshot)
 
     def claim_next(
         self,

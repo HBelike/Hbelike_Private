@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>招聘沟通本地验收</title>
+<p class="fixture-notice">本地模拟数据验收 · 不连接真实 BOSS，不执行发送</p>
+<div id="app"></div>
+<script type="module">
+import { createApp, h } from 'vue'
+import CareerMessagesPage from '/src/components/CareerMessagesPage.vue'
+import '/src/styles.css'
+import '/src/theme.css'
+document.documentElement.dataset.uiTheme = 'blue'
+createApp({ render: () => h(CareerMessagesPage) }).mount('#app')
+</script>
+<style>body{overflow:hidden}.fixture-notice{height:29px;margin:0;padding:6px 24px;background:#eaf3ff;color:#004aa8;font:12px/17px "Microsoft YaHei",sans-serif}#app{height:calc(100dvh - 29px);display:flex;flex-direction:column}</style>
+</html>

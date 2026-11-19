@@ -223,6 +223,54 @@ export function normalizeDetailResponse(response, fallback = {}) {
   }
 }
 
+// 此函数会被序列化到 BOSS 页的 MAIN world，依赖必须通过参数传入。
+export async function fetchBossJobData(requestedEndpoint, pageRules) {
+  const pageText = document.body?.innerText ?? ''
+  const hasVisibleChallenge = [...document.querySelectorAll(pageRules.verificationSelector)].some((element) => {
+    const style = window.getComputedStyle(element)
+    const rect = element.getBoundingClientRect()
+    return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0
+  })
+  // 普通安全说明和“请稍候”不是验证证据，不能阻断正常页面的数据读取。
+  if (new RegExp(pageRules.verificationRoutePattern, 'i').test(location.pathname)
+    || hasVisibleChallenge || new RegExp(pageRules.verificationTextPattern).test(pageText)) {
+    return { kind: 'verification' }
+  }
+  if (new RegExp(pageRules.loginTextPattern).test(pageText)
+    || new RegExp(pageRules.loginRoutePattern, 'i').test(location.pathname)) {
+    return { kind: 'login' }
+  }
+
+  const supportedEndpoint = /^\/wapi\/zpgeek\/(search\/joblist|job\/detail)\.json\?/.test(requestedEndpoint)
+    || requestedEndpoint === '/wapi/zpgeek/common/data/city/site.json'
+  if (!supportedEndpoint) return { kind: 'network', message: '不支持的职位操作。' }
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), 12000)
+  try {
+    const response = await fetch(requestedEndpoint, {
+      method: 'GET', credentials: 'include', cache: 'no-store',
+      headers: { Accept: 'application/json, text/plain, */*' }, signal: controller.signal
+    })
+    if (!response.ok) return { kind: 'http', status: response.status }
+    const payload = await response.json()
+    // 接口明确要求验证时仍停止，不用页面正常来否定接口的真实限制。
+    if (Number(payload?.code) !== 0
+      && new RegExp(pageRules.verificationTextPattern).test(String(payload?.message || payload?.msg || ''))) {
+      return { kind: 'verification' }
+    }
+    return { kind: 'api', response: payload }
+  } catch (error) {
+    return {
+      kind: 'network',
+      message: error instanceof Error && error.name === 'AbortError'
+        ? 'BOSS 直聘请求超时，请稍后重试。'
+        : (error instanceof Error ? error.message : 'BOSS 直聘请求失败。')
+    }
+  } finally {
+    clearTimeout(timeoutId)
+  }
+}
+
 export function classifyBossFailure(result) {
   if (!result) return { code: 'empty_response', message: 'BOSS 直聘没有返回数据。' }
   if (result.kind === 'verification') {

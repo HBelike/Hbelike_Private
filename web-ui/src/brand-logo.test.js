@@ -8,7 +8,7 @@ const themeCss = readFileSync(new URL('./theme.css', import.meta.url), 'utf8')
 
 test('应用左上角使用求职助手机会路径品牌标识', () => {
   const brandMarkup = appVue.match(/<div class="brand">([\s\S]*?)<\/div>\s*<\/div>\s*<nav class="nav-list"/)?.[1]
-  const brandIconRule = stylesCss.match(/\.brand-icon\s*\{([^}]*)\}/)?.[1]
+  const brandIconRule = stylesCss.match(/\n\.brand-icon\s*\{([^}]*)\}/)?.[1]
 
   assert.ok(brandMarkup, '应存在应用左上角品牌区')
   assert.match(brandMarkup, /class="brand-icon" aria-hidden="true"/)

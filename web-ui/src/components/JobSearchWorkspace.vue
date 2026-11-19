@@ -1,10 +1,7 @@
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
-import { JobLibraryBridgeError, jobLibraryBridge } from '../job-library-bridge.js'
-import {
-  normalizeBossExtensionConnection,
-  shouldOpenBossExtensionGate
-} from '../boss-extension-onboarding.js'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, useId, watch } from 'vue'
+import { JobLibraryBridgeError, jobLibraryBridge, subscribeJobLibraryConnection } from '../job-library-bridge.js'
+import { createJobLibraryConnection } from '../job-library-connection.js'
 import {
   greetingJobKey,
   normalizeGreetingLimit,
@@ -26,8 +23,12 @@ import {
   mergeJobCityCatalog,
   normalizeHotJobCities
 } from '../job-city-catalog.js'
+import { findSearchCity, summarizeSearchJobs } from '../job-search-card.js'
+import { resolveJobSearchCity } from '../job-search-location.js'
 import JobCityPicker from './JobCityPicker.vue'
 import BossExtensionInstallDialog from './BossExtensionInstallDialog.vue'
+import DesktopCapabilityNotice from './DesktopCapabilityNotice.vue'
+import { isMobileBrowser } from '../platform-capabilities.js'
 
 const CITY_STORAGE_KEY = 'find-job-job-city-v1'
 
@@ -46,17 +47,41 @@ function readStoredCity() {
 const props = defineProps({
   selectionMode: { type: Boolean, default: false },
   multiSelectionMode: { type: Boolean, default: false },
-  selectionLimit: { type: Number, default: 10 }
+  selectionLimit: { type: Number, default: 10 },
+  chatMode: { type: Boolean, default: false },
+  initialQuery: { type: String, default: '' },
+  initialCityName: { type: String, default: '' },
+  initialCitySource: { type: String, default: '' },
+  autoSearch: { type: Boolean, default: false },
+  searchSession: { type: Object, default: null },
+  sourceMessageId: { type: String, default: '' },
+  analysisRequested: { type: Boolean, default: false }
 })
 
-const emit = defineEmits(['selection-change', 'selection-list-change'])
+const emit = defineEmits(['selection-change', 'selection-list-change', 'search-state', 'navigate', 'batch-change'])
+const mobileBrowser = isMobileBrowser()
 
-const query = ref('')
+const query = ref(props.initialQuery)
+const selectedPlatform = ref('boss')
+const liepinConfigured = ref(false)
+const liepinConnectionState = ref('unconfigured')
+const liepinSetupError = ref('')
+const searchInputId = useId()
+const locating = ref(false)
+const locationMessage = ref('')
+const locationAttribution = ref('')
+const locationAttributionUrl = ref('')
+const citySource = ref(props.initialCitySource || (props.initialCityName ? 'user' : ''))
+let autoSearchAttempted = false
+let initialized = false
+let locationSequence = 0
 const submittedQuery = ref('')
 const jobs = ref([])
 const selectedJobId = ref('')
 const selectedJob = ref(null)
 const compactView = ref('list')
+const jobResults = ref(null)
+let resultsScrollTop = 0
 const page = ref(1)
 const hasMore = ref(false)
 const hasSearched = ref(false)
@@ -71,9 +96,14 @@ const selectionLoadingKeys = ref([])
 const selectionErrors = ref({})
 const bridgeStatus = ref('checking')
 const bridgeVersion = ref('')
+const bridgeCapabilities = ref([])
+const bossAttention = ref(null)
 const installDialogOpen = ref(false)
+const extensionDialogMode = ref('install')
 const searchInput = ref(null)
-const selectedCity = ref(readStoredCity())
+const selectedCity = ref(props.chatMode
+  ? findSearchCity(mergeJobCityCatalog(), props.initialCityName) || { code: '', name: props.initialCityName || '请选择城市' }
+  : readStoredCity())
 const submittedCity = ref({ ...selectedCity.value })
 const cityCatalog = ref(mergeJobCityCatalog())
 const hotCities = ref(normalizeHotJobCities())
@@ -82,6 +112,30 @@ let searchSequence = 0
 let detailSequence = 0
 let prefetchSequence = 0
 let selectionClosed = false
+let unsubscribeConnection = () => {}
+let lastConnectionError = ''
+let lastPublishedSummary = ''
+let currentBatchId = ''
+const completionTimers = new Set()
+function persistError(error) { searchError.value = error instanceof Error ? error.message : '岗位保存失败，请重试保存。' }
+function publishBatch() { if (currentBatchId) emit('batch-change', props.searchSession?.state(currentBatchId)?.batch) }
+function completeBatch(batchId) { if (batchId) void props.searchSession.complete(batchId).then(publishBatch).catch(persistError) }
+const connection = createJobLibraryConnection({
+  ping: () => jobLibraryBridge.ping(),
+  onChange: (state) => {
+    bridgeStatus.value = state.status === 'ready' && selectedPlatform.value === 'boss' && bossAttention.value ? 'attention' : state.status
+    bridgeVersion.value = state.version
+    bridgeCapabilities.value = Array.isArray(state.capabilities) ? state.capabilities : []
+    if (state.status === 'ready') {
+      if (searchError.value === lastConnectionError) searchError.value = ''
+      lastConnectionError = ''
+      installDialogOpen.value = false
+    } else if (state.status === 'unavailable') {
+      lastConnectionError = state.error
+      searchError.value = state.error
+    }
+  }
+})
 const selectionIntents = createSelectionIntentState()
 const detailLoader = createJobDetailLoader({
   keyOf: greetingJobKey,
@@ -90,9 +144,9 @@ const detailLoader = createJobDetailLoader({
 
 const bridgeStatusText = computed(() => ({
   checking: '正在连接助手',
-  ready: bridgeVersion.value ? `助手已连接 · v${bridgeVersion.value}` : '助手已连接',
-  missing: '需要安装助手',
-  attention: '需要处理 BOSS 页面'
+  ready: bridgeVersion.value ? `浏览器助手已连接 · v${bridgeVersion.value}` : '浏览器助手已连接',
+  unavailable: '助手暂未连接 · 点击重试',
+  attention: '需要处理平台状态'
 }[bridgeStatus.value]))
 
 const selectedSkills = computed(() => selectedJob.value?.skills ?? [])
@@ -100,6 +154,12 @@ const selectedWelfare = computed(() => selectedJob.value?.welfare ?? [])
 const resultSummary = computed(() => jobs.value.length
   ? `已加载 ${jobs.value.length} 个岗位`
   : '等待真实结果')
+const selectedPlatformName = computed(() => selectedPlatform.value === 'liepin' ? '猎聘' : 'BOSS 直聘')
+const searchErrorTitle = computed(() => bridgeStatus.value === 'unavailable'
+  ? '浏览器助手暂时无法连接'
+  : jobs.value.length ? '后续操作未完成，已保留现有岗位' : '本次没有获取到岗位')
+const detailFreshness = computed(() => selectedJob.value?.description
+  ? '完整详情已获取' : selectedJob.value?.platform === 'liepin' ? '官方搜索未返回完整 JD' : detailLoading.value ? '正在获取完整详情' : detailError.value ? '详情获取受阻' : '仅有岗位摘要')
 const resultCityName = computed(() => (hasSearched.value ? submittedCity.value : selectedCity.value).name)
 const detailFetchedAt = computed(() => {
   const value = selectedJob.value?.fetchedAt
@@ -110,6 +170,22 @@ const detailFetchedAt = computed(() => {
 })
 const normalizedSelectionLimit = computed(() => normalizeGreetingLimit(props.selectionLimit))
 const selectedJobCount = computed(() => selectedJobs.value.length)
+const canSelectJobs = computed(() => selectedPlatform.value === 'boss')
+const liepinFeatureReady = computed(() => bridgeStatus.value === 'ready' && bridgeCapabilities.value.includes('liepin_job_search'))
+const platformStatusText = computed(() => selectedPlatform.value === 'liepin'
+  ? bridgeStatus.value === 'ready' && !liepinFeatureReady.value
+    ? `助手 v${bridgeVersion.value || '旧版本'}不支持猎聘搜索`
+    : liepinConnectionState.value === 'ready'
+    ? '猎聘授权可用'
+    : liepinConfigured.value
+      ? '猎聘授权已保存，首次搜索时验证'
+      : '需要猎聘官方授权'
+  : bridgeStatusText.value)
+const searchButtonText = computed(() => searching.value
+  ? '正在检索…'
+  : selectedPlatform.value === 'liepin' && !liepinConfigured.value
+    ? '配置猎聘授权'
+    : '搜索真实岗位')
 
 function readableBridgeError(error, fallback) {
   if (error instanceof JobLibraryBridgeError) return error.message
@@ -118,7 +194,9 @@ function readableBridgeError(error, fallback) {
 
 function markBridgeAttention(error) {
   if (!(error instanceof JobLibraryBridgeError)) return
-  if (error.code === 'extension_unavailable') bridgeStatus.value = 'missing'
+  if (['extension_unavailable', 'bridge_timeout', 'bridge_disconnected'].includes(error.code)) {
+    void checkBridge({ loadCatalog: false })
+  }
   if ([
     'login_required',
     'verification_required',
@@ -127,12 +205,18 @@ function markBridgeAttention(error) {
     'city_context_sync_failed',
     'session_refresh_failed'
   ].includes(error.code)) {
+    bossAttention.value = { code: error.code, message: error.message }
     bridgeStatus.value = 'attention'
   }
 }
 
+function clearBossAttention() {
+  bossAttention.value = null
+  bridgeStatus.value = 'ready'
+}
+
 function publishSelection(job) {
-  if (props.selectionMode) emit('selection-change', job)
+  if (props.selectionMode) emit('selection-change', canSelectJobs.value ? job : null)
 }
 
 function publishSelectionList() {
@@ -176,6 +260,9 @@ function clearSelectionError(key) {
 }
 
 function mergeJobDetail(detail) {
+  if (props.searchSession && currentBatchId) {
+    void props.searchSession.saveDetail(currentBatchId, detail).then(publishBatch).catch(persistError)
+  }
   jobs.value = jobs.value.map((item) => (
     greetingJobKey(item) === greetingJobKey(detail) ? { ...item, ...detail } : item
   ))
@@ -189,6 +276,14 @@ function mergeJobDetail(detail) {
     return { ...item, ...detail }
   })
   if (selectionChanged) publishSelectionList()
+  if (props.chatMode && !props.searchSession && hasSearched.value) {
+    const summary = summarizeSearchJobs(jobs.value)
+    const serialized = JSON.stringify(summary)
+    if (serialized !== lastPublishedSummary) {
+      lastPublishedSummary = serialized
+      emit('search-state', { result_summary: summary })
+    }
+  }
 }
 
 function shouldStopDetailPrefetch(error) {
@@ -202,19 +297,28 @@ function shouldStopDetailPrefetch(error) {
 
 function prefetchCurrentJobs(jobList, searchToken) {
   const sequence = ++prefetchSequence
+  const batchId = currentBatchId
+  const eligibleJobs = jobList.filter((job) => job.platform !== 'liepin' || Boolean(job.description))
+  if (!eligibleJobs.length) {
+    if (batchId && props.analysisRequested) completeBatch(batchId)
+    return
+  }
   const selectedKeys = new Set(selectedJobs.value.map(greetingJobKey))
-  const prioritized = [...jobList].sort((left, right) => (
+  const prioritized = [...eligibleJobs].sort((left, right) => (
     Number(selectedKeys.has(greetingJobKey(right))) - Number(selectedKeys.has(greetingJobKey(left)))
   ))
-  void prefetchJobDetails(prioritized, detailLoader, {
-    concurrency: 2,
+  const completion = prefetchJobDetails(prioritized, detailLoader, {
+    // 扩展本身串行读取，前端也逐条领取，遇到验证后不再排入下一条。
+    concurrency: 1,
+    shouldContinue: () => !selectionClosed && searchToken === searchSequence && sequence === prefetchSequence
+      && !['login_required', 'verification_required', 'rate_limited', 'session_refresh_failed'].includes(bossAttention.value?.code),
     onResolved: (detail) => {
-      if (selectionClosed || sequence !== prefetchSequence || searchToken !== searchSequence) return
+      if (selectionClosed || searchToken !== searchSequence) return
       mergeJobDetail(detail)
       clearSelectionError(greetingJobKey(detail))
     },
     onRejected: (error, job) => {
-      if (selectionClosed || sequence !== prefetchSequence || searchToken !== searchSequence) return
+      if (selectionClosed || searchToken !== searchSequence) return
       markBridgeAttention(error)
       if (isJobInSelection(job)) {
         selectionErrors.value = {
@@ -225,6 +329,11 @@ function prefetchCurrentJobs(jobList, searchToken) {
     },
     shouldStop: shouldStopDetailPrefetch
   })
+  if (batchId && props.analysisRequested) {
+    const timer = setTimeout(() => completeBatch(batchId), 30000)
+    completionTimers.add(timer)
+    void completion.finally(() => { clearTimeout(timer); completionTimers.delete(timer); if (!selectionClosed) completeBatch(batchId) })
+  }
 }
 
 async function hydrateSelectedJob(job, token) {
@@ -251,6 +360,7 @@ async function hydrateSelectedJob(job, token) {
 }
 
 async function toggleJobFromCard(job) {
+  if (!canSelectJobs.value) return
   if (!props.multiSelectionMode) return
   const key = greetingJobKey(job)
   multiSelectionError.value = ''
@@ -318,15 +428,58 @@ function resetJobResults() {
   publishSelection(null)
 }
 
+function searchConditions() {
+  return { platform: selectedPlatform.value, keyword: query.value.trim(), city: selectedCity.value.code ? selectedCity.value.name : null, city_source: citySource.value || null }
+}
+
+function publishConditions() {
+  if (props.chatMode && !props.searchSession && initialized) emit('search-state', { conditions: searchConditions() })
+}
+
+async function locateCity(requestPermission = false) {
+  const sequence = ++locationSequence
+  locating.value = true
+  const result = await resolveJobSearchCity({ cities: cityCatalog.value, requestPermission })
+  if (selectionClosed || sequence !== locationSequence) return
+  locating.value = false
+  // 定位期间用户选了城市时，以用户选择为准。
+  if (selectedCity.value.code && citySource.value !== 'location') return
+  locationMessage.value = result.message || ''
+  locationAttribution.value = result.attribution || ''
+  locationAttributionUrl.value = result.attributionUrl || ''
+  if (result.city) {
+    selectedCity.value = { ...result.city }
+    citySource.value = 'location'
+    publishConditions()
+    await maybeAutoSearch()
+  }
+}
+
+async function maybeAutoSearch() {
+  if (mobileBrowser) return
+  if (!initialized || !props.chatMode || !props.autoSearch || autoSearchAttempted
+    || !query.value.trim() || !selectedCity.value.code) return
+  autoSearchAttempted = true
+  await submitSearch({ automatic: true })
+}
+
 function handleCityChange(city) {
   if (!city?.code || city.code === selectedCity.value.code) return
   selectedCity.value = { ...city }
+  if (props.chatMode) {
+    citySource.value = 'manual'
+    locationSequence += 1
+    locating.value = false
+    locationMessage.value = ''
+    publishConditions()
+  }
   try {
     window.localStorage.setItem(CITY_STORAGE_KEY, JSON.stringify(selectedCity.value))
   } catch {
     // 本地存储不可用不影响本次搜索。
   }
   if (hasSearched.value || jobs.value.length) resetJobResults()
+  if (props.chatMode) void maybeAutoSearch()
 }
 
 async function loadCities() {
@@ -345,42 +498,127 @@ async function loadCities() {
   }
 }
 
-async function checkBridge({ loadCatalog = true, interactive = false } = {}) {
-  bridgeStatus.value = 'checking'
+async function refreshLiepinState() {
+  if (!liepinFeatureReady.value) return false
   try {
-    const connection = normalizeBossExtensionConnection(await jobLibraryBridge.ping())
-    bridgeStatus.value = connection.status
-    bridgeVersion.value = connection.version
-    installDialogOpen.value = shouldOpenBossExtensionGate(connection.status, { interactive })
-    searchError.value = connection.status === 'ready' ? '' : '未检测到职位库浏览器助手。'
-    if (connection.status === 'ready' && loadCatalog) void loadCities()
-    return connection.status === 'ready'
+    const state = await jobLibraryBridge.getLiepinState()
+    liepinConfigured.value = state?.configured === true
+    liepinConnectionState.value = liepinConfigured.value ? 'saved' : 'unconfigured'
+    liepinSetupError.value = ''
+    return true
   } catch (error) {
-    bridgeStatus.value = 'missing'
-    bridgeVersion.value = ''
-    installDialogOpen.value = shouldOpenBossExtensionGate('missing', { interactive })
-    searchError.value = readableBridgeError(error, '未检测到职位库浏览器助手。')
+    liepinSetupError.value = readableBridgeError(error, '无法读取猎聘授权状态。')
+    liepinConnectionState.value = 'error'
     return false
   }
 }
 
-function handleConnectionBadge() {
-  if (bridgeStatus.value === 'missing') {
+async function selectPlatform(platform) {
+  if (!['boss', 'liepin'].includes(platform) || platform === selectedPlatform.value) return
+  if (currentBatchId && props.searchSession) {
+    const batchId = currentBatchId
+    currentBatchId = ''
+    completeBatch(batchId)
+  }
+  selectedPlatform.value = platform
+  selectedJobs.value = []
+  multiSelectionError.value = ''
+  publishSelectionList()
+  resetJobResults()
+  publishConditions()
+  if (platform === 'liepin') {
+    if (bridgeStatus.value !== 'ready') await checkBridge({ loadCatalog: false })
+    if (liepinFeatureReady.value) await refreshLiepinState()
+    else if (bridgeStatus.value === 'ready') {
+      liepinSetupError.value = '请更新到 0.7.0 或更高版本的浏览器助手，再连接猎聘。'
+    }
+  }
+  else if (bridgeStatus.value === 'ready') void loadCities()
+}
+
+async function openLiepinSettings() {
+  if (!await checkBridge({ loadCatalog: false })) return
+  if (!liepinFeatureReady.value) {
+    extensionDialogMode.value = 'update'
     installDialogOpen.value = true
     return
   }
+  try {
+    await jobLibraryBridge.openLiepinSettings()
+    liepinSetupError.value = ''
+  } catch (error) {
+    liepinSetupError.value = readableBridgeError(error, '无法打开扩展授权设置，请检查助手连接。')
+  }
+}
+
+async function checkBridge({ loadCatalog = true } = {}) {
+  if (mobileBrowser) return false
+  const connected = await connection.check()
+  if (!selectionClosed && connected && loadCatalog) {
+    if (selectedPlatform.value === 'boss') void loadCities()
+    else void refreshLiepinState()
+  }
+  return connected
+}
+
+function handleConnectionBadge() {
   void checkBridge()
+}
+
+function handleConnectionSignal(signal) {
+  void connection.handleSignal(signal).then(async (connected) => {
+    if (!connected || selectionClosed) return
+    if (selectedPlatform.value === 'boss') await loadCities()
+    else await refreshLiepinState()
+    // 只继续尚未尝试的自动搜索，不重放已提交的业务请求。
+    if (!selectionClosed) await maybeAutoSearch()
+  })
 }
 
 function refreshForExtensionCheck() {
   window.location.reload()
 }
 
-async function submitSearch() {
+async function submitSearch({ automatic = false } = {}) {
   const nextQuery = query.value.trim()
   if (!nextQuery || searching.value) return
-  if (!await checkBridge({ loadCatalog: false, interactive: true })) return
+  if (selectedPlatform.value === 'liepin' && !liepinConfigured.value) {
+    if (await checkBridge({ loadCatalog: false })) {
+      if (!liepinFeatureReady.value) {
+        liepinSetupError.value = '请更新到 0.7.0 或更高版本的浏览器助手，再连接猎聘。'
+        extensionDialogMode.value = 'update'
+        installDialogOpen.value = true
+        return
+      }
+      await refreshLiepinState()
+    }
+    if (!liepinConfigured.value) {
+      liepinSetupError.value = '请先完成猎聘官方授权，并在扩展设置页保存令牌。'
+      await openLiepinSettings()
+      return
+    }
+  }
+  if (props.chatMode && !selectedCity.value.code) {
+    locationMessage.value = '请选择工作城市，或启用定位服务获取当前位置。'
+    return
+  }
+  if (!await checkBridge({ loadCatalog: false })) return
+  if (selectedPlatform.value === 'liepin') {
+    if (!liepinFeatureReady.value) {
+      liepinSetupError.value = '请更新到 0.7.0 或更高版本的浏览器助手，再连接猎聘。'
+      extensionDialogMode.value = 'update'
+      installDialogOpen.value = true
+      return
+    }
+    await refreshLiepinState()
+    if (!liepinConfigured.value) {
+      liepinSetupError.value = '猎聘授权尚未配置，请先连接后再搜索。'
+      return
+    }
+  }
   const sequence = ++searchSequence
+  detailSequence += 1
+  jobs.value = []
   prefetchSequence += 1
   detailLoader.clear()
   searching.value = true
@@ -390,19 +628,32 @@ async function submitSearch() {
   submittedQuery.value = nextQuery
   submittedCity.value = { ...selectedCity.value }
   hasSearched.value = true
+  lastPublishedSummary = ''
+  if (props.chatMode && !props.searchSession) emit('search-state', { status: 'editing', result_summary: null, conditions: searchConditions() })
 
   try {
-    const result = await jobLibraryBridge.searchJobs(nextQuery, 1, submittedCity.value)
+    if (props.searchSession) {
+      const batch = await props.searchSession.start(props.sourceMessageId, searchConditions(), props.analysisRequested)
+      if (sequence !== searchSequence) return
+      currentBatchId = batch.id
+      publishBatch()
+    }
+    const batchId = currentBatchId
+    const result = await jobLibraryBridge.searchJobs(nextQuery, 1, submittedCity.value, selectedPlatform.value)
+    if (batchId) { await props.searchSession.savePage(batchId, result.jobs || [], 1, result.hasMore); publishBatch() }
     if (sequence !== searchSequence) return
     jobs.value = result.jobs ?? []
+    if (selectedPlatform.value === 'boss') clearBossAttention()
+    else liepinConnectionState.value = 'ready'
     page.value = 1
     hasMore.value = Boolean(result.hasMore)
+    if (props.chatMode && !props.searchSession) emit('search-state', { status: 'searched', conditions: { platform: selectedPlatform.value, keyword: submittedQuery.value, city: submittedCity.value.name, city_source: citySource.value || null }, result_summary: summarizeSearchJobs(jobs.value) })
     selectedJobId.value = ''
     selectedJob.value = null
     if (jobs.value.length) {
       void selectJob(jobs.value[0], { showDetail: false })
       prefetchCurrentJobs(jobs.value, sequence)
-    }
+    } else if (batchId && props.analysisRequested) completeBatch(batchId)
   } catch (error) {
     if (sequence !== searchSequence) return
     jobs.value = []
@@ -411,6 +662,10 @@ async function submitSearch() {
     selectedJob.value = null
     markBridgeAttention(error)
     searchError.value = readableBridgeError(error, '真实岗位获取失败，请稍后重试。')
+    if (error?.code === 'liepin_authorization_required') {
+      liepinConnectionState.value = 'expired'
+      liepinSetupError.value = '猎聘授权已失效，请重新授权并在扩展设置页更新令牌。'
+    }
   } finally {
     if (sequence === searchSequence) searching.value = false
   }
@@ -418,30 +673,38 @@ async function submitSearch() {
 
 async function selectJob(job, { showDetail = true } = {}) {
   const sequence = ++detailSequence
+  if (showDetail && compactView.value === 'list') resultsScrollTop = jobResults.value?.scrollTop || 0
   if (showDetail) compactView.value = 'detail'
   publishSelection(null)
   selectedJobId.value = job.id
+  const searchToken = searchSequence
+  if (props.searchSession && currentBatchId) void props.searchSession.focus(currentBatchId, job).catch(persistError)
   const cached = detailLoader.peek(job)
   selectedJob.value = cached ?? job
   if (cached) {
     mergeJobDetail(cached)
-    bridgeStatus.value = 'ready'
     publishSelection(cached)
     detailLoading.value = false
     detailError.value = ''
+    return
+  }
+  if (job.platform === 'liepin' && !job.description) {
+    detailLoading.value = false
+    detailError.value = '猎聘官方搜索结果未包含完整 JD；可打开原岗位查看，完整 JD 到位后才能加入招呼流程。'
+    publishSelection(null)
     return
   }
   detailLoading.value = true
   detailError.value = ''
   try {
     const detail = await detailLoader.load(job)
-    if (sequence !== detailSequence) return
+    if (sequence !== detailSequence || searchToken !== searchSequence) return
     selectedJob.value = detail
     mergeJobDetail(detail)
-    bridgeStatus.value = 'ready'
+    if (selectedPlatform.value === 'boss') clearBossAttention()
     publishSelection(detail)
   } catch (error) {
-    if (sequence !== detailSequence) return
+    if (sequence !== detailSequence || searchToken !== searchSequence) return
     markBridgeAttention(error)
     detailError.value = readableBridgeError(error, '岗位详情获取失败，请点击当前卡片重试。')
     publishSelection(null)
@@ -452,47 +715,101 @@ async function selectJob(job, { showDetail = true } = {}) {
 
 function returnToJobList() {
   compactView.value = 'list'
+  nextTick(() => jobResults.value?.scrollTo({ top: resultsScrollTop, behavior: 'instant' }))
 }
 
 async function loadMore() {
   if (!hasMore.value || loadingMore.value || !submittedQuery.value) return
+  const searchToken = searchSequence
+  const batchId = currentBatchId
+  const conditions = { query: submittedQuery.value, city: { ...submittedCity.value }, platform: selectedPlatform.value }
   loadingMore.value = true
   searchError.value = ''
   try {
     const nextPage = page.value + 1
-    const result = await jobLibraryBridge.searchJobs(submittedQuery.value, nextPage, submittedCity.value)
+    const result = await jobLibraryBridge.searchJobs(conditions.query, nextPage, conditions.city, conditions.platform)
+    if (batchId) await props.searchSession.savePage(batchId, result.jobs || [], nextPage, result.hasMore)
+    if (searchToken !== searchSequence || selectionClosed) return
     const knownIds = new Set(jobs.value.map((job) => job.id))
     const additions = (result.jobs ?? []).filter((job) => !knownIds.has(job.id))
     jobs.value = [...jobs.value, ...additions]
     page.value = nextPage
     hasMore.value = Boolean(result.hasMore) && additions.length > 0
-    bridgeStatus.value = 'ready'
+    if (selectedPlatform.value === 'boss') clearBossAttention()
+    else liepinConnectionState.value = 'ready'
     if (additions.length) prefetchCurrentJobs(additions, searchSequence)
+    if (props.chatMode && !props.searchSession) emit('search-state', { status: 'searched', conditions: { platform: selectedPlatform.value, keyword: submittedQuery.value, city: submittedCity.value.name, city_source: citySource.value || null }, result_summary: summarizeSearchJobs(jobs.value) })
   } catch (error) {
+    if (searchToken !== searchSequence || selectionClosed) return
     markBridgeAttention(error)
     searchError.value = readableBridgeError(error, '更多岗位获取失败，请稍后重试。')
   } finally {
-    loadingMore.value = false
+    if (searchToken === searchSequence) loadingMore.value = false
   }
 }
 
-onMounted(() => {
-  void checkBridge()
-  nextTick(() => searchInput.value?.focus())
+watch(() => [props.initialQuery, props.initialCityName, props.initialCitySource], async ([keyword, cityName, source]) => {
+  if (!props.chatMode) return
+  const changed = query.value !== keyword || (cityName ? selectedCity.value.name !== cityName : Boolean(selectedCity.value.code))
+  if (!changed) {
+    if (source) citySource.value = source
+    return
+  }
+  query.value = keyword
+  if (cityName) {
+    selectedCity.value = findSearchCity(cityCatalog.value, cityName) || { code: '', name: cityName }
+    citySource.value = props.initialCitySource || 'user'
+  } else {
+    selectedCity.value = { code: '', name: '请选择城市' }
+    citySource.value = ''
+    locationMessage.value = '请选择工作城市，或启用定位服务获取当前位置。'
+  }
+  if (hasSearched.value) resetJobResults()
+  await maybeAutoSearch()
+})
+
+watch(() => props.autoSearch, () => { void maybeAutoSearch() })
+
+onMounted(async () => {
+  if (mobileBrowser) return
+  unsubscribeConnection = subscribeJobLibraryConnection(handleConnectionSignal)
+  if (!props.chatMode) {
+    void checkBridge()
+    nextTick(() => searchInput.value?.focus())
+    return
+  }
+  const connected = await checkBridge({ loadCatalog: false })
+  if (selectionClosed) return
+  if (connected) await loadCities()
+  if (selectionClosed) return
+  if (props.initialCityName) {
+    selectedCity.value = findSearchCity(cityCatalog.value, props.initialCityName) || { code: '', name: props.initialCityName }
+    if (!selectedCity.value.code) locationMessage.value = '暂未匹配到该城市，请手动选择工作城市。'
+  }
+  initialized = true
+  if (!props.initialCityName) await locateCity(false)
+  if (!selectionClosed) await maybeAutoSearch()
 })
 
 onBeforeUnmount(() => {
+  for (const timer of completionTimers) clearTimeout(timer)
   selectionClosed = true
+  unsubscribeConnection()
+  connection.dispose()
   resetSelectionIntents(selectionIntents)
 })
 </script>
 
 <template>
-  <section class="job-workspace">
+  <DesktopCapabilityNotice v-if="mobileBrowser" embedded title="实时岗位检索需要电脑端"
+    description="实时在招信息由电脑端已登录的招聘网站读取。请在电脑端连接浏览器助手后检索和选择岗位。"
+    :return-path="selectionMode || multiSelectionMode || chatMode ? '' : '/career'"
+    @navigate="path => emit('navigate', path)" />
+  <section v-else class="job-workspace" :class="{ 'is-chat': chatMode }">
     <header class="job-workspace-header">
       <div class="workspace-intro">
         <h2>查找真实岗位</h2>
-        <p>选择工作城市并输入岗位名称，职位库会通过已登录浏览器读取当前在招信息。</p>
+        <p>{{ selectedPlatform === 'liepin' ? '通过猎聘官方授权搜索当前在招信息，职位数据仅用于只读浏览。' : '选择工作城市并输入岗位名称，职位库会通过已登录浏览器读取当前在招信息。' }}</p>
       </div>
       <div class="workspace-header-actions">
         <span v-if="multiSelectionMode" class="selection-badge">
@@ -511,17 +828,42 @@ onBeforeUnmount(() => {
       </div>
     </header>
 
+    <section v-if="!chatMode && !selectionMode && !multiSelectionMode" class="platform-switcher" aria-label="选择招聘平台">
+      <div class="platform-tabs" role="tablist" aria-label="招聘平台">
+        <button type="button" role="tab" :aria-selected="selectedPlatform === 'boss'" :class="{ active: selectedPlatform === 'boss' }" @click="selectPlatform('boss')">BOSS 直聘</button>
+        <button type="button" role="tab" :aria-selected="selectedPlatform === 'liepin'" :class="{ active: selectedPlatform === 'liepin' }" @click="selectPlatform('liepin')">猎聘</button>
+        <button type="button" role="tab" aria-selected="false" aria-disabled="true" disabled>前程无忧 · 授权后开放</button>
+      </div>
+      <div v-if="selectedPlatform === 'liepin'" class="platform-connection-card">
+        <div class="platform-connection-copy">
+          <strong>{{ bridgeStatus === 'ready' && !liepinFeatureReady ? '需要更新浏览器助手' : liepinConnectionState === 'ready' ? '猎聘搜索已连接' : liepinConfigured ? '猎聘授权已保存' : '连接猎聘官方搜索' }}</strong>
+          <span>{{ !liepinFeatureReady ? '请先更新浏览器助手，再配置猎聘授权。' : liepinConfigured ? '令牌保存在浏览器助手的本地扩展存储中。' : '先在猎聘官方授权页获取令牌，再到浏览器助手设置页保存。' }}</span>
+        </div>
+        <div class="platform-connection-actions">
+          <a href="https://www.liepin.com/mcp/auth" target="_blank" rel="noopener noreferrer">猎聘官方授权页 ↗</a>
+          <button type="button" :disabled="bridgeStatus !== 'ready'" @click="openLiepinSettings">{{ liepinFeatureReady ? '打开扩展授权设置' : '更新浏览器助手' }}</button>
+          <button type="button" class="subtle-action" :disabled="!liepinFeatureReady" @click="refreshLiepinState">刷新授权状态</button>
+        </div>
+        <p v-if="liepinSetupError" class="platform-setup-error" role="alert">{{ liepinSetupError }}</p>
+        <p class="platform-capability-note">{{ liepinFeatureReady ? '当前接入范围为官方只读职位搜索。完整 JD 可能需要打开原岗位；猎聘沟通能力尚未验证，因此不会加入 BOSS 招呼清单。' : '当前浏览器助手版本不支持猎聘搜索，请下载最新版并在扩展管理页重新加载。' }}</p>
+      </div>
+      <p v-else class="platform-status-line" :class="`is-${bridgeStatus}`">
+        <span class="status-dot"></span>{{ platformStatusText }}<span>·</span>职位搜索和岗位详情沿用当前 BOSS 助手流程
+      </p>
+    </section>
+
     <form class="search-rail" :class="{ searching }" @submit.prevent="submitSearch">
-      <label for="job-search-input">岗位名称</label>
+      <label :for="searchInputId">岗位名称</label>
       <div class="search-input-shell">
         <svg viewBox="0 0 24 24" aria-hidden="true">
           <circle cx="11" cy="11" r="6.5"></circle>
           <path d="m16 16 4 4"></path>
         </svg>
         <input
-          id="job-search-input"
+          :id="searchInputId"
           ref="searchInput"
           v-model="query"
+          @change="publishConditions"
           type="search"
           maxlength="80"
           autocomplete="off"
@@ -537,20 +879,31 @@ onBeforeUnmount(() => {
       />
       <button type="submit" :disabled="searching || !query.trim()">
         <span v-if="searching" class="button-loader" aria-hidden="true"></span>
-        {{ searching ? '正在检索…' : '搜索真实岗位' }}
+        {{ searchButtonText }}
       </button>
       <div class="live-track" aria-hidden="true"><i></i></div>
     </form>
 
-    <section v-if="searchError" class="job-alert" :class="{ 'is-setup': bridgeStatus === 'missing' }">
+    <div v-if="chatMode && (!selectedCity.code || locationMessage || locating)" class="location-prompt" role="status">
+      <p>{{ locating ? '正在获取当前位置…' : locationMessage || '可启用定位服务获取所在城市，也可以手动选择。' }}</p>
+      <small>启用后由 BigDataCloud 解析当前位置</small>
+      <button v-if="!locating" type="button" @click="locateCity(true)">{{ citySource === 'location' ? '重新定位' : '启用定位服务' }}</button>
+    </div>
+
+    <a v-if="chatMode && locationAttribution && locationAttributionUrl" class="location-attribution" :href="locationAttributionUrl" target="_blank" rel="noreferrer">位置数据：{{ locationAttribution }}</a>
+
+    <section v-if="searchError" class="job-alert" :class="{ 'is-setup': bridgeStatus === 'unavailable' }">
       <div>
-        <strong>{{ bridgeStatus === 'missing' ? '连接职位库助手后即可搜索' : '本次没有获取到岗位' }}</strong>
+        <strong>{{ searchErrorTitle }}</strong>
         <p>{{ searchError }}</p>
-        <p v-if="bridgeStatus === 'missing'" class="setup-path">
-          当前浏览器尚未连接助手。下载 ZIP 后可按照 Chrome 或 Edge 图文教程完成安装。
+        <p v-if="bridgeStatus === 'unavailable'" class="setup-path">
+          已安装时请确认扩展已启用并允许访问当前网站；刚安装或更新后可刷新页面。首次使用可查看安装说明。
         </p>
       </div>
-      <button type="button" @click="installDialogOpen = true">查看安装说明</button>
+      <div v-if="bridgeStatus === 'unavailable'" class="connection-actions">
+        <button type="button" @click="checkBridge()">重新检测</button>
+        <button type="button" @click="extensionDialogMode = 'install'; installDialogOpen = true">查看安装说明</button>
+      </div>
     </section>
 
     <p v-if="multiSelectionError" class="multi-selection-error" role="alert">
@@ -558,14 +911,15 @@ onBeforeUnmount(() => {
     </p>
 
     <div
+      v-if="!chatMode || hasSearched"
       class="job-browser"
       :class="{ 'is-searching': searching, 'show-compact-detail': compactView === 'detail' }"
     >
-      <aside class="job-results" aria-label="岗位搜索结果">
+      <aside ref="jobResults" class="job-results" aria-label="岗位搜索结果">
         <header class="result-heading">
           <div>
             <strong>{{ submittedQuery || '真实岗位结果' }}</strong>
-            <span>{{ resultCityName }} · 当前会话返回</span>
+            <span>{{ selectedPlatformName }} · {{ resultCityName }} · 当前会话返回</span>
           </div>
           <span class="result-count">{{ resultSummary }}</span>
         </header>
@@ -586,7 +940,7 @@ onBeforeUnmount(() => {
             v-for="job in jobs"
             :key="job.id"
             class="job-card"
-            :class="{ active: selectedJobId === job.id, selected: isJobInSelection(job), 'has-selection': multiSelectionMode }"
+            :class="{ active: selectedJobId === job.id, selected: isJobInSelection(job), 'has-selection': multiSelectionMode && canSelectJobs }"
             role="button"
             tabindex="0"
             @click="selectJob(job)"
@@ -595,7 +949,7 @@ onBeforeUnmount(() => {
           >
             <span class="card-track-node" aria-hidden="true"></span>
             <button
-              v-if="multiSelectionMode"
+              v-if="multiSelectionMode && canSelectJobs"
               type="button"
               class="job-selection-checkbox"
               :class="{ checked: isJobInSelection(job), loading: isSelectionLoading(job) }"
@@ -612,6 +966,7 @@ onBeforeUnmount(() => {
               <em>{{ job.salary }}</em>
             </span>
             <span class="job-tags">
+              <i class="platform-tag">{{ job.platform === 'liepin' ? '猎聘' : 'BOSS 直聘' }}</i>
               <i>{{ job.experience }}</i>
               <i>{{ job.degree }}</i>
               <i v-if="job.skills[0]">{{ job.skills[0] }}</i>
@@ -665,8 +1020,8 @@ onBeforeUnmount(() => {
           </div>
           <div class="detail-hero-actions">
             <div class="freshness">
-              <span><i aria-hidden="true"></i>详情已更新</span>
-              <small>{{ detailFetchedAt || '本次会话' }}</small>
+              <span><i aria-hidden="true"></i>{{ detailFreshness }}</span>
+              <small v-if="selectedJob.description">{{ detailFetchedAt || '本次会话' }}</small>
             </div>
           </div>
         </header>
@@ -675,18 +1030,18 @@ onBeforeUnmount(() => {
           <span class="company-logo" aria-hidden="true">{{ selectedJob.companyShort.slice(0, 1) }}</span>
           <div>
             <strong>{{ selectedJob.company }}</strong>
-            <p>{{ [selectedJob.industry, selectedJob.stage, selectedJob.scale].filter(Boolean).join(' · ') || '公司信息以 BOSS 当前页面为准' }}</p>
+            <p>{{ [selectedJob.industry, selectedJob.stage, selectedJob.scale].filter(Boolean).join(' · ') || '公司信息以招聘平台页面为准' }}</p>
           </div>
-          <span class="recruiter-online" :class="{ offline: !selectedJob.recruiterOnline }">
+          <span v-if="selectedJob.platform !== 'liepin'" class="recruiter-online" :class="{ offline: !selectedJob.recruiterOnline }">
             <i aria-hidden="true"></i>{{ selectedJob.recruiter || '招聘者信息待补充' }}
           </span>
         </section>
 
         <div class="detail-scroll">
           <section v-if="detailError" class="detail-error">
-            <strong>详情暂时没有刷新成功</strong>
+            <strong>{{ selectedJob.platform === 'liepin' ? '猎聘搜索结果未包含完整 JD' : '详情暂时没有刷新成功' }}</strong>
             <p>{{ detailError }}</p>
-            <button type="button" @click="selectJob(selectedJob)">重新获取详情</button>
+            <button v-if="selectedJob.platform !== 'liepin'" type="button" @click="selectJob(selectedJob)">重新获取详情</button>
           </section>
 
           <section v-if="selectedSkills.length" class="job-summary">
@@ -698,7 +1053,7 @@ onBeforeUnmount(() => {
           <section class="description-section">
             <h4>职位描述</h4>
             <div v-if="selectedJob.description" class="job-description">{{ selectedJob.description }}</div>
-            <p v-else class="description-empty">职位详情暂未提供正文，可再次点击左侧卡片刷新。</p>
+            <p v-else class="description-empty">{{ selectedJob.platform === 'liepin' ? '猎聘官方搜索未附职位正文，请通过原岗位链接查看。' : '职位详情暂未提供正文，可再次点击左侧卡片刷新。' }}</p>
           </section>
 
           <section v-if="selectedJob.address" class="description-section">
@@ -713,8 +1068,8 @@ onBeforeUnmount(() => {
             </div>
           </section>
 
-          <a v-if="selectedJob.sourceUrl" class="source-link" :href="selectedJob.sourceUrl" target="_blank" rel="noreferrer">
-            在 BOSS 直聘查看原岗位
+          <a v-if="selectedJob.sourceUrl" class="source-link" :href="selectedJob.sourceUrl" target="_blank" rel="noopener noreferrer">
+            在{{ selectedJob.platform === 'liepin' ? '猎聘' : 'BOSS 直聘' }}查看原岗位
             <span aria-hidden="true">↗</span>
           </a>
         </div>
@@ -731,7 +1086,8 @@ onBeforeUnmount(() => {
   <BossExtensionInstallDialog
     :open="installDialogOpen"
     :error="bridgeStatus === 'ready' ? '' : searchError"
-    mode="install"
+    :mode="extensionDialogMode"
+    :platform="selectedPlatform"
     @close="installDialogOpen = false"
     @refresh="refreshForExtensionCheck"
   />
@@ -774,6 +1130,28 @@ onBeforeUnmount(() => {
 .connection-badge.is-missing,.connection-badge.is-attention { border-color: color-mix(in srgb, #d99a35 36%, transparent); background: #fff8e8; color: #8c621c; }
 .connection-badge.is-missing i,.connection-badge.is-attention i { background: #d99a35; box-shadow: 0 0 0 3px rgba(217,154,53,.14); }
 
+.platform-switcher { display: grid; gap: 10px; border: 1px solid var(--job-line); border-radius: 13px; background: var(--job-paper); padding: 10px 12px; }
+.platform-tabs { display: flex; flex-wrap: wrap; gap: 7px; }
+.platform-tabs button { min-height: 34px; border: 1px solid transparent; border-radius: 8px; background: transparent; color: var(--job-copy); padding: 7px 12px; cursor: pointer; font: 700 11px/1.2 var(--ui-font-body, sans-serif); }
+.platform-tabs button:hover:not(:disabled) { background: var(--job-blue-soft); color: var(--job-blue-ink); }
+.platform-tabs button.active { border-color: color-mix(in srgb, var(--job-blue) 24%, var(--job-line)); background: var(--job-blue-soft); color: var(--job-blue-ink); }
+.platform-tabs button:disabled { color: var(--job-muted); cursor: not-allowed; opacity: .72; }
+.platform-status-line { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin: 0; color: var(--job-muted); font-size: 10px; }
+.status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--job-teal); }
+.platform-status-line:not(.is-ready) .status-dot { background: #d99a35; }
+.platform-connection-card { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: center; gap: 8px 18px; border-top: 1px solid var(--job-line); padding: 10px 2px 2px; }
+.platform-connection-copy { display: grid; gap: 4px; }
+.platform-connection-copy strong { color: var(--job-ink); font-size: 12px; }
+.platform-connection-copy span,.platform-capability-note { color: var(--job-muted); font-size: 10px; line-height: 1.55; }
+.platform-connection-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 7px; }
+.platform-connection-actions a,.platform-connection-actions button { min-height: 30px; display: inline-flex; align-items: center; border: 1px solid var(--job-line); border-radius: 7px; background: var(--job-paper); color: var(--job-blue-ink); padding: 6px 9px; font: 700 10px/1.2 var(--ui-font-body, sans-serif); text-decoration: none; }
+.platform-connection-actions button { cursor: pointer; }
+.platform-connection-actions button:hover:not(:disabled),.platform-connection-actions a:hover { border-color: var(--job-blue); background: var(--job-blue-soft); }
+.platform-connection-actions button:disabled { cursor: not-allowed; opacity: .6; }
+.platform-connection-actions .subtle-action { color: var(--job-copy); }
+.platform-setup-error { grid-column: 1/-1; margin: 0; color: #a33b46; font-size: 10px; }
+.platform-capability-note { grid-column: 1/-1; margin: 0; }
+
 .search-rail { position: relative; z-index: 10; display: grid; grid-template-columns: auto minmax(320px, 720px) auto auto 1fr; align-items: center; gap: 12px; min-height: 66px; overflow: visible; border: 1px solid var(--job-line); border-radius: 14px; background: var(--job-paper); padding: 12px 16px 14px; }
 .search-rail > label { color: var(--job-copy); font-size: 12px; font-weight: 800; }
 .search-input-shell { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 10px; min-height: 42px; border: 1px solid var(--job-line-strong); border-radius: 10px; background: color-mix(in srgb, var(--job-paper) 84%, var(--job-blue-soft)); padding: 0 11px; transition: border-color .16s ease, box-shadow .16s ease; }
@@ -791,6 +1169,7 @@ onBeforeUnmount(() => {
 
 .job-alert { display: flex; align-items: center; justify-content: space-between; gap: 20px; border: 1px solid #efd8b1; border-radius: 11px; background: #fff9ed; color: #795721; padding: 11px 14px; }
 .job-alert > div { min-width: 0; }
+.job-alert .connection-actions { display:flex; flex-wrap:wrap; gap:8px; }
 .job-alert strong { font-size: 12px; }
 .job-alert p { margin: 3px 0 0; font-size: 11px; line-height: 1.55; }
 .job-alert .setup-path { color: #8b6b35; }
@@ -833,6 +1212,7 @@ onBeforeUnmount(() => {
 .job-card-topline em { flex: none; color: var(--job-red); font-size: 15px; font-style: normal; font-weight: 800; }
 .job-tags { display: flex; flex-wrap: wrap; gap: 6px; }
 .job-tags i { border-radius: 5px; background: color-mix(in srgb, var(--job-canvas) 76%, var(--job-paper)); color: var(--job-copy); padding: 4px 7px; font-size: 10px; font-style: normal; }
+.job-tags i.platform-tag { background: color-mix(in srgb, var(--job-blue) 10%, var(--job-paper)); color: var(--job-blue-ink); font-weight: 750; }
 .company-row { display: grid; grid-template-columns: 23px minmax(0, 1fr) auto; align-items: center; gap: 8px; padding-top: 1px; }
 .company-mark,.company-logo { display: grid; place-items: center; border-radius: 7px; background: linear-gradient(145deg, var(--job-blue-soft), color-mix(in srgb, var(--job-teal) 12%, #fff)); color: var(--job-blue-ink); font-weight: 850; }
 .company-mark { width: 23px; height: 23px; font-size: 10px; }
@@ -1023,4 +1403,7 @@ onBeforeUnmount(() => {
 }
 
 @media (prefers-reduced-motion: reduce) { .button-loader,.search-rail.searching .live-track i,.connection-badge.is-checking i { animation: none; } .job-card,.search-input-shell,.live-track i { transition: none; } }
+.location-attribution{align-self:flex-start;color:var(--job-muted);font-size:10px}.location-prompt{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 10px;border:1px solid var(--job-line);border-radius:9px;background:var(--job-paper);font-size:12px}.location-prompt small{font-size:10px;color:var(--job-muted)}.location-prompt p{margin:0;line-height:1.6}.location-prompt button{flex:none;border:1px solid var(--job-line-strong);border-radius:7px;background:var(--job-blue-soft);color:var(--job-blue-ink);padding:7px 10px;cursor:pointer}
+.job-workspace.is-chat{gap:10px}.is-chat :deep(*){box-sizing:border-box}.is-chat .workspace-intro h2{font-size:15px}.is-chat .workspace-intro p{font-size:11px}.is-chat .job-browser{height:480px;min-height:0;flex:none}.is-chat .search-rail{grid-template-columns:minmax(0,1fr) auto auto;gap:8px;padding:10px}.is-chat .search-rail>label{grid-column:1/-1}.is-chat .search-input-shell{min-width:0;grid-column:auto;grid-row:auto}.is-chat .search-rail>button{grid-column:auto;grid-row:auto;width:auto}.is-chat .search-rail :deep(.city-picker){grid-column:auto;grid-row:auto;min-width:0}.is-chat .workspace-header-actions{min-width:0}
+@container job-search (max-width:760px){.is-chat .search-rail{grid-template-columns:minmax(0,1fr) auto}.is-chat .search-input-shell{grid-column:1/-1}.is-chat .job-browser{height:460px}.is-chat .workspace-intro p{display:none}}
 </style>

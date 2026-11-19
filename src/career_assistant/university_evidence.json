@@ -1,0 +1,322 @@
+{
+  "verified_on": "2026-11-04",
+  "sources": {
+    "985": "http://www.moe.gov.cn/srcsite/A22/s7065/200612/t20061206_128833.html",
+    "211": "http://www.moe.gov.cn/srcsite/A22/s7065/200512/t20051223_82762.html",
+    "qs": "https://www.topuniversities.com/world-university-rankings"
+  },
+  "schools": {
+    "985": [
+      "北京大学",
+      "中国人民大学",
+      "清华大学",
+      "北京航空航天大学",
+      "北京理工大学",
+      "中国农业大学",
+      "北京师范大学",
+      "中央民族大学",
+      "南开大学",
+      "天津大学",
+      "大连理工大学",
+      "东北大学",
+      "吉林大学",
+      "哈尔滨工业大学",
+      "复旦大学",
+      "同济大学",
+      "上海交通大学",
+      "华东师范大学",
+      "南京大学",
+      "东南大学",
+      "浙江大学",
+      "中国科学技术大学",
+      "厦门大学",
+      "山东大学",
+      "中国海洋大学",
+      "武汉大学",
+      "华中科技大学",
+      "湖南大学",
+      "中南大学",
+      "国防科学技术大学",
+      "中山大学",
+      "华南理工大学",
+      "四川大学",
+      "电子科技大学",
+      "重庆大学",
+      "西安交通大学",
+      "西北工业大学",
+      "西北农林科技大学",
+      "兰州大学"
+    ],
+    "211": [
+      "北京大学",
+      "中国人民大学",
+      "清华大学",
+      "北京交通大学",
+      "北京工业大学",
+      "北京航空航天大学",
+      "北京理工大学",
+      "北京科技大学",
+      "北京化工大学",
+      "北京邮电大学",
+      "中国农业大学",
+      "北京林业大学",
+      "北京中医药大学",
+      "北京师范大学",
+      "北京外国语大学",
+      "中国传媒大学",
+      "中央财经大学",
+      "对外经济贸易大学",
+      "北京体育大学",
+      "中央音乐学院",
+      "中央民族大学",
+      "中国政法大学",
+      "华北电力大学",
+      "南开大学",
+      "天津大学",
+      "天津医科大学",
+      "河北工业大学",
+      "太原理工大学",
+      "内蒙古大学",
+      "辽宁大学",
+      "大连理工大学",
+      "东北大学",
+      "大连海事大学",
+      "吉林大学",
+      "延边大学",
+      "东北师范大学",
+      "哈尔滨工业大学",
+      "哈尔滨工程大学",
+      "东北农业大学",
+      "东北林业大学",
+      "复旦大学",
+      "同济大学",
+      "上海交通大学",
+      "华东理工大学",
+      "东华大学",
+      "华东师范大学",
+      "上海外国语大学",
+      "上海财经大学",
+      "上海大学",
+      "第二军医大学",
+      "南京大学",
+      "苏州大学",
+      "东南大学",
+      "南京航空航天大学",
+      "南京理工大学",
+      "中国矿业大学",
+      "河海大学",
+      "江南大学",
+      "南京农业大学",
+      "中国药科大学",
+      "南京师范大学",
+      "浙江大学",
+      "安徽大学",
+      "中国科学技术大学",
+      "合肥工业大学",
+      "厦门大学",
+      "福州大学",
+      "南昌大学",
+      "山东大学",
+      "中国海洋大学",
+      "中国石油大学",
+      "郑州大学",
+      "武汉大学",
+      "华中科技大学",
+      "中国地质大学",
+      "武汉理工大学",
+      "华中农业大学",
+      "华中师范大学",
+      "中南财经政法大学",
+      "湖南大学",
+      "中南大学",
+      "湖南师范大学",
+      "国防科学技术大学",
+      "中山大学",
+      "暨南大学",
+      "华南理工大学",
+      "华南师范大学",
+      "广西大学",
+      "海南大学",
+      "四川大学",
+      "西南交通大学",
+      "电子科技大学",
+      "四川农业大学",
+      "西南财经大学",
+      "重庆大学",
+      "西南大学",
+      "贵州大学",
+      "云南大学",
+      "西藏大学",
+      "西北大学",
+      "西安交通大学",
+      "西北工业大学",
+      "西安电子科技大学",
+      "长安大学",
+      "西北农林科技大学",
+      "陕西师范大学",
+      "第四军医大学",
+      "兰州大学",
+      "青海大学",
+      "宁夏大学",
+      "新疆大学",
+      "石河子大学"
+    ]
+  },
+  "qs": {
+    "edition": 2027,
+    "ranking_type": "world-university-rankings",
+    "complete_top50": false,
+    "entries": [
+      {
+        "name": "Massachusetts Institute of Technology (MIT)",
+        "rank": 1,
+        "url": "https://www.topuniversities.com/universities/massachusetts-institute-technology-mit"
+      },
+      {
+        "name": "Imperial College London",
+        "rank": 2,
+        "url": "https://www.topuniversities.com/universities/imperial-college-london"
+      },
+      {
+        "name": "Stanford University",
+        "rank": 2,
+        "url": "https://www.topuniversities.com/universities/stanford-university"
+      },
+      {
+        "name": "University of Oxford",
+        "rank": 4,
+        "url": "https://www.topuniversities.com/universities/university-oxford"
+      },
+      {
+        "name": "Harvard University",
+        "rank": 5,
+        "url": "https://www.topuniversities.com/universities/harvard-university"
+      },
+      {
+        "name": "University of Cambridge",
+        "rank": 6,
+        "url": "https://www.topuniversities.com/universities/university-cambridge"
+      },
+      {
+        "name": "California Institute of Technology (Caltech)",
+        "rank": 7,
+        "url": "https://www.topuniversities.com/universities/california-institute-technology-caltech"
+      },
+      {
+        "name": "ETH Zurich",
+        "rank": 8,
+        "url": "https://www.topuniversities.com/universities/eth-zurich"
+      },
+      {
+        "name": "UCL",
+        "rank": 8,
+        "url": "https://www.topuniversities.com/universities/ucl"
+      },
+      {
+        "name": "National University of Singapore (NUS)",
+        "rank": 10,
+        "url": "https://www.topuniversities.com/universities/national-university-singapore-nus"
+      },
+      {
+        "name": "The University of Hong Kong",
+        "rank": 11,
+        "url": "https://www.topuniversities.com/universities/university-hong-kong"
+      },
+      {
+        "name": "Nanyang Technological University, Singapore (NTU Singapore)",
+        "rank": 12,
+        "url": "https://www.topuniversities.com/universities/nanyang-technological-university-singapore-ntu-singapore"
+      },
+      {
+        "name": "Peking University",
+        "rank": 13,
+        "url": "https://www.topuniversities.com/universities/peking-university"
+      },
+      {
+        "name": "Tsinghua University",
+        "rank": 14,
+        "url": "https://www.topuniversities.com/universities/tsinghua-university"
+      },
+      {
+        "name": "University of Pennsylvania",
+        "rank": 15,
+        "url": "https://www.topuniversities.com/universities/university-pennsylvania"
+      },
+      {
+        "name": "Cornell University",
+        "rank": 16,
+        "url": "https://www.topuniversities.com/universities/cornell-university"
+      },
+      {
+        "name": "Yale University",
+        "rank": 16,
+        "url": "https://www.topuniversities.com/universities/yale-university"
+      },
+      {
+        "name": "The Chinese University of Hong Kong (CUHK)",
+        "rank": 18,
+        "url": "https://www.topuniversities.com/universities/chinese-university-hong-kong-cuhk"
+      },
+      {
+        "name": "The University of New South Wales (UNSW Sydney)",
+        "rank": 19,
+        "url": "https://www.topuniversities.com/universities/university-new-south-wales-unsw-sydney"
+      },
+      {
+        "name": "Johns Hopkins University",
+        "rank": 20,
+        "url": "https://www.topuniversities.com/universities/johns-hopkins-university"
+      },
+      {
+        "name": "University of California, Berkeley (UCB)",
+        "rank": 20,
+        "url": "https://www.topuniversities.com/universities/university-california-berkeley-ucb"
+      },
+      {
+        "name": "EPFL – École polytechnique fédérale de Lausanne",
+        "rank": 22,
+        "url": "https://www.topuniversities.com/universities/epfl-ecole-polytechnique-federale-de-lausanne"
+      },
+      {
+        "name": "The University of Melbourne",
+        "rank": 22,
+        "url": "https://www.topuniversities.com/universities/university-melbourne"
+      },
+      {
+        "name": "University of Chicago",
+        "rank": 24,
+        "url": "https://www.topuniversities.com/universities/university-chicago"
+      },
+      {
+        "name": "Technical University of Munich",
+        "rank": 25,
+        "url": "https://www.topuniversities.com/universities/technical-university-munich"
+      },
+      {
+        "name": "Fudan University",
+        "rank": 26,
+        "url": "https://www.topuniversities.com/universities/fudan-university"
+      },
+      {
+        "name": "Princeton University",
+        "rank": 27,
+        "url": "https://www.topuniversities.com/universities/princeton-university"
+      },
+      {
+        "name": "The University of Sydney",
+        "rank": 28,
+        "url": "https://www.topuniversities.com/universities/university-sydney"
+      },
+      {
+        "name": "Australian National University (ANU)",
+        "rank": 29,
+        "url": "https://www.topuniversities.com/universities/australian-national-university-anu"
+      },
+      {
+        "name": "McGill University",
+        "rank": 30,
+        "url": "https://www.topuniversities.com/universities/mcgill-university"
+      }
+    ]
+  }
+}

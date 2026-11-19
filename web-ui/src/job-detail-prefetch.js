@@ -63,7 +63,8 @@ export async function prefetchJobDetails(jobs, loader, {
   concurrency = 2,
   onResolved = () => {},
   onRejected = () => {},
-  shouldStop = () => false
+  shouldStop = () => false,
+  shouldContinue = () => true
 } = {}) {
   const queue = Array.isArray(jobs) ? jobs : []
   const workerCount = Math.max(1, Math.min(Number(concurrency) || 1, queue.length || 1))
@@ -71,17 +72,19 @@ export async function prefetchJobDetails(jobs, loader, {
   let stopped = false
 
   async function worker() {
-    while (!stopped) {
+    while (!stopped && shouldContinue()) {
       const index = cursor
       cursor += 1
       if (index >= queue.length) return
       const job = queue[index]
       try {
         const detail = await loader.load(job)
+        if (!shouldContinue()) return
         await onResolved(detail, job)
       } catch (error) {
-        await onRejected(error, job)
+        if (!shouldContinue()) return
         if (shouldStop(error, job)) stopped = true
+        await onRejected(error, job)
       }
     }
   }

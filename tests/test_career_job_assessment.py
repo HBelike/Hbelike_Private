@@ -189,11 +189,14 @@ class _ContextRepository:
     def __init__(self, candidate, target) -> None:
         self.candidate = candidate
         self.target = target
+        self.calls = []
 
-    def get_candidate_profile(self, actor_id, candidate_profile_id):
+    def get_candidate_profile_by_id(self, organization_id, candidate_profile_id):
+        self.calls.append(("candidate", organization_id, candidate_profile_id))
         return self.candidate
 
-    def get_target_role(self, actor_id, target_role_profile_id):
+    def get_target_role_by_id(self, organization_id, target_role_profile_id):
+        self.calls.append(("target", organization_id, target_role_profile_id))
         return self.target
 
 
@@ -280,6 +283,39 @@ class CareerJobAssessmentServiceTests(unittest.TestCase):
         service = self._profile_service("judge", profiles)
 
         self.assertIsNone(service._configured_profile(uuid4()))
+
+    def test_admin_conversation_owns_assessment_for_cross_user_resume(self) -> None:
+        admin_id = uuid4()
+        candidate_owner_id = uuid4()
+        organization_id = uuid4()
+        candidate = SimpleNamespace(
+            id=uuid4(),
+            actor_id=candidate_owner_id,
+            organization_id=organization_id,
+        )
+        target = SimpleNamespace(id=uuid4())
+        context = SimpleNamespace(candidate=candidate, target_role=target)
+
+        class Repository:
+            def create_or_get_queued(self, **values):
+                self.values = values
+                return SimpleNamespace(), True
+
+        repository = Repository()
+        service = CareerJobAssessmentService(
+            repository=repository,
+            context_repository=object(),
+            model_repository=object(),
+            model_gateway=object(),
+            model_client=object(),
+            settings=JobAssessmentSettings("judge", "v1", 3),
+        )
+        service._configured_profile = lambda _organization_id: None
+
+        service.enqueue_context(context, actor_id=admin_id)
+
+        self.assertEqual(repository.values["actor_id"], admin_id)
+        self.assertNotEqual(repository.values["actor_id"], candidate_owner_id)
 
     def test_json_completion_request_contains_json_object_mode(self) -> None:
         payload = OpenAICompatibleChatClient._build_request_payload(
@@ -378,6 +414,21 @@ class CareerJobAssessmentServiceTests(unittest.TestCase):
         self.assertEqual(
             [dimension["label"] for dimension in result.result["dimensions"][:2]],
             ["才艺与表达", "互动能力"],
+        )
+        self.assertEqual(
+            service._context_repository.calls,
+            [
+                (
+                    "candidate",
+                    service.test_repository.record.organization_id,
+                    candidate.id,
+                ),
+                (
+                    "target",
+                    service.test_repository.record.organization_id,
+                    target.id,
+                ),
+            ],
         )
 
     def test_three_invalid_judge_outputs_then_use_legacy_fallback(self) -> None:

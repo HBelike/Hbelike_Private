@@ -8,7 +8,6 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from src.career_assistant import greetings as greeting_module
 from src.career_assistant.context_profiles import CandidateProfileRecord
 from src.career_assistant.contracts import ModelCapability, ModelSelectionMode
 from src.career_assistant.greetings import (
@@ -133,6 +132,14 @@ class FakeContextRepository:
         self.calls.append((actor_id, profile_id))
         return self.record
 
+    def get_candidate_profile_by_id(
+        self,
+        organization_id: UUID,
+        profile_id: UUID,
+    ) -> CandidateProfileRecord | None:
+        self.calls.append((organization_id, profile_id))
+        return self.record
+
 
 class FakeGateway:
     def __init__(self, items: list[ModelProfileAvailability]) -> None:
@@ -203,58 +210,6 @@ def build_service(
     return service, repository, gateway, client
 
 
-def test_prompt_prioritizes_supported_candidate_advantages_without_becoming_a_template() -> None:
-    prompt = greeting_module._SYSTEM_PROMPT
-
-    assert "候选人优势扫描" in prompt
-    assert all(category in prompt for category in ("学历", "工作经验", "奖项", "个人项目"))
-    assert "某类没有简历证据时必须彻底省略" in prompt
-    assert "不得只用同一段工作或同一个项目的多个技术细节占满全文" in prompt
-    assert "仅示范选材思路和信息密度，不是固定模板" in prompt
-    assert "示例中的学校层次、年限、公司、项目、网址、技术和成果" in prompt
-    assert "禁止迁移到真实输出" in prompt
-
-
-def test_prompt_requires_academic_distinctions_and_verifiable_result_links() -> None:
-    prompt = greeting_module._SYSTEM_PROMPT
-
-    assert all(signal in prompt for signal in ("985", "211", "双一流", "QS", "博士", "硕士"))
-    assert all(signal in prompt for signal in ("论文", "专利", "个人网站", "GitHub", "PR"))
-    assert "至少原样附上一个" in prompt
-    assert "简历没有明确写出" in prompt
-
-
-def test_user_prompt_requires_a_full_resume_scan_before_jd_matching() -> None:
-    cv_evidence = CareerGreetingService._number_evidence(candidate().resume_outline, "CV")
-    jd_evidence = CareerGreetingService._number_evidence(job().description, "JD")
-
-    prompt = CareerGreetingService._user_prompt(job(), cv_evidence, jd_evidence, "")
-
-    assert "先完整阅读全部 CV 证据" in prompt
-    assert "不要只选择与 JD 最接近的单一工作或项目技术片段" in prompt
-
-
-def test_user_prompt_lists_required_advantage_categories_and_result_links() -> None:
-    candidate_record = replace(
-        candidate(),
-        resume_outline=(
-            "教育经历\n某大学 QS 前 200 计算机博士\n"
-            "论文成果\n第一作者发表 SCI 论文。\n"
-            "个人成果\nGitHub PR：https://github.com/pulls?q=is%3Apr+author%3Atest"
-        ),
-    )
-    cv_evidence = CareerGreetingService._number_evidence(candidate_record.resume_outline, "CV")
-    jd_evidence = CareerGreetingService._number_evidence(job().description, "JD")
-
-    prompt = CareerGreetingService._user_prompt(job(), cv_evidence, jd_evidence, "")
-
-    assert "<required_resume_advantages>" in prompt
-    assert "学校层次或排名：CV-002" in prompt
-    assert "博士或硕士学历：CV-002" in prompt
-    assert "论文或专利成果：CV-003、CV-004" in prompt
-    assert "[CV-006] https://github.com/pulls?q=is%3Apr+author%3Atest" in prompt
-
-
 def test_generate_uses_actor_resume_and_exact_deepseek_profile() -> None:
     flash = profile("deepseek", "deepseek-v4-flash", priority=1)[1]
     lower_priority_pro = profile("deepseek", "deepseek-v4-pro", priority=20)[1]
@@ -299,6 +254,26 @@ def test_generate_rejects_missing_candidate_for_actor() -> None:
         service.generate(ORGANIZATION_ID, ACTOR_ID, CANDIDATE_ID, job())
 
     assert client.calls == []
+
+
+def test_admin_can_generate_with_another_users_candidate_in_same_organization() -> None:
+    other_users_candidate = replace(candidate(), actor_id=uuid4())
+    service, repository, _, client = build_service(
+        [output()],
+        candidate_record=other_users_candidate,
+    )
+
+    result = service.generate(
+        ORGANIZATION_ID,
+        ACTOR_ID,
+        CANDIDATE_ID,
+        job(),
+        can_manage_all=True,
+    )
+
+    assert result.message.startswith("彭女士您好")
+    assert repository.calls == [(ORGANIZATION_ID, CANDIDATE_ID)]
+    assert len(client.calls) == 1
 
 
 def test_generate_never_falls_back_from_deepseek_v4_pro() -> None:
@@ -350,7 +325,7 @@ def test_generate_rejects_second_invalid_response() -> None:
     assert len(client.calls) == 2
 
 
-def test_generate_retries_when_supported_academic_advantage_is_omitted() -> None:
+def test_generate_can_focus_on_relevant_work_without_including_every_advantage() -> None:
     academic_candidate = replace(
         candidate(),
         resume_outline=(
@@ -367,28 +342,19 @@ def test_generate_retries_when_supported_academic_advantage_is_omitted() -> None
         ),
         resume_ids=["CV-006"],
     )
-    supported = output(
-        message=(
-            "彭女士您好，我是某大学 QS前200 计算机博士，以第一作者发表过 SCI论文，"
-            "也参与过 Java 服务开发与交付。看到岗位关注微服务接口与版本交付，"
-            "与我的经历有交集，想进一步沟通。"
-        ),
-        resume_ids=["CV-002", "CV-004", "CV-006"],
-    )
     service, _, _, client = build_service(
-        [omitted, supported],
+        [omitted],
         candidate_record=academic_candidate,
     )
 
     result = service.generate(ORGANIZATION_ID, ACTOR_ID, CANDIDATE_ID, job())
 
-    assert "QS前200" in result.message
-    assert "博士" in result.message
-    assert len(client.calls) == 2
-    assert "高价值学历或学术成果" in client.calls[1]["messages"][-1].content
+    assert result.message == json.loads(omitted)["message"]
+    assert [item.id for item in result.resume_evidence] == ["CV-006"]
+    assert len(client.calls) == 1
 
 
-def test_generate_retries_when_supported_portfolio_link_is_omitted() -> None:
+def test_generate_can_omit_portfolio_link_to_keep_the_message_focused() -> None:
     linked_candidate = replace(
         candidate(),
         resume_outline=(
@@ -405,24 +371,183 @@ def test_generate_retries_when_supported_portfolio_link_is_omitted() -> None:
         ),
         resume_ids=["CV-002", "CV-006"],
     )
-    supported = output(
-        message=(
-            "彭女士您好，我是东华大学 211 计算机硕士，参与过 Java 微服务开发与投产；"
-            "个人成果可查看 https://example.dev。岗位方向与我的经历有交集，"
-            "方便的话想进一步沟通。"
-        ),
-        resume_ids=["CV-002", "CV-004", "CV-006"],
-    )
     service, _, _, client = build_service(
-        [omitted, supported],
+        [omitted],
         candidate_record=linked_candidate,
     )
 
     result = service.generate(ORGANIZATION_ID, ACTOR_ID, CANDIDATE_ID, job())
 
-    assert "https://example.dev" in result.message
+    assert result.message == json.loads(omitted)["message"]
+    assert "https://example.dev" not in result.message
+    assert len(client.calls) == 1
+
+
+@pytest.mark.parametrize("claim", ["我使用 Python 开发服务", "我有 5 年 Java 开发经验", "我负责将性能提升 40%"])
+def test_jd_cannot_support_explicit_candidate_claims(claim: str) -> None:
+    jd = replace(
+        job(),
+        description=(
+            "岗位职责\n使用 Java 和 Python 开发服务，将性能提升 40%。\n"
+            "任职要求\n有 5 年开发经验。"
+        ),
+    )
+    unsupported = output(message=(
+        f"彭女士您好，想应聘您发布的 Java 微服务工程师。{claim}，"
+        "也参与过银行业务系统的接口实现和故障排查，希望继续从事相关服务开发，方便进一步沟通吗？"
+    ))
+    service, _, _, client = build_service([unsupported, output()])
+
+    result = service.generate(ORGANIZATION_ID, ACTOR_ID, CANDIDATE_ID, jd)
+
+    assert result.message == json.loads(output())["message"]
     assert len(client.calls) == 2
-    assert "个人成果链接" in client.calls[1]["messages"][-1].content
+    assert "JD 不能证明本人经历" in client.calls[1]["messages"][-1].content
+
+
+def test_job_title_and_code_need_not_be_candidate_skills() -> None:
+    jd = replace(job(), title="Python 平台开发工程师（编号 A123）")
+    message = (
+        "彭女士您好，想应聘 Python 平台开发工程师（编号 A123）。"
+        "我参与过银行业务系统的 Java 微服务开发与投产，负责接口实现和故障排查，"
+        "想了解团队是否考虑有相关服务开发经验的候选人？"
+    )
+    service, _, _, client = build_service([output(message=message, resume_ids=["CV-004"])])
+
+    result = service.generate(ORGANIZATION_ID, ACTOR_ID, CANDIDATE_ID, jd)
+
+    assert result.message == message
+    assert len(client.calls) == 1
+
+
+def test_job_requirement_can_be_mentioned_without_claiming_personal_experience() -> None:
+    jd = replace(job(), description="岗位职责\n岗位使用 Python 开发服务。")
+    message = (
+        "彭女士您好，看到岗位使用 Python 开发服务。"
+        "我参与过银行业务系统的 Java 微服务开发与投产，负责接口实现和故障排查，"
+        "想了解团队是否考虑有相关服务开发经验的候选人？"
+    )
+    service, _, _, client = build_service(
+        [output(message=message, resume_ids=["CV-004"], jd_ids=["JD-002"])],
+    )
+
+    result = service.generate(ORGANIZATION_ID, ACTOR_ID, CANDIDATE_ID, jd)
+
+    assert result.message == message
+    assert len(client.calls) == 1
+
+
+def test_used_academic_claim_requires_its_own_cv_support_even_if_jd_mentions_it() -> None:
+    jd = replace(job(), description="岗位职责\n负责 Java 微服务。\n任职要求\n硕士及以上学历。")
+    unsupported = output(message=(
+        "彭女士您好，我是计算机硕士，参与过银行业务系统的 Java 微服务开发与投产，"
+        "负责接口实现和故障排查。想应聘您发布的微服务工程师，方便进一步沟通吗？"
+    ))
+    service, _, _, client = build_service([unsupported, output()])
+
+    result = service.generate(ORGANIZATION_ID, ACTOR_ID, CANDIDATE_ID, jd)
+
+    assert result.message == json.loads(output())["message"]
+    assert len(client.calls) == 2
+
+
+@pytest.mark.parametrize(
+    "job_reference",
+    ["看到岗位要求硕士", "想应聘博士研究员岗位"],
+)
+def test_asking_about_academic_job_requirements_is_not_a_candidate_degree_claim(job_reference: str) -> None:
+    jd = replace(
+        job(),
+        title="博士研究员岗位",
+        description="岗位职责\n负责 Java 服务开发。\n任职要求\n硕士及以上学历。",
+    )
+    message = (
+        "彭女士您好，我是计算机本科，参与过 Java 微服务开发与投产，负责接口实现和故障排查。"
+        f"{job_reference}，想了解是否考虑有相关服务开发经验的本科候选人？"
+    )
+    service, _, _, client = build_service(
+        [output(message=message, resume_ids=["CV-002", "CV-004"])],
+    )
+
+    result = service.generate(ORGANIZATION_ID, ACTOR_ID, CANDIDATE_ID, jd)
+
+    assert result.message == message
+    assert len(client.calls) == 1
+
+
+def test_unreferenced_resume_fact_cannot_be_used_in_message() -> None:
+    candidate_record = replace(
+        candidate(),
+        resume_outline=candidate().resume_outline + "\n个人项目使用 ImaginarySDK。",
+    )
+    unsupported = output(message=(
+        "彭女士您好，我参与过 Java 微服务开发与投产，也使用过 ImaginarySDK 完成个人项目。"
+        "想应聘您发布的微服务工程师，岗位关注服务交付与故障排查，方便进一步沟通吗？"
+    ))
+    service, _, _, client = build_service([unsupported, output()], candidate_record=candidate_record)
+
+    result = service.generate(ORGANIZATION_ID, ACTOR_ID, CANDIDATE_ID, job())
+
+    assert result.message == json.loads(output())["message"]
+    assert len(client.calls) == 2
+
+
+def test_each_used_portfolio_link_requires_a_cited_cv_source() -> None:
+    linked_candidate = replace(
+        candidate(),
+        resume_outline=candidate().resume_outline + (
+            "\n作品集：https://example.dev/one\n个人网站：https://example.dev/two"
+        ),
+    )
+    unsupported = output(
+        message=(
+            "彭女士您好，我参与过 Java 微服务开发与投产，负责接口实现和故障排查。"
+            "作品集 https://example.dev/one；个人网站 https://example.dev/two，方便进一步沟通吗？"
+        ),
+        resume_ids=["CV-004", "CV-007"],
+    )
+    supported = output(
+        message=json.loads(unsupported)["message"],
+        resume_ids=["CV-004", "CV-007", "CV-008"],
+    )
+    service, _, _, client = build_service([unsupported, supported], candidate_record=linked_candidate)
+
+    result = service.generate(ORGANIZATION_ID, ACTOR_ID, CANDIDATE_ID, job())
+
+    assert result.message == json.loads(supported)["message"]
+    assert len(client.calls) == 2
+
+
+def test_portfolio_url_query_is_not_a_second_question() -> None:
+    url = "https://github.com/example/project?tab=readme"
+    linked_candidate = replace(candidate(), resume_outline=candidate().resume_outline + f"\n项目地址：{url}")
+    message = (
+        "彭女士您好，我参与过 Java 微服务开发与投产，负责接口实现和故障排查。"
+        f"项目成果可查看 {url}，方便进一步沟通吗？"
+    )
+    service, _, _, client = build_service(
+        [output(message=message, resume_ids=["CV-004", "CV-007"])],
+        candidate_record=linked_candidate,
+    )
+
+    result = service.generate(ORGANIZATION_ID, ACTOR_ID, CANDIDATE_ID, job())
+
+    assert result.message == message
+    assert len(client.calls) == 1
+
+
+def test_multiple_questions_are_corrected_once() -> None:
+    unsupported = output(message=(
+        "彭女士您好，我参与过银行业务系统的 Java 微服务开发与投产，负责接口实现和故障排查。"
+        "想应聘您发布的微服务工程师，岗位还在招聘吗？薪资范围是多少？"
+    ))
+    service, _, _, client = build_service([unsupported, output()])
+
+    result = service.generate(ORGANIZATION_ID, ACTOR_ID, CANDIDATE_ID, job())
+
+    assert result.message == json.loads(output())["message"]
+    assert len(client.calls) == 2
+    assert "最多保留一个问题" in client.calls[1]["messages"][-1].content
 
 
 def test_literal_validation_accepts_supported_combined_tech_stacks() -> None:
@@ -469,3 +594,107 @@ def test_regeneration_includes_previous_message_and_rejects_same_text() -> None:
     assert len(client.calls) == 2
     first_prompt = client.calls[0]["messages"][-1].content
     assert previous in first_prompt
+
+
+def sized_message(length: int, *, suffix: str = "") -> str:
+    """复用受证据支持的正文，验证长度变化不会造成程序拒绝或截断。"""
+    base = json.loads(output())["message"]
+    assert len(base) + len(suffix) <= length
+    return base + "好" * (length - len(base) - len(suffix)) + suffix
+
+
+@pytest.mark.parametrize("length", [180, 200, 201, 240, 2_501])
+@pytest.mark.parametrize("suffix", ["", "😀"])
+def test_generate_accepts_valid_message_without_a_length_gate(length: int, suffix: str) -> None:
+    message = sized_message(length, suffix=suffix)
+    service, _, _, client = build_service([output(message=message)])
+
+    result = service.generate(ORGANIZATION_ID, ACTOR_ID, CANDIDATE_ID, job())
+
+    assert result.message == message
+    assert len(result.message) == length
+    assert len(client.calls) == 1
+
+
+def test_other_validation_can_be_corrected_without_rejecting_a_long_message() -> None:
+    message = sized_message(240)
+    service, _, _, client = build_service([
+        output(message=message, resume_ids=["CV-999"]),
+        output(message=message),
+    ])
+
+    result = service.generate(ORGANIZATION_ID, ACTOR_ID, CANDIDATE_ID, job())
+
+    assert result.message == message
+    assert len(client.calls) == 2
+    retry_messages = client.calls[1]["messages"]
+    assert json.loads(retry_messages[-2].content)["message"] == message
+    correction = retry_messages[-1].content
+    assert "CV-999" in correction
+    assert "200 字左右" in correction
+    assert "不得截断正文或 URL" in correction
+
+
+def test_internal_spaces_in_a_long_message_are_not_collapsed_or_retried() -> None:
+    base = json.loads(output())["message"]
+    message = base + " " * (240 - len(base) - 1) + "好"
+    assert len(message) == 240
+    service, _, _, client = build_service([output(message=message)])
+
+    result = service.generate(ORGANIZATION_ID, ACTOR_ID, CANDIDATE_ID, job())
+
+    assert result.message == message
+    assert len(client.calls) == 1
+
+
+def test_internal_spaces_are_preserved_in_accepted_text() -> None:
+    base = json.loads(output())["message"]
+    message = base + " " * (200 - len(base) - 1) + "好"
+    service, _, _, client = build_service([output(message=message)])
+
+    result = service.generate(ORGANIZATION_ID, ACTOR_ID, CANDIDATE_ID, job())
+
+    assert result.message == message
+    assert len(result.message) == 200
+    assert len(client.calls) == 1
+
+
+def test_initial_and_regeneration_prompts_use_a_soft_length_target() -> None:
+    previous = "旧稿参考" * 75
+    service, _, _, client = build_service([output(message=sized_message(200))])
+
+    service.generate(ORGANIZATION_ID, ACTOR_ID, CANDIDATE_ID, job(), previous_message=previous)
+
+    system_prompt = client.calls[0]["messages"][0].content
+    user_prompt = client.calls[0]["messages"][-1].content
+    assert "200 字左右" in system_prompt
+    assert "200 字左右" in user_prompt
+    assert previous in user_prompt
+    assert "不得截断正文或 URL" in system_prompt
+    assert "不得截断正文或 URL" in user_prompt
+    assert "硬上限" not in system_prompt + user_prompt
+    assert "60 至 200" not in system_prompt + user_prompt
+
+
+def test_truthful_short_message_is_not_padded_or_retried() -> None:
+    short = "您好，我参与过 Java 微服务开发，负责接口实现和故障排查，想进一步沟通。"
+    assert len(short) < 60
+    service, _, _, client = build_service([
+        output(message=short, resume_ids=["CV-004"], jd_ids=["JD-002"]),
+    ])
+
+    result = service.generate(ORGANIZATION_ID, ACTOR_ID, CANDIDATE_ID, job())
+
+    assert result.message == short
+    assert len(client.calls) == 1
+
+
+def test_empty_model_message_still_fails_after_one_correction() -> None:
+    blank = json.loads(output())
+    blank["message"] = "   "
+    service, _, _, client = build_service([json.dumps(blank), json.dumps(blank)])
+
+    with pytest.raises(GreetingGenerationError, match="没有生成招呼语"):
+        service.generate(ORGANIZATION_ID, ACTOR_ID, CANDIDATE_ID, job())
+
+    assert len(client.calls) == 2

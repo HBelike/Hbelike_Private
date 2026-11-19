@@ -1,6 +1,20 @@
-# 线上笔试助手开源归属说明
+# 项目开源归属说明
 
-本模块没有直接安装候选项目的整套应用。页面提取、状态机、API、执行适配和归档均在本项目中重新实现；以下项目用于选择器、权限和交互思路参考。
+## 2026-11-09：BOSS 入站消息读取
+
+参考 [can4hou6joeng4/boss-agent-cli](https://github.com/can4hou6joeng4/boss-agent-cli/tree/b6e5a0aca58bb67116ed0cfc32febed253802092)（MIT，固定提交 `b6e5a0aca58bb67116ed0cfc32febed253802092`）的求职端联系人字段和列表路由，以及 [jackwener/OpenCLI](https://github.com/jackwener/OpenCLI/tree/97dc0cd5214b9602bcda78d7422f231ee8a803e9)（Apache-2.0，固定提交 `97dc0cd5214b9602bcda78d7422f231ee8a803e9`）的求职端历史消息读取参数。
+
+本项目自行实现 MV3 页面读取、归一化、平台持久化与收件页，不引入两者整套程序或招聘者端发送代码。具体采用字段、调用链和验证边界见 [BOSS 收件模块](modules/boss-inbox.md)。
+
+## 2026-11-04：简历构建Skill
+
+安装来源：[resume-builder](https://skills.sh/reactive-resume/reactive-resume/resume-builder)，仓库
+`reactive-resume/reactive-resume`，固定提交`19a4133e326b5f6b6ad09862b6b0f7b6002e1924`，目录
+`plugins/reactive-resume/skills/resume-builder`。上游MIT许可证（Copyright 2026 Amruth Pillai）
+保留在项目副本及部署种子的`resume-builder/LICENSE`；保留上游schema参考，追加中文运行边界。
+本次只安装提示词和只读资料，没有集成Reactive Resume整套应用、MCP或在线导入验证。
+
+线上笔试模块没有直接安装候选项目的整套应用。页面提取、状态机、API、执行适配和归档均在本项目中重新实现；以下项目用于选择器、权限和交互思路参考。
 
 | 项目 | 审查版本 | 许可证 | 参考或改造范围 |
 |---|---|---|---|

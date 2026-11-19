@@ -19,7 +19,7 @@ test('响应式壳层统一使用 1024px 导航边界并保留紧凑桌面档', 
   assert.match(appVue, /matchMedia\('\(max-width: 1023\.98px\)'\)/)
   assert.match(
     stylesCss,
-    /@media \(min-width:\s*1024px\) and \(max-width:\s*1279px\)[\s\S]*\.shell\s*\{[^}]*--app-sidebar-width:\s*216px/
+    /@media \(min-width:\s*1024px\) and \(max-width:\s*1279px\)[\s\S]*\.shell\s*\{[^}]*--app-sidebar-width:\s*128px/
   )
   assert.match(
     stylesCss,
@@ -29,7 +29,7 @@ test('响应式壳层统一使用 1024px 导航边界并保留紧凑桌面档', 
 
 test('应用壳层使用动态视口高度并提供传统视口回退', () => {
   const shellRule = stylesCss.match(/\.shell\s*\{([^}]*)\}/)?.[1]
-  const mainRule = stylesCss.match(/\.main\s*\{([^}]*)\}/)?.[1]
+  const mainRule = stylesCss.match(/\n\.main\s*\{([^}]*)\}/)?.[1]
 
   assert.ok(shellRule && mainRule, '应存在 shell 与 main 基础样式')
   assert.match(shellRule, /height:\s*100vh/)

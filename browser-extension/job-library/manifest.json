@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Find Job 求职浏览器助手",
-  "version": "0.4.0",
-  "description": "读取用户主动选择的职位、公开面经或当前笔试题面；线上笔试功能仅分析，不自动填写或提交。",
+  "version": "0.7.1",
+  "description": "读取 BOSS 职位与会话，并通过猎聘官方授权搜索岗位；前程无忧接入待授权。",
   "permissions": [
     "tabs",
     "scripting",
@@ -11,6 +11,7 @@
   ],
   "host_permissions": [
     "https://www.zhipin.com/*",
+    "https://open-agent.liepin.com/*",
     "https://www.xiaohongshu.com/*",
     "http://127.0.0.1/*",
     "http://localhost/*",
@@ -20,6 +21,10 @@
   "background": {
     "service_worker": "service-worker.js",
     "type": "module"
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
   },
   "content_scripts": [
     {

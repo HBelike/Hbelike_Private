@@ -1,3 +1,4 @@
+import { isMatchV2, matchCards } from './career-match-report.js'
 const LEGACY_KEYS = ['skill_coverage', 'experience_coverage', 'project_relevance', 'critical_gap']
 const SECTION_HEADING_ALIASES = new Set([
   '岗位职责', '职位职责', '工作职责', '工作内容', '核心职责', '主要职责', '你将负责',
@@ -14,6 +15,7 @@ export function isAssessmentPending(assessment) {
 
 export function buildAssessmentCards(assessment) {
   if (!assessment || !['ready', 'fallback_ready'].includes(assessment.status)) return []
+  if (isMatchV2(assessment)) return matchCards(assessment)
   if (Array.isArray(assessment.dimensions)) {
     return assessment.dimensions
       .filter((item) => item?.status === 'ready' && item.score !== null)
@@ -37,6 +39,7 @@ export function buildAssessmentCards(assessment) {
 
 export function itemsForDimension(assessment, dimensionId) {
   if (!assessment) return []
+  if (isMatchV2(assessment)) return assessment.items.filter(item => item.tier === dimensionId || item.dimension_id === dimensionId)
   if (Array.isArray(assessment.items)) {
     if (dimensionId === 'critical_gap') {
       return assessment.items.filter((item) => item.requirement_type === 'required' && item.factor !== 1)
@@ -60,7 +63,7 @@ export function sectionItemNumber(items, index) {
 }
 
 export function assessmentCanvasSections(assessment) {
-  if (assessment?.algorithm_version !== 'llm-judge-v1' || !Array.isArray(assessment.job_sections)) return null
+  if (!['llm-judge-v1', 'jd-evidence-rules-v2'].includes(assessment?.algorithm_version) || !Array.isArray(assessment.job_sections)) return null
   const sections = assessment.job_sections
   const items = (...categories) => sections
     .filter((section) => categories.includes(section.category))
@@ -74,7 +77,7 @@ export function assessmentCanvasSections(assessment) {
   ].filter((section) => section.items.length)
   return {
     responsibilities: items('responsibility'),
-    requirements: [
+    requirements: isMatchV2(assessment) ? assessment.items.map(item => ({ text: item.title, type: { hard: '硬性', core: '核心', bonus: '加分' }[item.tier] })) : [
       ...items('required_qualification', 'experience_condition', 'education_condition', 'credential_condition').map((text) => ({ text, type: '必须' })),
       ...items('preferred_qualification').map((text) => ({ text, type: '加分' }))
     ],

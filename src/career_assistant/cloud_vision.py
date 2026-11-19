@@ -49,6 +49,11 @@ class CloudVisionImageParser(Protocol):
     def analyze_image(self, media_type: str, image_bytes: bytes) -> CloudVisionResult:
         """返回结构化的图片理解文本；失败时抛出 ``CloudVisionError``。"""
 
+    def analyze_image_with_prompt(
+        self, media_type: str, image_bytes: bytes, prompt: str,
+    ) -> CloudVisionResult:
+        """按业务限定提示逐字提取文档页面，沿用相同连接配置。"""
+
 
 class OpenAICompatibleCloudVisionClient:
     """调用一条 OpenAI-compatible 图片理解连接。
@@ -179,9 +184,13 @@ class OpenAICompatibleCloudVisionClient:
             raise self._http_error(response.status_code)
         try:
             payload = response.json()
-            content = payload["choices"][0]["message"]["content"]
+            choice = payload["choices"][0]
+            content = choice["message"]["content"]
         except (IndexError, KeyError, TypeError, ValueError) as exc:
             raise CloudVisionError("云端图片理解服务返回格式异常") from exc
+
+        if choice.get("finish_reason") == "length":
+            raise CloudVisionError("云端图片理解达到输出上限，内容已截断；请拆分为清晰截图后重试，或调整服务端输出上限")
 
         analysis_text = self._content_text(content)
         if not analysis_text:

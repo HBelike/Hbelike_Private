@@ -1,8 +1,8 @@
 """生产环境的 Skill 种子与导出工具。
 
 技能库在本地开发时可以读取用户目录中的 ``~/.agents`` 与 ``~/.codex``，但这两类
-目录不应成为服务器运行时依赖。这个模块只处理 WebUI 当前真正读取的 ``SKILL.md``
-文件：将经过审查的项目种子复制进持久卷，或将用户选择的本地 Skill 导出为项目种子。
+目录不应成为服务器运行时依赖。本模块复制 ``SKILL.md``、只读 references 文本和许可证；不复制脚本、缓存或凭证。
+经过审查的项目种子可复制进持久卷，用户选择的本地 Skill 可导出为项目种子。
 
 它刻意采用“仅缺失时复制”的语义。这样容器重新部署时不会覆盖用户通过 WebUI 保存
 的项目本地版本。
@@ -35,7 +35,7 @@ class SkillPortabilityResult:
 
     @property
     def copied_count(self) -> int:
-        """返回本次真正写入的 Skill 文件数量。"""
+        """返回本次真正写入的文件数量（含引用与许可证）。"""
 
         return len(self.copied)
 
@@ -56,7 +56,7 @@ def seed_skill_tree(
     """把项目随镜像发布的 Skill 种子复制到可写持久目录。
 
     参数：
-    - ``seed_root``：镜像内只读种子根目录；仅扫描其下的 ``SKILL.md``。
+    - ``seed_root``：镜像内只读种子根目录；按 ``SKILL.md`` 发现包，并复制支持的只读附带文件。
     - ``destination_root``：通常是 Docker 命名卷挂载的 ``/app/.agents/skills``。
     - ``overwrite``：默认 ``False``，避免部署覆盖 WebUI 已编辑版本。
     - ``owner``：可选 ``user:group``，仅由 root 初始化容器使用，将目标卷改为 API
@@ -72,20 +72,11 @@ def seed_skill_tree(
     skipped: list[Path] = []
 
     for source_path, relative_path in _iter_safe_skill_files(resolved_seed_root):
-        destination_path = _safe_destination_path(
-            destination_root=resolved_destination_root,
-            relative_path=relative_path,
+        result = _copy_skill_package(
+            source_path, resolved_destination_root, relative_path.parent, overwrite=overwrite,
         )
-        if destination_path.exists() or destination_path.is_symlink():
-            if not overwrite:
-                skipped.append(relative_path)
-                continue
-            if destination_path.is_symlink():
-                raise ValueError(f"拒绝覆盖指向外部的 Skill 符号链接：{relative_path}")
-
-        destination_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source_path, destination_path)
-        copied.append(relative_path)
+        copied.extend(result.copied)
+        skipped.extend(result.skipped)
 
     if owner:
         _change_owner_tree(resolved_destination_root, owner)
@@ -123,23 +114,48 @@ def export_skill_trees(
                 continue
             seen_names.add(name_key)
 
-            destination_relative_path = Path(skill_name) / SKILL_FILE_NAME
-            destination_path = _safe_destination_path(
-                destination_root=resolved_destination_root,
-                relative_path=destination_relative_path,
+            result = _copy_skill_package(
+                source_path, resolved_destination_root, Path(skill_name), overwrite=overwrite,
             )
-            if destination_path.exists() or destination_path.is_symlink():
-                if not overwrite:
-                    skipped.append(destination_relative_path)
-                    continue
-                if destination_path.is_symlink():
-                    raise ValueError(f"拒绝覆盖指向外部的 Skill 符号链接：{destination_relative_path}")
-
-            destination_path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source_path, destination_path)
-            copied.append(destination_relative_path)
+            copied.extend(result.copied)
+            skipped.extend(result.skipped)
 
     return SkillPortabilityResult(copied=tuple(copied), skipped=tuple(skipped))
+
+
+def portable_skill_files(skill_path: Path) -> tuple[Path, ...]:
+    """枚举可部署的提示词、只读引用和许可证，不携带可执行代码或配置。"""
+    root = skill_path.parent.resolve()
+    candidates = [skill_path]
+    candidates.extend(root / name for name in ("LICENSE", "LICENSE.md", "LICENSE.txt", "NOTICE", "NOTICE.md") if (root / name).exists())
+    references = root / "references"
+    if references.exists():
+        candidates.extend(path for path in sorted(references.rglob("*"))
+                          if path.is_file() and path.suffix.lower() in {".md", ".json", ".txt"})
+    for path in candidates:
+        try:
+            path.resolve(strict=True).relative_to(root)
+        except (OSError, ValueError) as exc:
+            raise ValueError("Skill 附带文件越界或不可读取") from exc
+    return tuple(candidates)
+
+
+def _copy_skill_package(source_path: Path, destination_root: Path, destination_directory: Path,
+                        *, overwrite: bool) -> SkillPortabilityResult:
+    copied, skipped = [], []
+    for source in portable_skill_files(source_path):
+        relative = destination_directory / source.relative_to(source_path.parent)
+        destination = _safe_destination_path(destination_root=destination_root, relative_path=relative)
+        if destination.exists() or destination.is_symlink():
+            if not overwrite:
+                skipped.append(relative)
+                continue
+            if destination.is_symlink():
+                raise ValueError(f"拒绝覆盖 Skill 符号链接：{relative}")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+        copied.append(relative)
+    return SkillPortabilityResult(tuple(copied), tuple(skipped))
 
 
 def _require_directory(path: Path, *, label: str) -> Path:

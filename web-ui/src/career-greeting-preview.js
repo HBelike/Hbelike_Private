@@ -1,3 +1,21 @@
+export const GREETING_MESSAGE_TARGET_LENGTH = 200
+
+export function greetingMessageLength(value) {
+  return Array.from(String(value ?? '')).length
+}
+
+export function greetingMessageError(value) {
+  const message = String(value ?? '').trim()
+  if (!message) return '招呼语不能为空。'
+  return ''
+}
+
+export function updateGreetingMessage(items, id, message) {
+  return (Array.isArray(items) ? items : []).map((item) => item.id === id
+    ? { ...item, message: String(message ?? ''), messageError: greetingMessageError(message) }
+    : item)
+}
+
 export function normalizeGreetingLimit(value) {
   const parsed = Number(value)
   if (!Number.isFinite(parsed)) return 5
@@ -66,6 +84,7 @@ export function applyGreetingResult(items, id, payload) {
         message: String(payload?.message || ''),
         revision: Number(item.revision || 0) + 1,
         status: 'ready',
+        messageError: greetingMessageError(payload?.message),
         generationError: '',
         evidence: Array.isArray(payload?.resume_evidence)
           ? payload.resume_evidence.map((entry) => String(entry?.summary || '')).filter(Boolean)
@@ -92,7 +111,8 @@ export function applyGreetingFailure(items, id, error, { preserveMessage = true 
 export function queueGreetingItems(items) {
   return (Array.isArray(items) ? items : []).map((item) => ({
     ...item,
-    status: item.included && item.message && item.status !== 'generation_failed'
+    messageError: greetingMessageError(item.message),
+    status: item.included && !greetingMessageError(item.message) && !['generating', 'generation_failed'].includes(item.status)
       ? 'queued'
       : 'excluded',
     nextAttemptMode: 'full'
@@ -114,7 +134,9 @@ export function advanceGreetingSend(items) {
   const nextIndex = currentItems.findIndex((item) => item.status === 'queued')
   if (nextIndex < 0) return currentItems.map((item) => ({ ...item }))
   return currentItems.map((item, index) => index === nextIndex
-    ? { ...item, status: 'sent' }
+    ? greetingMessageError(item.message)
+      ? { ...item, status: 'failed', error: greetingMessageError(item.message), errorCode: 'message_invalid', retryable: false }
+      : { ...item, status: 'sent' }
     : { ...item })
 }
 
@@ -137,6 +159,7 @@ export function retryGreetingItems(items, id) {
   if (retryIndex < 0) return currentItems.map((item) => ({ ...item }))
   return currentItems.map((item, index) => {
     if (index === retryIndex) {
+      if (greetingMessageError(item.message)) return { ...item, error: greetingMessageError(item.message), messageError: greetingMessageError(item.message), errorCode: 'message_invalid', retryable: false }
       return {
         ...item,
         status: 'queued',
@@ -146,7 +169,8 @@ export function retryGreetingItems(items, id) {
         nextAttemptMode: item.retryMode === 'message' ? 'message' : 'full'
       }
     }
-    if (index > retryIndex && item.included && item.status === 'stopped') {
+    if (index > retryIndex && item.included && item.status === 'stopped' && !greetingMessageError(currentItems[retryIndex].message)) {
+      if (greetingMessageError(item.message)) return { ...item, status: 'excluded', messageError: greetingMessageError(item.message) }
       return {
         ...item,
         status: 'queued',

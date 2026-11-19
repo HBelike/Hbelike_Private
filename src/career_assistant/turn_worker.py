@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable, Protocol
 
 from src.career_assistant.agent_loop import CareerAgentLoop
@@ -17,6 +17,7 @@ from src.career_assistant.persistence.turn_job_repository import (
 from src.career_assistant.response_runner import CareerResponseRunner
 from src.career_assistant.settings import CareerTurnWorkerSettings
 from src.career_assistant.turn_payloads import restore_turn_input
+from src.career_assistant.job_search_cards import card_message_payload
 
 
 LOGGER = logging.getLogger(__name__)
@@ -68,6 +69,23 @@ class CareerAgentTurnProcessor:
             claim.turn.actor_id,
             claim.turn.id,
         )
+        inbound = prepared.inbound_message
+        active_turn = replace(active_turn, source=inbound.execution_source,
+                              parent_turn_id=inbound.parent_turn_id,
+                              job_search_batch_id=inbound.job_search_batch_id)
+        if inbound.job_search_snapshot is not None:
+            from src.career_assistant.job_search_context import resolve_search_scope
+            frozen = inbound.job_search_snapshot
+            # 普通聊天只需冻结目录，不加载岗位正文；岗位任务保留跨批和公司别名解析。
+            normal_chat = resolve_search_scope(inbound.text, frozen)["mode"] == "normal"
+            requested = {**frozen, "catalog": []} if normal_chat else frozen
+            resolved = self._turn_job_repository.resolve_search_snapshot(
+                inbound.actor_id, inbound.conversation_id, requested,
+            )
+            if normal_chat:
+                resolved = {**frozen, "batches": resolved["batches"]}
+            inbound = replace(inbound, job_search_snapshot=resolved)
+            prepared = replace(prepared, inbound_message=inbound)
         intake_result = None
         for event in self._intake_graph.stream_prepared(
             prepared.inbound_message,
@@ -86,6 +104,11 @@ class CareerAgentTurnProcessor:
 
         buffered_delta: list[str] = []
         buffered_characters = 0
+        # 初评正文较短，使用较小批次让用户能看到生成过程。
+        flush_characters = (
+            64 if claim.payload.request_metadata.get("source") == "resume_review"
+            else self._DELTA_FLUSH_CHARACTERS
+        )
         final_result = None
         for event in self._response_runner.stream(
             prepared.inbound_message,
@@ -94,7 +117,7 @@ class CareerAgentTurnProcessor:
             if event.event_type == "delta" and event.content:
                 buffered_delta.append(event.content)
                 buffered_characters += len(event.content)
-                if buffered_characters >= self._DELTA_FLUSH_CHARACTERS:
+                if buffered_characters >= flush_characters:
                     emit("delta", {"content": "".join(buffered_delta)})
                     buffered_delta.clear()
                     buffered_characters = 0
@@ -137,13 +160,18 @@ class CareerAgentTurnProcessor:
                         else None
                     ),
                 },
-                "message": {
+                "source": inbound.execution_source,
+                "parent_turn_id": str(inbound.parent_turn_id) if inbound.parent_turn_id else None,
+                "batch_id": str(inbound.job_search_batch_id) if inbound.job_search_batch_id else None,
+                "message": None if inbound.execution_source == "job_search_auto_analysis" else {
                     "id": str(intake_result.persisted_message.id),
                     "turn_id": str(intake_result.persisted_message.turn_id),
                     "role": intake_result.persisted_message.role.value,
                     "content": intake_result.persisted_message.content_text,
                     "is_redacted": intake_result.persisted_message.is_redacted,
                     "created_at": intake_result.persisted_message.created_at.isoformat(),
+                    **({"source": "resume_review"}
+                       if claim.payload.request_metadata.get("source") == "resume_review" else {}),
                 },
                 "assistant_message": {
                     "id": str(final_result.assistant_message.id),
@@ -151,9 +179,16 @@ class CareerAgentTurnProcessor:
                     "role": final_result.assistant_message.role.value,
                     "content": final_result.assistant_message.content_text,
                     "is_redacted": final_result.assistant_message.is_redacted,
+                    **({"source": "job_search_auto_analysis",
+                        "parent_turn_id": str(inbound.parent_turn_id) if inbound.parent_turn_id else None,
+                        "batch_id": str(inbound.job_search_batch_id)}
+                       if inbound.execution_source == "job_search_auto_analysis" else {}),
                     "created_at": final_result.assistant_message.created_at.isoformat(),
                     **_response_model_payload(final_result),
+                    **({"ui_payload": final_result.assistant_message.ui_payload}
+                       if getattr(final_result.assistant_message, "ui_payload", None) is not None else {}),
                 },
+                "updated_messages": [card_message_payload(item) for item in getattr(final_result, "updated_messages", ())],
                 "completed_steps": [step.value for step in intake_result.completed_steps],
                 "job_source": {
                     "status": intake_result.job_source_status,

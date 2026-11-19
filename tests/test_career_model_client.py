@@ -9,6 +9,7 @@ from src.career_assistant.model_clients import (
     ModelConnectionTarget,
     ModelInvocationError,
     OpenAICompatibleChatClient,
+    normalize_model_connection_target,
 )
 
 
@@ -17,6 +18,118 @@ TARGET = ModelConnectionTarget(
     model_id="test-model",
     api_base_url="https://example.test/v1",
 )
+
+
+def test_official_moonshot_custom_target_normalizes_kimi_k3_alias() -> None:
+    target = normalize_model_connection_target(
+        ModelConnectionTarget("custom", "kimi K3", "https://api.moonshot.cn/v1"),
+    )
+
+    assert target == ModelConnectionTarget(
+        provider_key="kimi",
+        model_id="kimi-k3",
+        api_base_url="https://api.moonshot.cn/v1",
+    )
+
+
+def test_unrelated_custom_target_keeps_model_id_unchanged() -> None:
+    target = normalize_model_connection_target(
+        ModelConnectionTarget("custom", "Vendor Model", "https://example.test/v1"),
+    )
+
+    assert target == ModelConnectionTarget(
+        provider_key="custom",
+        model_id="Vendor Model",
+        api_base_url="https://example.test/v1",
+    )
+
+
+def test_kimi_k3_uses_completion_tokens_and_fixed_sampling_contract() -> None:
+    payload = OpenAICompatibleChatClient._build_request_payload(
+        ModelConnectionTarget("custom", "kimi K3", "https://api.moonshot.cn/v1"),
+        [ChatMessage("user", "你好")],
+        max_tokens=512,
+    )
+
+    assert payload["model"] == "kimi-k3"
+    assert payload["max_completion_tokens"] == 512
+    assert payload["reasoning_effort"] == "low"
+    assert "max_tokens" not in payload
+    assert "temperature" not in payload
+
+
+def test_kimi_k2_6_omits_fixed_sampling_temperature() -> None:
+    payload = OpenAICompatibleChatClient._build_request_payload(
+        ModelConnectionTarget("kimi", "kimi-k2.6", "https://api.moonshot.cn/v1"),
+        [ChatMessage("user", "你好")],
+        max_tokens=512,
+    )
+
+    assert payload["model"] == "kimi-k2.6"
+    assert payload["max_tokens"] == 512
+    assert "temperature" not in payload
+    assert "reasoning_effort" not in payload
+
+
+def test_kimi_k3_custom_connection_reaches_official_chat_endpoint() -> None:
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["payload"] = request.read().decode("utf-8")
+        return httpx.Response(
+            200,
+            json={
+                "model": "kimi-k3",
+                "choices": [{"message": {"content": "OK"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 2},
+            },
+        )
+
+    client = OpenAICompatibleChatClient(
+        httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    result = client.test_connection(
+        ModelConnectionTarget("custom", "kimi K3", "https://api.moonshot.cn/v1"),
+        "test-key",
+    )
+
+    assert result == "OK"
+    assert captured["url"] == "https://api.moonshot.cn/v1/chat/completions"
+    assert '"model":"kimi-k3"' in str(captured["payload"])
+    assert '"max_completion_tokens":512' in str(captured["payload"])
+
+
+def test_kimi_k2_6_connection_reaches_official_chat_endpoint_without_temperature() -> None:
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["payload"] = request.read().decode("utf-8")
+        return httpx.Response(
+            200,
+            json={
+                "model": "kimi-k2.6",
+                "choices": [{"message": {"content": "OK"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 2},
+            },
+        )
+
+    client = OpenAICompatibleChatClient(
+        httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    result = client.test_connection(
+        ModelConnectionTarget("kimi", "kimi-k2.6", "https://api.moonshot.cn/v1"),
+        "test-key",
+    )
+
+    assert result == "OK"
+    assert captured["url"] == "https://api.moonshot.cn/v1/chat/completions"
+    assert '"model":"kimi-k2.6"' in str(captured["payload"])
+    assert '"max_tokens":512' in str(captured["payload"])
+    assert '"temperature"' not in str(captured["payload"])
 
 
 def test_non_stream_length_response_keeps_text_and_adds_notice() -> None:

@@ -1,5 +1,6 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import { useDialogFocus } from '../use-dialog-focus.js'
 import JobSearchWorkspace from './JobSearchWorkspace.vue'
 import BossExtensionInstallDialog from './BossExtensionInstallDialog.vue'
 import { JobLibraryBridgeError, jobLibraryBridge } from '../job-library-bridge.js'
@@ -13,6 +14,10 @@ import {
   createGreetingItems,
   findGreetingFailureAction,
   greetingJobKey,
+  GREETING_MESSAGE_TARGET_LENGTH,
+  greetingMessageLength,
+  greetingMessageError,
+  updateGreetingMessage,
   needsGreetingRiskWarning,
   normalizeGreetingLimit,
   queueGreetingItems,
@@ -36,6 +41,7 @@ const props = defineProps({
 })
 
 const emit = defineEmits(['cancel'])
+useDialogFocus(() => props.open, '.greeting-dialog', close)
 const stage = ref('select')
 const selectionLimit = ref(5)
 const selectedJobs = ref([])
@@ -50,6 +56,7 @@ const sendError = ref('')
 const installDialogOpen = ref(false)
 const extensionGateError = ref('')
 const extensionGateMode = ref('install')
+const connectionIssue = ref(false)
 const regeneratingItemId = ref('')
 const generationRunning = ref(false)
 const dialogRef = ref(null)
@@ -64,9 +71,11 @@ const steps = [
 const stageIndex = computed(() => Math.max(0, steps.findIndex((item) => item.key === stage.value)))
 const includedItems = computed(() => items.value.filter((item) => (
   item.included
-  && Boolean(item.message)
+  && !greetingMessageError(item.message)
   && !['generating', 'generation_failed'].includes(item.status)
 )))
+const invalidIncludedItems = computed(() => items.value.filter((item) => item.included
+  && !['generating', 'generation_failed'].includes(item.status) && greetingMessageError(item.message)))
 const activeItem = computed(() => items.value.find((item) => item.id === activeItemId.value) ?? items.value[0] ?? null)
 const sentCount = computed(() => items.value.filter((item) => item.status === 'sent').length)
 const waitingCount = computed(() => items.value.filter((item) => ['queued', 'preflighting', 'sending'].includes(item.status)).length)
@@ -96,6 +105,7 @@ watch(() => props.open, (open) => {
   installDialogOpen.value = false
   extensionGateError.value = ''
   extensionGateMode.value = 'install'
+  connectionIssue.value = false
   regeneratingItemId.value = ''
   nextTick(() => dialogRef.value?.focus())
   if (startsInReview) nextTick(() => void generateAllGreetings(previewJobs))
@@ -169,9 +179,7 @@ function selectItem(item) {
 
 function updateActiveMessage(event) {
   const message = event.target.value
-  items.value = items.value.map((item) => item.id === activeItem.value?.id
-    ? { ...item, message }
-    : item)
+  items.value = updateGreetingMessage(items.value, activeItem.value?.id, message)
 }
 
 function updateActiveIncluded(event) {
@@ -212,8 +220,16 @@ async function regenerateActive() {
   }
 }
 
+function validateIncludedMessages() {
+  const invalid = invalidIncludedItems.value[0]
+  if (!invalid) return true
+  activeItemId.value = invalid.id
+  sendError.value = greetingMessageError(invalid.message)
+  return false
+}
+
 function requestSend() {
-  if (!includedItems.value.length) return
+  if (!validateIncludedMessages() || !includedItems.value.length) return
   if (needsGreetingRiskWarning(includedItems.value.length)) {
     riskAcknowledged.value = false
     riskOpen.value = true
@@ -224,6 +240,7 @@ function requestSend() {
 
 async function startSend() {
   riskOpen.value = false
+  if (!validateIncludedMessages() || !includedItems.value.length) return
   if (!await ensureGreetingExtensionReady({ requireDispatchCapability: true })) return
   items.value = queueGreetingItems(items.value)
   stage.value = 'sending'
@@ -245,6 +262,8 @@ async function runSerialQueue() {
     items.value = updateGreetingItemStatus(items.value, nextItem.id, 'preflighting')
 
     try {
+      const validationError = greetingMessageError(nextItem.message)
+      if (validationError) throw new JobLibraryBridgeError('message_invalid', validationError)
       if (props.simulationMode) {
         await previewDelay(240)
         if (stopRequested.value) break
@@ -303,6 +322,12 @@ async function runSerialQueue() {
 
 async function retryFailedItem(item) {
   if (sending.value || !item?.retryable) return
+  const validationError = greetingMessageError(item.message)
+  if (validationError) {
+    sendError.value = validationError
+    items.value = updateGreetingItemStatus(items.value, item.id, 'failed', validationError, { errorCode: 'message_invalid', retryable: false })
+    return
+  }
   if (!await ensureGreetingExtensionReady({ requireRetryCapability: true })) return
   items.value = retryGreetingItems(items.value, item.id)
   activeItemId.value = item.id
@@ -315,21 +340,31 @@ async function retryFailedItem(item) {
 
 async function ensureGreetingExtensionReady({ requireRetryCapability = false, requireDispatchCapability = false } = {}) {
   if (props.simulationMode) return true
+  const wasConnectionIssue = connectionIssue.value
+  connectionIssue.value = false
   try {
     const connection = normalizeBossExtensionConnection(await jobLibraryBridge.ping())
     const supportsRequestedAction = (!requireRetryCapability || connection.greetingRetryReady)
       && (!requireDispatchCapability || connection.greetingDispatchReady)
-    if (connection.status === 'ready' && supportsRequestedAction) return true
-    extensionGateMode.value = connection.status === 'ready' ? 'update' : 'install'
-    extensionGateError.value = connection.status === 'ready'
-      ? `当前浏览器助手${connection.version ? ` v${connection.version}` : ''}${requireDispatchCapability ? '不支持触发发送后直接继续下一条' : '不支持安全重试'}，请更新到 v${BOSS_EXTENSION_VERSION}。`
-      : '未检测到浏览器助手，请安装后再发送。'
+    if (connection.status === 'ready' && supportsRequestedAction) {
+      if (wasConnectionIssue) sendError.value = ''
+      return true
+    }
+    if (connection.status === 'ready') {
+      extensionGateMode.value = 'update'
+      extensionGateError.value = `当前浏览器助手${connection.version ? ` v${connection.version}` : ''}${requireDispatchCapability ? '不支持触发发送后直接继续下一条' : '不支持安全重试'}，请更新到 v${BOSS_EXTENSION_VERSION}。`
+      installDialogOpen.value = true
+    } else {
+      connectionIssue.value = true
+      extensionGateMode.value = 'install'
+      extensionGateError.value = '浏览器助手暂时无法连接，请重新检测；刚安装或更新后可刷新页面。'
+    }
   } catch (error) {
+    connectionIssue.value = true
     extensionGateMode.value = 'install'
-    extensionGateError.value = error instanceof Error ? error.message : '未检测到浏览器助手，请安装后再发送。'
+    extensionGateError.value = `${error instanceof Error ? error.message : '浏览器助手暂时无法连接。'} 请重新检测，或确认扩展已启用并允许访问当前网站。`
   }
   sendError.value = extensionGateError.value
-  installDialogOpen.value = true
   return false
 }
 
@@ -479,15 +514,18 @@ function formatStatusTime(value) {
                 <textarea
                   id="greeting-message"
                   :value="activeItem.message"
-                  :disabled="!activeItem.included || activeItem.status === 'generating' || !activeItem.message"
+                  :disabled="!activeItem.included || activeItem.status === 'generating'"
+                  :aria-invalid="Boolean(greetingMessageError(activeItem.message))"
+                  aria-describedby="greeting-message-validation"
                   @input="updateActiveMessage"
                 ></textarea>
                 <p v-if="activeItem.generationError" class="generation-error" role="alert">
                   {{ activeItem.generationError }}
                 </p>
+                <p v-if="greetingMessageError(activeItem.message)" id="greeting-message-validation" class="generation-error" role="alert">{{ greetingMessageError(activeItem.message) }}</p>
                 <div class="message-meta">
-                  <span>建议 150 字以内，不做机械截断</span>
-                  <strong>{{ activeItem.message?.length || 0 }} 字</strong>
+                  <span>建议 {{ GREETING_MESSAGE_TARGET_LENGTH }} 字左右</span>
+                  <strong>当前 {{ greetingMessageLength(activeItem.message.trim()) }} 字</strong>
                 </div>
               </div>
 
@@ -611,7 +649,12 @@ function formatStatusTime(value) {
         </main>
 
         <footer class="greeting-footer">
-          <div v-if="stage === 'select'" class="batch-limit-control">
+          <div v-if="connectionIssue" class="greeting-connection-help" role="alert">
+            <p>{{ sendError }}</p>
+            <button type="button" @click="ensureGreetingExtensionReady({ requireDispatchCapability: true })">重新检测</button>
+            <button type="button" @click="installDialogOpen = true">查看安装说明</button>
+          </div>
+          <div v-else-if="stage === 'select'" class="batch-limit-control">
             <label for="greeting-limit">本批上限</label>
             <input id="greeting-limit" :value="selectionLimit" type="number" min="1" max="10" @change="updateSelectionLimit" />
             <span>最多 10 个，当前已选 <strong>{{ selectedJobs.length }}</strong> 个</span>
@@ -621,6 +664,7 @@ function formatStatusTime(value) {
             <i aria-hidden="true"></i><span>{{ simulationMode ? '安全预览，不会发送到 BOSS' : '真实发送：逐条触发、不等待送达回执' }}</span>
           </div>
 
+          <p v-if="stage === 'review' && invalidIncludedItems.length" class="generation-error" role="alert">有 {{ invalidIncludedItems.length }} 条招呼语为空，请填写或取消勾选后发送。</p>
           <div class="footer-actions">
             <button v-if="stage === 'review'" type="button" class="secondary-button" @click="returnToSelection">返回选岗</button>
             <button v-if="stage === 'sending' && sending" type="button" class="danger-button" @click="stopSending">停止剩余发送</button>
@@ -628,7 +672,7 @@ function formatStatusTime(value) {
             <button v-if="stage === 'select'" type="button" class="primary-button" :disabled="!selectedJobsReady || !candidateProfile?.id || generationRunning" @click="startReview">
               {{ pendingDetailCount ? `正在准备 ${pendingDetailCount} 个岗位详情` : `生成 ${selectedJobs.length || ''} 条招呼语` }}
             </button>
-            <button v-else-if="stage === 'review'" type="button" class="primary-button" :disabled="!includedItems.length || generationRunning" @click="requestSend">确认并{{ simulationMode ? '模拟' : '真实' }}发送 {{ includedItems.length }} 条</button>
+            <button v-else-if="stage === 'review'" type="button" class="primary-button" :disabled="!includedItems.length || invalidIncludedItems.length > 0 || generationRunning" @click="requestSend">确认并{{ simulationMode ? '模拟' : '真实' }}发送 {{ includedItems.length }} 条</button>
           </div>
         </footer>
 
@@ -820,6 +864,9 @@ function formatStatusTime(value) {
 .failure-action-bar button { flex: none; border: 1px solid var(--greeting-blue); border-radius: 9px; background: var(--greeting-blue); color: #fff; padding: 9px 12px; cursor: pointer; font-size: 10px; font-weight: 850; }
 .failure-action-bar button:hover,.failure-action-bar button:focus-visible { outline: 0; background: var(--greeting-blue-ink); box-shadow: 0 0 0 3px var(--ui-focus,rgba(8,105,216,.14)); }
 .failure-action-bar button:disabled { cursor: wait; opacity: .55; }
+.greeting-connection-help { min-width:0; display:flex; flex-wrap:wrap; gap:7px; align-items:center; }
+.greeting-connection-help p { flex-basis:100%; margin:0; color:#a64141; font-size:11px; line-height:1.5; }
+.greeting-connection-help button { border:1px solid var(--greeting-line); border-radius:7px; background:#fff; padding:6px 9px; color:var(--greeting-blue); cursor:pointer; font-size:11px; }
 .progress-rail { height: 8px; overflow: hidden; margin-top: 34px; border-radius: 999px; background: var(--greeting-blue-soft); }
 .progress-rail i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg,var(--greeting-blue),var(--greeting-teal)); transition: width .35s ease; }
 .progress-numbers { display: grid; grid-template-columns: auto auto auto auto 1fr; align-items: baseline; gap: 7px; margin-top: 12px; }
@@ -910,6 +957,16 @@ function formatStatusTime(value) {
   .footer-actions button { flex: 1; }
 }
 
+@media(max-width:640px){
+  .greeting-dialog{height:var(--career-visible-height,100dvh);max-height:var(--career-visible-height,100dvh);border-radius:0}
+  .greeting-header{padding:max(8px,env(safe-area-inset-top)) 16px 8px}
+  .greeting-footer{flex:none;padding-bottom:max(12px,env(safe-area-inset-bottom))}
+  .greeting-dialog button{min-height:44px;font-size:14px}
+  .greeting-dialog input,.greeting-dialog textarea{font-size:16px}
+  .greeting-dialog .greeting-close{width:44px;height:44px}
+  .greeting-steps{flex:none}
+  .message-editor,.progress-board{min-width:0;overflow:auto}
+}
 @media (prefers-reduced-motion: reduce) {
   .greeting-dialog,.track-item.sending .track-node i { animation: none; }
   .progress-rail i,.message-paper { transition: none; }

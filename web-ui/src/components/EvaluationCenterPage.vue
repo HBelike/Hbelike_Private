@@ -1,10 +1,17 @@
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue'
+import { EVALUATION_VIEWS, evaluationViewForRoute, evaluationRouteForView } from '../evaluation-navigation.js'
+
+const props = defineProps({ currentRoute: { type: String, default: '/evaluations' } })
+const emit = defineEmits(['navigate'])
 
 const loading = ref(true)
 const errorMessage = ref('')
 const noticeMessage = ref('')
-const activeView = ref('overview')
+const activeView = computed({
+  get: () => evaluationViewForRoute(props.currentRoute),
+  set: view => emit('navigate', evaluationRouteForView(view))
+})
 const overview = ref({ summary: {}, source_distribution: [], experiments: [] })
 const datasets = ref([])
 const metrics = ref([])
@@ -154,6 +161,7 @@ async function freezeVersion(version) {
 }
 
 async function openExperimentForm() {
+  activeView.value = 'experiments'
   showExperimentForm.value = true
   if (frozenVersions.value.length) {
     const version = frozenVersions.value[0]
@@ -301,8 +309,8 @@ function metricPass(metric) {
   <section class="evaluation-page">
     <header class="evaluation-heading">
       <div>
-        <p class="eyebrow">EVIDENCE-BOUND EVALUATION</p>
-        <h2>评测证据中心</h2>
+
+        <h2>{{ EVALUATION_VIEWS[activeView].label }}</h2>
         <p>每个结论都绑定真实样本、冻结版本、实际运行和可复算指标。</p>
       </div>
       <div class="evaluation-actions">
@@ -352,7 +360,7 @@ function metricPass(metric) {
 
       <section class="evaluation-overview-grid">
         <article class="evaluation-panel">
-          <header><div><p class="eyebrow">DATA LINEAGE</p><h3>数据来源构成</h3></div><button class="text-button" type="button" @click="activeView = 'datasets'">管理数据</button></header>
+          <header><div><h3>数据来源构成</h3></div><button class="text-button" type="button" @click="activeView = 'datasets'">管理数据</button></header>
           <div v-if="sourceDistribution.length" class="evaluation-source-bars">
             <div v-for="item in sourceDistribution" :key="item.source_kind">
               <span>{{ sourceLabel(item.source_kind) }}</span>
@@ -364,7 +372,7 @@ function metricPass(metric) {
         </article>
 
         <article class="evaluation-panel">
-          <header><div><p class="eyebrow">RELEASE LEDGER</p><h3>最近实验</h3></div><button class="text-button" type="button" @click="activeView = 'experiments'">查看全部</button></header>
+          <header><div><h3>最近实验</h3></div><button class="text-button" type="button" @click="activeView = 'experiments'">查看全部</button></header>
           <div v-if="experiments.length" class="evaluation-experiment-list compact">
             <button v-for="item in experiments.slice(0, 5)" :key="item.id" type="button" @click="openExperiment(item)">
               <span><strong>{{ item.name }}</strong><small>{{ targetLabel(item.target_type) }} · {{ item.dataset_version }}</small></span>
@@ -415,7 +423,7 @@ function metricPass(metric) {
       <p v-else class="evaluation-state">尚未建立评测数据集。</p>
 
       <form v-if="caseDraft.versionId" class="evaluation-case-form" @submit.prevent="createCase">
-        <header><div><p class="eyebrow">DATA ADMISSION</p><h3>录入已复核案例</h3></div><button class="text-button" type="button" @click="caseDraft.versionId = ''">关闭</button></header>
+        <header><div><h3>录入已复核案例</h3></div><button class="text-button" type="button" @click="caseDraft.versionId = ''">关闭</button></header>
         <div class="evaluation-form">
           <label>案例编号<input v-model="caseDraft.caseKey" required placeholder="例如 rag-real-0001" /></label>
           <label>数据来源<select v-model="caseDraft.sourceKind"><option value="anonymized_real">真实脱敏</option><option value="failure_replay">历史失败回放</option><option value="curated_edge">人工边界</option><option value="synthetic">合成补充</option></select></label>

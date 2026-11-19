@@ -24,6 +24,14 @@ def test_deepseek_v4_uses_verified_one_mebi_token_context() -> None:
     assert policy.context_window_source == "built_in"
 
 
+def test_kimi_k3_uses_official_one_million_token_context() -> None:
+    policy = infer_model_context_policy("kimi", "kimi-k3")
+
+    assert policy.context_window_tokens == 1_000_000
+    assert policy.reserved_output_tokens == 131_072
+    assert policy.context_window_source == "built_in"
+
+
 def test_unknown_model_defaults_to_one_million_context_tokens() -> None:
     policy = infer_model_context_policy("custom-provider", "future-model")
 

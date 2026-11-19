@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>浏览器助手设置</title>
+    <style>
+      :root { color-scheme: light; font-family: "Segoe UI", "PingFang SC", sans-serif; color: #17243b; background: #f3f7fc; }
+      * { box-sizing: border-box; }
+      body { max-width: 720px; margin: 0 auto; padding: 44px 22px; }
+      main { border: 1px solid #d7e4f6; border-radius: 16px; background: #fff; padding: 26px; box-shadow: 0 14px 42px rgba(20, 46, 86, .07); }
+      h1 { margin: 0; font-size: 22px; letter-spacing: -.03em; }
+      .intro { margin: 8px 0 22px; color: #64728a; font-size: 13px; line-height: 1.7; }
+      section { border-top: 1px solid #e2eaf5; padding-top: 20px; }
+      h2 { margin: 0 0 7px; font-size: 16px; }
+      p { color: #64728a; font-size: 12px; line-height: 1.75; }
+      a { color: #075dbb; font-size: 12px; font-weight: 700; }
+      label { display: block; margin: 17px 0 7px; font-size: 12px; font-weight: 750; }
+      input { width: 100%; min-height: 42px; border: 1px solid #b9cfed; border-radius: 9px; outline: none; padding: 0 12px; font-size: 13px; }
+      input:focus { border-color: #0869d8; box-shadow: 0 0 0 3px rgba(8, 105, 216, .12); }
+      .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; margin-top: 12px; }
+      button { min-height: 36px; border: 1px solid #0869d8; border-radius: 8px; background: #0869d8; color: white; padding: 8px 13px; cursor: pointer; font-size: 12px; font-weight: 750; }
+      button.secondary { border-color: #d7e4f6; background: white; color: #4c5c75; }
+      button:disabled { cursor: not-allowed; opacity: .55; }
+      #status { min-height: 20px; margin: 12px 0 0; color: #147a70; font-weight: 700; }
+      #status.error { color: #a33b46; }
+      .privacy { border-radius: 9px; background: #f1f7ff; padding: 10px 12px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>浏览器助手设置</h1>
+      <p class="intro">管理职位搜索平台连接。猎聘令牌由扩展本机保存，职位查询由扩展直接请求猎聘官方搜索服务。</p>
+      <section aria-labelledby="liepin-title">
+        <h2 id="liepin-title">猎聘官方搜索</h2>
+        <p>先在猎聘官方授权页完成授权并复制令牌，再粘贴到这里。令牌不会经过职位库网页或应用服务器。</p>
+        <a href="https://www.liepin.com/mcp/auth" target="_blank" rel="noopener noreferrer">打开猎聘官方授权页 ↗</a>
+        <form id="token-form">
+          <label for="token">官方授权令牌</label>
+          <input id="token" type="password" autocomplete="new-password" spellcheck="false" placeholder="粘贴猎聘授权令牌">
+          <div class="actions">
+            <button id="save" type="submit">保存令牌</button>
+            <button id="remove" class="secondary" type="button">移除本机令牌</button>
+          </div>
+        </form>
+        <p id="status" role="status" aria-live="polite"></p>
+        <p class="privacy">令牌保存在当前浏览器扩展的 chrome.storage.local 中。搜索时扩展通过 HTTPS 将令牌发送给 open-agent.liepin.com；页面仅能读取已配置状态。</p>
+      </section>
+    </main>
+    <script src="options.js"></script>
+  </body>
+</html>

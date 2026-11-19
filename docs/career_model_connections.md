@@ -1,10 +1,20 @@
 # 求职助手模型连接配置
 
+## 2026-11-04：平台统一默认DeepSeek V4 Pro
+
+- 目标：任何普通用户进入主对话即可使用平台共享的DeepSeek V4 Pro，无需个人申请Key或创建连接。管理员统一维护当前组织的模型档案及服务端凭证，原有权限与组织边界不变。
+- 配置：`model_policy.default_selection_mode=platform_default`；`model_gateway.default_provider_key=deepseek`，`default_model_id=deepseek-v4-pro`。付费档案默认允许，以便平台共享Pro可用；管理员仍可通过`CAREER_ALLOW_PAID_PROFILES=false`显式停用。
+- 路由：新增`ModelSelectionMode.PLATFORM_DEFAULT`，精确匹配配置中的Provider/Model，不按免费属性或列表顺序猜测。缺少/禁用/无凭证时提示联系管理员，不静默退到Qwen或Flash。显式免费选择与指定其他模型仍保留。
+- 接口：模型列表额外返回无密钥的`default_model`描述；主对话文本、附件与路由预览省略选择时使用平台默认。自动简历初评未显式选择时同样回退平台默认，历史免费自动策略不再成为默认入口；用户明确选择的其他模型可以恢复。
+- PC展示：默认下拉项为“【平台默认】DeepSeek V4 Pro”；新会话、首次进入及历史免费自动选择均回到平台默认。普通用户隐藏免费模型申请和模型连接配置按钮，仍可切换平台已有模型。模型不可用时显示管理员处理提示。
+- 依赖与部署边界：无新增依赖或迁移，Turn选择策略原字段为TEXT。平台默认档案需要管理员统一配置一次；不为每个用户复制档案/Key。API与Worker须同时加载支持新策略的代码。本轮仅本地，未部署生产。
+- 验证：网关精确路由、共享凭证、免费/指定策略保留、不可用不降级、前端默认选择测试通过。临时普通账号无个人模型配置时，PC默认展示Pro；API省略选择真实调用`deepseek-v4-pro`返回4，刷新仍为Pro，配置按钮隐藏，无pageerror；测试账号与会话已清理。证据`tmp/platform-default-model/browser-result.json`和`completed.png`。后端全量709项、前端254项与构建通过；后续定向回归覆盖配置与初评补充边界。
+
 “模型与连接”使用一张可滚动的配置页：先选择服务商，再向下填写连接名称、模型 ID、官网地址、API Key、请求地址和模型能力。
 
 ## 预置服务商
 
-已内置 DeepSeek、Groq、OpenRouter、Google Gemini、阿里云百炼 Qwen、SiliconFlow、ModelScope、NVIDIA NIM、腾讯云 TokenHub、百度千帆、腾讯混元、智谱 AI、MiniMax 与火山方舟。选择预置项会自动填充官网地址和 OpenAI-compatible API Base URL；也可以选择“自定义兼容服务商”手动填写。
+已内置 DeepSeek、Kimi（Moonshot AI）、Groq、OpenRouter、Google Gemini、阿里云百炼 Qwen、SiliconFlow、ModelScope、NVIDIA NIM、腾讯云 TokenHub、百度千帆、腾讯混元、智谱 AI、MiniMax 与火山方舟。选择预置项会自动填充官网地址和 OpenAI-compatible API Base URL；也可以选择“自定义兼容服务商”手动填写。
 
 DeepSeek 的两个地址用途不同：
 
@@ -141,3 +151,15 @@ GitHub Models 不在目录中：GitHub 已于 2026-07-30 停止其模型目录�
 - 已核对的 DeepSeek V4 Flash、Pro 和实验视觉版本使用 `1,048,576 Token` 上下文、`384,000 Token` 最大输出。迁移 `20260830_32` 只回填未被管理员覆盖的档案。
 - 未识别模型仍显示“容量待核对”，管理员必须按准确 Model ID 查阅 Provider 官方资料后填写上下文容量和最大输出；系统不会从 Provider 名称猜测输出能力。
 - 达到长度上限的普通或流式正文会显示未完成提示；被截断的 Tool Calling 不会执行。本次不自动续写，也不把未知结束原因推断成长度截断。
+
+## 2026-09-03：Kimi 官方端点与自定义连接兼容
+
+- **问题原因**：自定义连接使用了正确的 Moonshot 中国区 API Base URL，但把展示名称 `kimi K3` 当成 Model ID。Kimi API 要求使用精确调用标识 `kimi-k3`，因此上游返回 404；官网地址字段误填为 API 地址不参与调用，不是本次失败原因。
+- **官方现状**：Kimi 当前可用通用旗舰模型为 `kimi-k3`，中国区 Chat Completions 地址为 `https://api.moonshot.cn/v1/chat/completions`，配置页只需填写到 `https://api.moonshot.cn/v1`。`kimi-k2.5` 与 `moonshot-v1` 系列已于 2026-08-31 下线，不能再作为候选模型。
+- **兼容方式**：前后端只在 `api.moonshot.cn`、`api.moonshot.ai` 或显式 `provider_key=kimi` 时识别 Kimi；`kimi K3`、`kimi_k3` 等已知展示写法会规范化为 `kimi-k3`。未知模型或第三方代理地址保持原值，避免错误改写其他 Provider 的大小写敏感 ID。
+- **K3 请求约束**：Kimi K3 请求使用 `max_completion_tokens`，不发送其固定的 `temperature` 等采样参数，普通求职请求默认使用 `reasoning_effort=low`。同一轮 Tool Calling 会把上游 `reasoning_content` 原样回传给 Kimi，但不会展示给用户；跨轮会话仍以已脱敏最终正文构造历史，不新增推理内容持久化。
+- **K2.x 请求约束**：`kimi-k2.6`、`kimi-k2.7-code` 与高速版本也使用固定采样参数，客户端不再发送 `temperature`；输出长度继续使用兼容字段 `max_tokens`，未显式配置思考模式时沿用 Moonshot 默认行为。此前把通用 Provider 的 `temperature=0.2` 发给 K2.6 会收到 HTTP 400。
+- **档案策略**：Kimi K3 内置上下文容量为 `1,000,000 Token`、默认最大输出能力为 `131,072 Token`，统一归类为付费连接；环境变量兼容名为 `MOONSHOT_API_KEY`。页面预设默认开启文字、视觉与 Tool Calling 能力。
+- **调用链**：`Kimi 预设或自定义 Moonshot 地址 → 前端规范化已知 Model ID → /api/career/model-connections/test → 服务端再次识别官方主机 → Kimi K3 专属请求参数 → 测试通过后保存规范化档案`。
+- **依赖与验证边界**：官方资料通过 Firecrawl 检索并保存在 Git 忽略的 `.firecrawl/`，运行时没有新增依赖。测试全部使用 MockTransport，不读取、不复用截图中已暴露的 API Key，也未连接生产环境或执行部署。
+- **资料依据**：[Kimi 模型列表](https://platform.kimi.com/docs/models)、[Kimi K3 使用指南](https://platform.kimi.com/docs/guide/kimi-k3-quickstart)、[Chat Completions API](https://platform.kimi.com/docs/api/chat)。

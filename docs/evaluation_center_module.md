@@ -138,3 +138,16 @@ npm --prefix web-ui run build
 3. 接入人工双标、争议仲裁与 Judge—人工一致性统计。
 4. 增加 baseline Pairwise、重复运行方差和 paired bootstrap 置信区间。
 5. PC 端流程确认后，再单独规划手机端适配。
+
+
+## 2026-11-06 双端布局与子路由
+
+评测拆为 `/evaluations` 总览、`/evaluations/datasets`、`/evaluations/experiments` 和 `/evaluations/metrics`。evaluation-navigation.js 统一解析，App 保留相同 EvaluationCenterPage 实例，组件只切换当前主任务；未知子路由回退总览，继续继承原管理员权限和原 API。现有 Nginx SPA fallback 可处理刷新，本轮未修改部署。
+
+手机证据链改竖排，概览、表单单列，版本／实验信息不再逐字压缩。295 项前端、47 项浏览器回归通过，含直接子路由、返回、普通用户拒绝和 PC 多尺寸。真实实验执行与业务指标数据尚未联调。详见 [适配记录](mobile_ui_adaptation.md)。
+
+### 压力审查修复：创建入口和真实表单
+
+总览触发 `openExperimentForm` 先通过 activeView → App 导航进入 `/evaluations/experiments`，然后打开实验表单，避免只修改不可见状态。mobile.css 将不存在的 `.evaluation-form-grid` 改为实际 `.evaluation-form`，分区按钮禁止压缩换行。
+
+浏览器验证总览创建的 URL 和表单可见性，并实际打开实验、数据集、版本、案例四类表单，检查单列与内部无横向溢出。原数据与实验 API、管理员权限不变；真实实验运行仍需服务联调。最终结果见 [修复记录](designs/2026-11-06-dual-ui-grill-fixes.md)。
