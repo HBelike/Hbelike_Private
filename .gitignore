@@ -26,3 +26,17 @@ src/test.py
 web-ui/pnpm-lock.yaml
 web-ui/pnpm-workspace.yaml
 web-ui/test-results/
+
+# 本机保留的历史浏览器扩展发行包；当前版本需显式提交。
+web-ui/public/downloads/find-job-boss-helper-v0.2.8.zip
+web-ui/public/downloads/find-job-boss-helper-v0.3.0.zip
+web-ui/public/downloads/find-job-boss-helper-v0.3.1.zip
+web-ui/public/downloads/find-job-boss-helper-v0.3.2.zip
+web-ui/public/downloads/find-job-boss-helper-v0.3.3.zip
+web-ui/public/downloads/find-job-boss-helper-v0.3.4.zip
+web-ui/public/downloads/find-job-boss-helper-v0.4.1.zip
+web-ui/public/downloads/find-job-boss-helper-v0.4.2.zip
+web-ui/public/downloads/find-job-boss-helper-v0.5.0.zip
+web-ui/public/downloads/find-job-boss-helper-v0.6.0.zip
+web-ui/public/downloads/find-job-boss-helper-v0.6.1.zip
+web-ui/public/downloads/find-job-boss-helper-v0.7.0.zip
