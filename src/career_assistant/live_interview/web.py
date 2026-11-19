@@ -17,7 +17,12 @@ from starlette.concurrency import iterate_in_threadpool
 from src.career_assistant.contracts import ModelCapability, ModelSelectionMode, ModelSelectionRequest
 from src.career_assistant.live_interview.answer_service import LIVE_ANSWER_OPTIONS, LiveAnswerService
 from src.career_assistant.live_interview.archive import LiveInterviewArchiveService
-from src.career_assistant.live_interview.audio_relay import AudioRelayError, LiveAudioRelay
+from src.career_assistant.live_interview.audio_relay import (
+    DEFAULT_AUDIO_BUFFER_SECONDS,
+    DEFAULT_AUDIO_SEND_TIMEOUT_SECONDS,
+    AudioRelayError,
+    LiveAudioRelay,
+)
 from src.career_assistant.live_interview.asr.dashscope_realtime import (
     DEFAULT_DASHSCOPE_ASR_MODEL,
     DEFAULT_DASHSCOPE_ASR_URL,
@@ -380,8 +385,9 @@ async def _run_live_transport(
     manager: LiveSessionManager,
     channels: tuple[AudioChannel, ...],
     *,
-    audio_send_timeout_seconds: float = 3.0,
-    max_audio_frames: int = 20,
+    audio_send_timeout_seconds: float = DEFAULT_AUDIO_SEND_TIMEOUT_SECONDS,
+    max_audio_frames: int | None = None,
+    max_buffered_audio_seconds: float = DEFAULT_AUDIO_BUFFER_SECONDS,
 ) -> None:
     """收包持续运行，音频按轨转发；监控全部后台任务，防止静默失效。"""
 
@@ -390,6 +396,7 @@ async def _run_live_transport(
         channels,
         send_timeout_seconds=audio_send_timeout_seconds,
         max_frames=max_audio_frames,
+        max_buffered_audio_seconds=max_buffered_audio_seconds,
     )
     sender = asyncio.create_task(_send_manager_events(websocket, manager), name="live-event-sender")
     relay_failure = asyncio.create_task(relay.wait_failed(), name="live-audio-monitor")

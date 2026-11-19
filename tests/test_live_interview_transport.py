@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import os
 import socket
 import time
 from contextlib import asynccontextmanager
+from functools import partial
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
@@ -45,9 +47,12 @@ class SlowAudioManager:
         self.closed = False
         self.block_seconds = block_seconds
         self.frames: list[int] = []
+        self.frames_by_channel = {channel: [] for channel in AudioChannel}
+        self.pcm_digest_by_channel = {channel: hashlib.sha256() for channel in AudioChannel}
         self.queue: asyncio.Queue[ServerEvent] = asyncio.Queue()
         self.started_audio = asyncio.Event()
         self.active_writes = 0
+        self.max_active_writes = 0
 
     async def start(self):
         await self.queue.put(ServerEvent("session.ready"))
@@ -55,11 +60,14 @@ class SlowAudioManager:
     async def handle(self, event):
         if isinstance(event, AudioAppendEvent):
             self.active_writes += 1
+            self.max_active_writes = max(self.max_active_writes, self.active_writes)
             try:
-                if not self.frames:
+                if not self.frames_by_channel[event.channel]:
                     self.started_audio.set()
                     await asyncio.sleep(self.block_seconds)
                 self.frames.append(event.sequence)
+                self.frames_by_channel[event.channel].append(event.sequence)
+                self.pcm_digest_by_channel[event.channel].update(event.pcm)
             finally:
                 self.active_writes -= 1
         elif event.type == "ping":
@@ -75,7 +83,7 @@ class SlowAudioManager:
 
 
 @asynccontextmanager
-async def local_transport_server(*, block_seconds: float = 0.0, baseline: bool = False):
+async def local_transport_server(*, block_seconds: float = 0.0, baseline: bool = False, candidate_audio_enabled: bool = False, transport_options: dict | None = None):
     app = FastAPI()
     managers: list[SlowAudioManager] = []
     records = {}
@@ -136,7 +144,7 @@ async def local_transport_server(*, block_seconds: float = 0.0, baseline: bool =
             id=session_id,
             organization_id=actor.organization_id,
             actor_id=actor.actor_id,
-            candidate_audio_enabled=False,
+            candidate_audio_enabled=candidate_audio_enabled,
         )
         return f"ws://127.0.0.1:{port}/api/career/live-interviews/{session_id}/stream"
 
@@ -144,6 +152,7 @@ async def local_transport_server(*, block_seconds: float = 0.0, baseline: bool =
         patch.object(live_web, "_resolve_websocket_actor", AsyncMock(return_value=actor)),
         patch.object(live_web, "_repository_for_websocket", return_value=repository),
         patch.object(live_web, "_build_live_manager", side_effect=build_manager),
+        patch.object(live_web, "_run_live_transport", partial(live_web._run_live_transport, **(transport_options or {}))),
     ):
         task = asyncio.create_task(server.serve(sockets=[listener]))
         try:
@@ -192,7 +201,7 @@ def test_short_asr_backpressure_recovers_without_losing_audio_or_heartbeat():
 
 def test_asr_audio_timeout_closes_with_structured_error_and_releases_writer():
     async def scenario():
-        async with local_transport_server(block_seconds=20) as (url, managers):
+        async with local_transport_server(block_seconds=20, transport_options={"audio_send_timeout_seconds": .3}) as (url, managers):
             async with connect(url(), ping_interval=None) as websocket:
                 await websocket.recv()
                 await websocket.send(json.dumps(audio_payload(0)))
@@ -258,7 +267,7 @@ def test_audio_relay_full_queue_fails_explicitly_instead_of_dropping_frames():
 
 def test_full_audio_queue_closes_real_connection_with_structured_error():
     async def scenario():
-        async with local_transport_server(block_seconds=20) as (url, managers):
+        async with local_transport_server(block_seconds=20, transport_options={"max_audio_frames": 20}) as (url, managers):
             async with connect(url(), ping_interval=None) as websocket:
                 await websocket.recv()
                 for index in range(30):
@@ -348,4 +357,155 @@ def test_real_transport_concurrent_soak():
                     "disconnects": 0,
                 }))
 
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("old_limits", [True, False], ids=["old_20_frames_fails", "default_preserves_five_seconds"])
+def test_five_second_dual_track_stall_with_extra_frame_preserves_audio_and_pings(old_limits):
+    async def scenario():
+        options = {"max_audio_frames": 20, "audio_send_timeout_seconds": 3} if old_limits else None
+        async with local_transport_server(block_seconds=5, candidate_audio_enabled=True, transport_options=options) as (url, managers):
+            async with connect(url(), ping_interval=None) as websocket:
+                assert json.loads(await websocket.recv())["type"] == "session.ready"
+                started = time.perf_counter()
+                pings = []
+                pongs_during_block = 0
+                failure = None
+                for sequence in range(70):
+                    # 第0、1帧立即到达，多出100ms突发；随后仍持续每100ms输入。
+                    await asyncio.sleep(max(0, started + max(0, sequence - 1) * .1 - time.perf_counter()))
+                    for channel in AudioChannel:
+                        payload = audio_payload(sequence)
+                        payload["channel"] = channel.value
+                        payload["pcm_base64"] = base64.b64encode(sequence.to_bytes(2, "little") * 2400).decode("ascii")
+                        await websocket.send(json.dumps(payload))
+                    if sequence % 2 == 1:
+                        ping_at = time.perf_counter()
+                        await websocket.send(json.dumps({"type": "ping"}))
+                        reply = json.loads(await asyncio.wait_for(websocket.recv(), .5))
+                        if reply["type"] == "error":
+                            failure = reply
+                            break
+                        assert reply["type"] == "pong"
+                        pings.append((time.perf_counter() - ping_at) * 1000)
+                        pongs_during_block += time.perf_counter() - started < 4.5
+                manager = managers[0]
+                if old_limits:
+                    assert failure and failure["code"] == "asr_audio_backpressure"
+                    assert time.perf_counter() - started < 3.5
+                    with pytest.raises(ConnectionClosed) as closed:
+                        await websocket.recv()
+                    assert closed.value.rcvd.code == 1013
+                else:
+                    assert failure is None
+                    async with asyncio.timeout(2):
+                        while any(len(manager.frames_by_channel[channel]) < 70 for channel in AudioChannel):
+                            await asyncio.sleep(.01)
+                    expected_hash = hashlib.sha256(b"".join(sequence.to_bytes(2, "little") * 2400 for sequence in range(70))).hexdigest()
+                    for channel in AudioChannel:
+                        assert manager.frames_by_channel[channel] == list(range(70))
+                        assert manager.pcm_digest_by_channel[channel].hexdigest() == expected_hash
+                    assert len(managers) == 1 and not manager.closed
+                    assert manager.max_active_writes == 2
+                    assert pongs_during_block >= 10
+                    await websocket.send(json.dumps({"type": "session.end"}))
+                print(json.dumps({"case": "old_limits" if old_limits else "pcm_budget", "upstream_stall_seconds": 5, "channels": 2, "received_frames": {channel.value: len(manager.frames_by_channel[channel]) for channel in AudioChannel}, "pongs": len(pings), "pong_p95_ms": round(sorted(pings)[max(0, int(len(pings) * .95) - 1)], 3), "explicit_failure": failure["code"] if failure else None, "same_connection": not old_limits}))
+            await asyncio.sleep(.05)
+            assert managers[0].closed and managers[0].active_writes == 0
+    asyncio.run(scenario())
+
+
+def test_pcm_budget_counts_inflight_bytes_instead_of_frame_count():
+    async def scenario():
+        entered = asyncio.Event()
+        async def blocked(event):
+            entered.set()
+            await asyncio.Event().wait()
+        relay = LiveAudioRelay(blocked, (AudioChannel.INTERVIEWER,), max_buffered_audio_seconds=1)
+        try:
+            relay.enqueue(AudioAppendEvent(AudioChannel.INTERVIEWER, 0, b"\0" * 38400))
+            await entered.wait()
+            relay.enqueue(AudioAppendEvent(AudioChannel.INTERVIEWER, 1, b"\0" * 9600))
+            with pytest.raises(AudioRelayError) as failure:
+                relay.enqueue(AudioAppendEvent(AudioChannel.INTERVIEWER, 2, b"\0\0"))
+            assert failure.value.code == "asr_audio_budget_exceeded"
+            assert failure.value.details["buffered_audio_bytes"] == 48000
+            assert failure.value.details["audio_budget_bytes"] == 48000
+        finally:
+            await relay.close()
+    asyncio.run(scenario())
+
+
+def test_small_pcm_frames_do_not_hit_arbitrary_twenty_frame_limit():
+    async def scenario():
+        received = []
+        async def consume(event):
+            received.append(event.sequence)
+        relay = LiveAudioRelay(consume, (AudioChannel.INTERVIEWER,))
+        try:
+            for sequence in range(100):
+                relay.enqueue(AudioAppendEvent(AudioChannel.INTERVIEWER, sequence, b"\0\0"))
+            await asyncio.wait_for(relay._queues[AudioChannel.INTERVIEWER].join(), 1)
+            assert received == list(range(100))
+        finally:
+            await relay.close()
+    asyncio.run(scenario())
+
+
+def test_empty_pcm_and_commit_events_cannot_bypass_finite_budget():
+    async def scenario():
+        async def blocked(event):
+            await asyncio.Event().wait()
+        relay = LiveAudioRelay(blocked, (AudioChannel.INTERVIEWER,))
+        try:
+            for sequence in range(100):
+                with pytest.raises(ValueError):
+                    relay.enqueue(AudioAppendEvent(AudioChannel.INTERVIEWER, sequence, b""))
+            assert relay.buffered_audio_bytes[AudioChannel.INTERVIEWER] == 0
+            with pytest.raises(AudioRelayError) as failure:
+                for _ in range(1000):
+                    relay.enqueue(AudioCommitEvent(AudioChannel.INTERVIEWER))
+            assert failure.value.code == "asr_control_budget_exceeded"
+            assert relay._queues[AudioChannel.INTERVIEWER].qsize() <= 64
+        finally:
+            await relay.close()
+    asyncio.run(scenario())
+
+
+def test_successful_writer_releases_budget_over_one_hour_equivalent_audio():
+    async def scenario():
+        delivered = 0
+        async def consume(event):
+            nonlocal delivered
+            delivered += len(event.pcm)
+        relay = LiveAudioRelay(consume, (AudioChannel.INTERVIEWER,), max_buffered_audio_seconds=2)
+        packet = b"\0" * 96000  # 每包2秒，1800包是一小时PCM；加速核对记账而非时长压测。
+        try:
+            for sequence in range(1800):
+                relay.enqueue(AudioAppendEvent(AudioChannel.INTERVIEWER, sequence, packet))
+                await asyncio.wait_for(relay._queues[AudioChannel.INTERVIEWER].join(), 1)
+                assert relay.buffered_audio_bytes[AudioChannel.INTERVIEWER] == 0
+            assert delivered == 3600 * 48000
+        finally:
+            await relay.close()
+    asyncio.run(scenario())
+
+
+def test_default_pcm_budget_exceeded_is_reported_as_exceeded_not_short_stall():
+    async def scenario():
+        async with local_transport_server(block_seconds=20) as (url, managers):
+            async with connect(url(), ping_interval=None) as websocket:
+                await websocket.recv()
+                for sequence in range(4):
+                    payload = audio_payload(sequence)
+                    payload["pcm_base64"] = base64.b64encode(b"\0" * 96000).decode("ascii")
+                    await websocket.send(json.dumps(payload))
+                error = json.loads(await asyncio.wait_for(websocket.recv(), 1))
+                assert error["code"] == "asr_audio_budget_exceeded"
+                assert "6 秒缓冲预算" in error["message"]
+                with pytest.raises(ConnectionClosed) as closed:
+                    await websocket.recv()
+                assert closed.value.rcvd.code == 1013
+            await asyncio.sleep(.05)
+            assert managers[0].closed and managers[0].active_writes == 0
     asyncio.run(scenario())
