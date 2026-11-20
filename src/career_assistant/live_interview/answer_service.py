@@ -24,9 +24,16 @@ def build_answer_prompt(
 ) -> str:
     follow_up_context = ""
     context_rule = "2. 只根据下方“面试官问题”作答，不使用简历、岗位、面经或历史对话。"
-    if intent is QuestionIntent.FOLLOW_UP and context.recent_conversation:
+    if intent is QuestionIntent.FOLLOW_UP:
         recent = "\n".join(context.recent_conversation[-4:])
         follow_up_context = f"\n仅用于理解追问指代的最近对话：\n{recent}\n"
+        if context.previous_question and context.previous_question not in recent:
+            follow_up_context += f"上一道面试题：{context.previous_question}\n"
+        if context.reference_answer:
+            follow_up_context += (
+                "上一题的模型参考建议（仅用于理解指代，不能当作候选人说过的话或经历）：\n"
+                f"{context.reference_answer}\n如果候选人的实际答复与建议不同，以候选人的发言为准。\n"
+            )
         context_rule = (
             "2. 以当前面试官问题为核心；最近对话只用于理解“它、刚才、那个方案”等指代，"
             "不得把其中内容扩写成个人事实。"
@@ -57,9 +64,15 @@ class LiveAnswerService:
         context: LiveAnswerContext,
     ) -> AsyncIterator[str]:
         prompt = build_answer_prompt(question, intent, context)
-        async for chunk in self._prompt_streamer(prompt):
-            if chunk:
-                yield chunk
+        upstream = self._prompt_streamer(prompt)
+        try:
+            async for chunk in upstream:
+                if chunk:
+                    yield chunk
+        finally:
+            close = getattr(upstream, "aclose", None)
+            if close is not None:
+                await close()
 
 
 __all__ = ["LiveAnswerContext", "LiveAnswerService", "build_answer_prompt"]

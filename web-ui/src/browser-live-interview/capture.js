@@ -1,4 +1,4 @@
-import { PcmFrameAccumulator, resampleToPcm16, TARGET_SAMPLE_RATE } from './pcm-framer.js'
+import { PcmFrameAccumulator, StreamingPcmResampler } from './pcm-framer.js'
 
 const PROCESSOR_NAME = 'interview-pcm-processor'
 
@@ -47,9 +47,10 @@ export class BrowserAudioCapture {
     this.onFrame = null
     this.onEnded = null
     this.stopping = false
+    this.generation = 0
   }
 
-  async start({ candidateEnabled = false, onFrame, onEnded }) {
+  async start({ candidateEnabled = false, nextSequences = {}, onFrame, onEnded }) {
     // getDisplayMedia 必须直接发生在点击事件的瞬时用户授权中，不能先等待异步清理。
     const displayRequest = this.mediaDevices.getDisplayMedia({
       video: { displaySurface: 'monitor' },
@@ -60,15 +61,21 @@ export class BrowserAudioCapture {
       monitorTypeSurfaces: 'include',
       systemAudio: 'include'
     })
-    await this.stop()
+    const cleanup = this.stop()
+    const generation = this.generation
+    await cleanup
+    const displayStream = await displayRequest
+    if (generation !== this.generation) {
+      this._stopStream(displayStream)
+      throw new Error('声音采集已取消')
+    }
     this.stopping = false
     this.onFrame = onFrame
     this.onEnded = onEnded
-    this.sequences = { interviewer: 0, candidate: 0 }
+    this.sequences = { interviewer: 0, candidate: 0, ...nextSequences }
     this.framers.interviewer.clear()
     this.framers.candidate.clear()
 
-    const displayStream = await displayRequest
     this.streams.push(displayStream)
     for (const videoTrack of displayStream.getVideoTracks()) this._stopTrack(videoTrack)
     const interviewerTrack = displayStream.getAudioTracks()[0]
@@ -76,7 +83,7 @@ export class BrowserAudioCapture {
       this._stopStream(displayStream)
       throw new Error('没有检测到共享电脑声音。请在浏览器授权窗口选择带声音的共享来源，并在可用时开启音频共享；如果浏览器没有提供音频选项，请改用 Chrome 或 Edge。')
     }
-    await this._connectTrack(interviewerTrack, 'interviewer')
+    await this._connectTrack(interviewerTrack, 'interviewer', generation)
 
     let activeCandidate = false
     let warning = ''
@@ -86,12 +93,17 @@ export class BrowserAudioCapture {
           audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
           video: false
         })
+        if (generation !== this.generation) {
+          this._stopStream(microphoneStream)
+          throw new Error('声音采集已取消')
+        }
         this.streams.push(microphoneStream)
         const candidateTrack = microphoneStream.getAudioTracks()[0]
         if (!candidateTrack) throw new Error('麦克风没有返回音频轨道')
-        await this._connectTrack(candidateTrack, 'candidate')
+        await this._connectTrack(candidateTrack, 'candidate', generation)
         activeCandidate = true
       } catch {
+        if (generation !== this.generation) throw new Error('声音采集已取消')
         warning = '麦克风不可用，已降级为仅理解面试官问题'
       }
     }
@@ -100,14 +112,17 @@ export class BrowserAudioCapture {
 
   async _ensureContext() {
     if (this.context) return this.context
-    this.context = new this.AudioContextImpl({ latencyHint: 'interactive' })
-    await this.context.audioWorklet.addModule(this.processorUrl)
-    if (this.context.state === 'suspended') await this.context.resume()
-    return this.context
+    const context = new this.AudioContextImpl({ latencyHint: 'interactive' })
+    this.context = context
+    await context.audioWorklet.addModule(this.processorUrl)
+    if (context.state === 'suspended') await context.resume()
+    return context
   }
 
-  async _connectTrack(track, channel) {
+  async _connectTrack(track, channel, generation) {
     const context = await this._ensureContext()
+    if (generation !== this.generation) throw new Error('声音采集已取消')
+    const resampler = new StreamingPcmResampler(context.sampleRate)
     const stream = new MediaStream([track])
     const source = context.createMediaStreamSource(stream)
     const node = new AudioWorkletNode(context, PROCESSOR_NAME)
@@ -118,29 +133,50 @@ export class BrowserAudioCapture {
     gain.connect(context.destination)
     node.port.onmessage = ({ data }) => {
       if (this.stopping || !data?.samples) return
-      const pcm = resampleToPcm16(new Float32Array(data.samples), context.sampleRate, TARGET_SAMPLE_RATE)
+      const pcm = resampler.append(new Float32Array(data.samples))
       if (!pcm.length) return
       for (const frame of this.framers[channel].append(pcm)) {
-        const sequence = this.sequences[channel]
-        this.sequences[channel] += 1
-        this.onFrame?.({ channel, sequence, pcm: frame })
+        this._emitFrame(channel, frame)
       }
     }
     const ended = () => {
-      if (!this.stopping) this.onEnded?.({ channel, reason: 'track_ended' })
+      if (this.stopping) return
+      this._emitFrame(channel, this.framers[channel].flush())
+      this.stopChannel(channel)
+      this.onEnded?.({ channel, reason: 'track_ended' })
     }
     track.addEventListener('ended', ended, { once: true })
-    this.resources.push({ track, ended, source, node, gain })
+    this.resources.push({ channel, track, ended, source, node, gain })
+  }
+
+  _emitFrame(channel, pcm) {
+    if (!pcm.length) return
+    this.onFrame?.({ channel, sequence: this.sequences[channel]++, pcm })
+  }
+
+  stopChannel(channel) {
+    const index = this.resources.findIndex(resource => resource.channel === channel)
+    if (index < 0) return
+    const [resource] = this.resources.splice(index, 1)
+    this._disconnect(resource)
+    this._stopTrack(resource.track)
+    this.framers[channel].clear()
+  }
+
+  _disconnect(resource) {
+    resource.track.removeEventListener?.('ended', resource.ended)
+    resource.source.disconnect?.()
+    resource.node.disconnect?.()
+    resource.gain.disconnect?.()
+    resource.node.port.onmessage = null
   }
 
   async stop() {
+    this.generation += 1
     this.stopping = true
-    for (const resource of this.resources.splice(0)) {
-      resource.track.removeEventListener?.('ended', resource.ended)
-      resource.source.disconnect?.()
-      resource.node.disconnect?.()
-      resource.gain.disconnect?.()
-      resource.node.port.onmessage = null
+    for (const resource of this.resources.splice(0)) this._disconnect(resource)
+    for (const [channel, framer] of Object.entries(this.framers)) {
+      this._emitFrame(channel, framer.flush())
     }
     for (const stream of this.streams.splice(0)) this._stopStream(stream)
     const context = this.context

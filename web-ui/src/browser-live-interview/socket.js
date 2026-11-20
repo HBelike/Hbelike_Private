@@ -2,6 +2,8 @@ import { pcm16ToBase64 } from './pcm-framer.js'
 
 const MAX_BUFFERED_BYTES = 256_000
 const DEFAULT_READY_TIMEOUT_MS = 15_000
+const HEARTBEAT_INTERVAL_MS = 20_000
+const HEARTBEAT_TIMEOUT_MS = 45_000
 
 export class LiveInterviewConnectionError extends Error {
   constructor(message, { code = 0, reason = '', wasReady = false } = {}) {
@@ -24,18 +26,26 @@ export class LiveInterviewSocket {
     onEvent,
     onStateChange,
     location = window.location,
-    WebSocketImpl = window.WebSocket
+    WebSocketImpl = window.WebSocket,
+    timers = globalThis,
+    now = () => globalThis.performance?.now?.() ?? Date.now()
   }) {
     this.sessionId = sessionId
     this.onEvent = onEvent
     this.onStateChange = onStateChange
     this.location = location
     this.WebSocketImpl = WebSocketImpl
+    this.timers = timers
+    this.now = now
     this.socket = null
     this.ready = false
     this.heartbeat = null
     this.pendingReady = null
+    this.pendingEnd = null
+    this.backpressured = false
     this.lastServerError = ''
+    this.awaitingPongAt = null
+    this.lastHeartbeatTick = null
   }
 
   connect({ readyTimeoutMs = DEFAULT_READY_TIMEOUT_MS } = {}) {
@@ -46,7 +56,7 @@ export class LiveInterviewSocket {
     const socket = new this.WebSocketImpl(buildLiveInterviewWebSocketUrl(this.sessionId, this.location))
     this.socket = socket
     const readyPromise = new Promise((resolve, reject) => {
-      const timeout = globalThis.setTimeout(() => {
+      const timeout = this.timers.setTimeout(() => {
         if (this.socket !== socket || this.ready) return
         const error = new LiveInterviewConnectionError(
           '实时服务连接超时，尚未完成语音识别准备。',
@@ -82,7 +92,12 @@ export class LiveInterviewSocket {
         this.onStateChange?.('ready')
       }
       if (event.type === 'error' && event.message) this.lastServerError = String(event.message)
+      if (event.type === 'pong') this.awaitingPongAt = null
       this.onEvent?.(event)
+      if (event.type === 'session.ended') this.pendingEnd?.finish(true)
+      if (event.type === 'error' && event.fatal === true && this.socket === socket) {
+        socket.close(4010, '语音连接已中断')
+      }
     }
     socket.onerror = () => {
       if (this.socket !== socket) return
@@ -96,6 +111,8 @@ export class LiveInterviewSocket {
       this.socket = null
       this.ready = false
       this._stopHeartbeat()
+      // 传输正常关闭也可能早于尾句落库，只有 session.ended 确认收尾。
+      this.pendingEnd?.finish(false)
       const detail = { code, reason, wasReady }
       if (!wasReady) {
         const suffix = reason ? `：${reason}` : code ? `（关闭代码 ${code}）` : ''
@@ -120,15 +137,21 @@ export class LiveInterviewSocket {
     const socket = this.socket
     if (!this.ready || !socket || socket.readyState !== this.WebSocketImpl.OPEN) return false
     if (socket.bufferedAmount > MAX_BUFFERED_BYTES) {
-      this.onStateChange?.('backpressure')
+      if (!this.backpressured) this.onStateChange?.('backpressure')
+      this.backpressured = true
       return false
     }
-    return this.send({
+    const sent = this.send({
       type: 'audio.append',
       channel,
       sequence,
       pcm_base64: pcm16ToBase64(pcm)
     })
+    if (sent && this.backpressured) {
+      this.backpressured = false
+      this.onStateChange?.('ready')
+    }
+    return sent
   }
 
   requestAnswer(mode = 'manual', question = null) {
@@ -139,13 +162,33 @@ export class LiveInterviewSocket {
     return this.send({ type: 'audio.commit', channel })
   }
 
-  end() {
-    this.send({ type: 'session.end' })
-    this.close()
+  end({ timeoutMs = 18_000, pause = false } = {}) {
+    if (this.pendingEnd) return this.pendingEnd.promise
+    if (!this.ready) {
+      this.close()
+      return Promise.resolve(false)
+    }
+    let settle
+    const promise = new Promise(resolve => { settle = resolve })
+    const timer = this.timers.setTimeout(() => {
+      finish(false)
+      this.close()
+    }, timeoutMs)
+    const finish = (complete) => {
+      if (this.pendingEnd?.promise !== promise) return
+      this.timers.clearTimeout(timer)
+      this.pendingEnd = null
+      settle(complete)
+    }
+    this.pendingEnd = { promise, finish }
+    if (!this.send({ type: pause ? 'session.pause' : 'session.end' })) finish(false)
+    return promise
   }
 
   close() {
     this.ready = false
+    this.backpressured = false
+    this.pendingEnd?.finish(false)
     this._stopHeartbeat()
     const socket = this.socket
     this.socket = null
@@ -158,7 +201,7 @@ export class LiveInterviewSocket {
   _resolvePendingReady(event) {
     const pending = this.pendingReady
     if (!pending || pending.socket !== this.socket) return
-    globalThis.clearTimeout(pending.timeout)
+    this.timers.clearTimeout(pending.timeout)
     this.pendingReady = null
     pending.resolve(event)
   }
@@ -166,20 +209,35 @@ export class LiveInterviewSocket {
   _rejectPendingReady(error) {
     const pending = this.pendingReady
     if (!pending) return
-    globalThis.clearTimeout(pending.timeout)
+    this.timers.clearTimeout(pending.timeout)
     this.pendingReady = null
     pending.reject(error)
   }
 
   _startHeartbeat() {
     this._stopHeartbeat()
-    this.heartbeat = globalThis.setInterval(() => this.send({ type: 'ping' }), 20_000)
+    this.lastHeartbeatTick = this.now()
+    this.heartbeat = this.timers.setInterval(() => {
+      const now = this.now()
+      // 后台标签页恢复时，旧计时器可能迟到；先重新探测，给本次 Pong 完整响应窗口。
+      if (this.lastHeartbeatTick !== null && now - this.lastHeartbeatTick > HEARTBEAT_INTERVAL_MS * 2) {
+        this.awaitingPongAt = null
+      }
+      this.lastHeartbeatTick = now
+      if (this.awaitingPongAt !== null && now - this.awaitingPongAt >= HEARTBEAT_TIMEOUT_MS) {
+        this.socket?.close(4001, 'heartbeat_timeout')
+        return
+      }
+      if (this.awaitingPongAt === null && this.send({ type: 'ping' })) this.awaitingPongAt = now
+    }, HEARTBEAT_INTERVAL_MS)
   }
 
   _stopHeartbeat() {
-    if (this.heartbeat) globalThis.clearInterval(this.heartbeat)
+    if (this.heartbeat) this.timers.clearInterval(this.heartbeat)
     this.heartbeat = null
+    this.awaitingPongAt = null
+    this.lastHeartbeatTick = null
   }
 }
 
-export { DEFAULT_READY_TIMEOUT_MS, MAX_BUFFERED_BYTES }
+export { DEFAULT_READY_TIMEOUT_MS, MAX_BUFFERED_BYTES, HEARTBEAT_INTERVAL_MS, HEARTBEAT_TIMEOUT_MS }

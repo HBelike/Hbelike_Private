@@ -12,6 +12,8 @@ class LiveAnswerContext:
     recent_conversation: tuple[str, ...] = ()
     interview_evidence: tuple[str, ...] = ()
     terminology: tuple[str, ...] = ()
+    previous_question: str = ""
+    reference_answer: str = ""
 
 
 class LiveContextBuilder:

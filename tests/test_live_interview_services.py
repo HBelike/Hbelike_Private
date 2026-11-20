@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from uuid import uuid4
+
+import pytest
 
 from src.career_assistant.live_interview.answer_service import (
     LIVE_ANSWER_OPTIONS,
@@ -16,10 +19,15 @@ from src.career_assistant.live_interview.contracts import (
     AudioChannel,
     AudioCommitEvent,
     QuestionIntent,
+    SessionEndEvent,
     TranscriptEvent,
 )
 from src.career_assistant.live_interview.session_manager import LiveSessionManager
-from src.career_assistant.live_interview.persistence import LiveInterviewRepository
+from src.career_assistant.live_interview.persistence import (
+    LiveInterviewQueuedAnswerState,
+    LiveInterviewRepository,
+    LiveInterviewResumeState,
+)
 
 
 def test_prompt_requires_chinese_and_forbids_personal_fabrication() -> None:
@@ -164,8 +172,10 @@ async def _assert_session_manager_detects_question_and_streams_answer() -> None:
     await manager.handle(AudioCommitEvent(AudioChannel.INTERVIEWER))
 
     event_types: list[str] = []
-    for _ in range(6):
+    for _ in range(12):
         event = await asyncio.wait_for(manager.next_event(), timeout=1)
+        if event.type == "answer.queue":
+            continue
         event_types.append(event.type)
         if event.type == "answer.completed":
             break
@@ -286,7 +296,7 @@ async def _assert_session_manager_answers_rapid_finals_in_fifo_order() -> None:
 
     async def answer(prompt: str):
         prompts.append(prompt)
-        if "分析一下日股。" in prompt:
+        if "面试官问题：分析一下日股。" in prompt:
             await first_release.wait()
             yield "日股回答"
             return
@@ -343,9 +353,9 @@ async def _assert_session_manager_continues_queue_after_answer_failure() -> None
     )
     await manager.start()
     await _wait_for_type(manager, "session.ready")
-    await interviewer.emit(TranscriptEvent(AudioChannel.INTERVIEWER, 1, "第一题。", True))
+    await interviewer.emit(TranscriptEvent(AudioChannel.INTERVIEWER, 1, "第一题如何求解？", True))
     await _wait_for_type(manager, "answer.started")
-    await interviewer.emit(TranscriptEvent(AudioChannel.INTERVIEWER, 2, "第二题。", True))
+    await interviewer.emit(TranscriptEvent(AudioChannel.INTERVIEWER, 2, "第二题如何求解？", True))
     await _wait_for_type(manager, "transcript.final")
     first_release.set()
 
@@ -452,3 +462,247 @@ async def _wait_for_type(manager: LiveSessionManager, expected: str):
         event = await asyncio.wait_for(manager.next_event(), timeout=1)
         if event.type == expected:
             return event
+
+
+def test_background_is_grouped_with_request_and_pronoun_refers_to_previous_question():
+    async def scenario():
+        asr = ScriptedAsrSession()
+        prompts = []
+
+        async def answer(prompt):
+            prompts.append(prompt)
+            yield "示例建议：用业务唯一键和事务。"
+
+        manager = LiveSessionManager(asr_sessions={AudioChannel.INTERVIEWER: asr},
+                                     answer_service=LiveAnswerService(answer))
+        await manager.start()
+        for seq, line in enumerate(("我们有两个消息队列。", "同一条消息可能重复到达。", "如何保证消息处理幂等？"), 1):
+            await asr.emit(TranscriptEvent(AudioChannel.INTERVIEWER, seq, line, True))
+        detected = await _wait_for_type(manager, "question.detected")
+        assert detected.payload["source_sequence"] == 3
+        assert detected.payload["question"] == "我们有两个消息队列。\n同一条消息可能重复到达。\n如何保证消息处理幂等？"
+        await _wait_for_type(manager, "answer.completed")
+        await asr.emit(TranscriptEvent(AudioChannel.INTERVIEWER, 4, "它有什么缺点？", True))
+        await _wait_for_type(manager, "answer.completed")
+        assert len(prompts) == 2
+        assert "问题类型：follow_up" in prompts[1]
+        assert "如何保证消息处理幂等" in prompts[1]
+        assert "用业务唯一键和事务" in prompts[1] and "不能当作候选人说过的话" in prompts[1]
+        await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_spoken_follow_up_keeps_previous_topic_and_suggestion_on_manual_request():
+    async def scenario():
+        asr = ScriptedAsrSession()
+        prompts = []
+
+        async def answer(prompt):
+            prompts.append(prompt)
+            yield "本题示例：使用令牌桶。" if len(prompts) == 1 else "评估突发流量。"
+
+        manager = LiveSessionManager(asr_sessions={AudioChannel.INTERVIEWER: asr},
+                                     answer_service=LiveAnswerService(answer))
+        await manager.start()
+        await asr.emit(TranscriptEvent(AudioChannel.INTERVIEWER, 1, "请解释限流", True))
+        await _wait_for_type(manager, "answer.completed")
+        await asr.emit(TranscriptEvent(AudioChannel.INTERVIEWER, 2, "缺点呢", True))
+        await _wait_for_type(manager, "answer.completed")
+        await manager.handle(AnswerRequestEvent("manual"))
+        await _wait_for_type(manager, "answer.completed")
+        assert len(prompts) == 3
+        for prompt in prompts[1:]:
+            assert "问题类型：follow_up" in prompt and "请解释限流" in prompt
+            assert "本题示例：使用令牌桶。" in prompt and prompt.count("缺点呢") == 1
+        await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_first_follow_up_after_resume_refers_to_last_queued_question():
+    async def scenario():
+        asr = ScriptedAsrSession()
+        prompts = []
+        first, second = "请介绍限流", "解释一致性哈希"
+        resume = LiveInterviewResumeState(
+            last_question=first, last_question_version=1, max_question_version=2,
+            last_answer_attempt=1, previous_answer=(first, "令牌桶"),
+            pending_answers=(LiveInterviewQueuedAnswerState(
+                question_version=2, attempt=1, question=second, intent=QuestionIntent.KNOWLEDGE,
+                recent_conversation=(), queued_at=datetime.now(UTC), previous_question=first,
+            ),),
+        )
+
+        async def answer(prompt):
+            prompts.append(prompt)
+            yield "虚拟节点"
+
+        manager = LiveSessionManager(asr_sessions={AudioChannel.INTERVIEWER: asr},
+                                     answer_service=LiveAnswerService(answer), resume_state=resume)
+        await manager.start()
+        await _wait_for_type(manager, "answer.completed")
+        await asr.emit(TranscriptEvent(AudioChannel.INTERVIEWER, 1, "缺点呢", True))
+        await _wait_for_type(manager, "answer.completed")
+        assert second in prompts[-1] and "虚拟节点" in prompts[-1]
+        assert first not in prompts[-1]
+        await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_failed_final_save_is_visible_and_next_final_still_gets_an_answer():
+    async def scenario():
+        asr = ScriptedAsrSession()
+        saved = []
+        calls = []
+
+        async def save(event):
+            if event.sequence == 1:
+                raise RuntimeError("数据库暂不可用")
+            saved.append(event.sequence)
+
+        async def answer(prompt):
+            calls.append(prompt)
+            yield "参考答案"
+
+        manager = LiveSessionManager(asr_sessions={AudioChannel.INTERVIEWER: asr},
+                                     answer_service=LiveAnswerService(answer), transcript_hook=save)
+        await manager.start()
+        first = TranscriptEvent(AudioChannel.INTERVIEWER, 1, "解释分区。", True, provider="dashscope")
+        await asr.emit(first)
+        error = await _wait_for_type(manager, "error")
+        assert error.payload["code"] == "transcript_save_failed" and not error.payload["fatal"]
+        await _wait_for_type(manager, "answer.completed")
+        await asr.emit(first)
+        await asr.emit(TranscriptEvent(AudioChannel.INTERVIEWER, 2, "如何分配副本？", True, provider="dashscope"))
+        await _wait_for_type(manager, "answer.completed")
+        assert saved == [2] and len(calls) == 2 and not manager.closed
+        await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_ending_reads_provider_tail_before_terminal_event_and_preserves_question_for_archive():
+    async def scenario():
+        saved, phases = [], []
+
+        class TailAsr(ScriptedAsrSession):
+            async def finish(self):
+                await self.emit(TranscriptEvent(AudioChannel.INTERVIEWER, 1, "最后如何恢复？", True))
+                await self.queue.put(None)
+
+        async def answer(prompt):
+            yield "完成"
+
+        async def store(event):
+            saved.append(event.text)
+
+        async def store_queue(job, phase):
+            phases.append((job.question, phase))
+
+        manager = LiveSessionManager(asr_sessions={AudioChannel.INTERVIEWER: TailAsr()},
+                                     answer_service=LiveAnswerService(answer), transcript_hook=store, queue_hook=store_queue)
+        await manager.start()
+        await manager.handle(SessionEndEvent())
+        assert saved == ["最后如何恢复？"]
+        assert phases == [("最后如何恢复？", "queued"), ("最后如何恢复？", "cancelled")]
+        events = []
+        while not manager._outgoing.empty():
+            events.append((await manager.next_event()).type)
+        assert "transcript.final" in events and "error" not in events
+        assert events[-1] == "session.ended"
+
+    asyncio.run(scenario())
+
+
+def test_optional_track_failure_keeps_interviewer_running():
+    async def scenario():
+        interviewer, candidate = ScriptedAsrSession(), ScriptedAsrSession()
+
+        async def answer(prompt):
+            yield "完成"
+
+        manager = LiveSessionManager(asr_sessions={AudioChannel.INTERVIEWER: interviewer,
+                                                   AudioChannel.CANDIDATE: candidate},
+                                     answer_service=LiveAnswerService(answer))
+        await manager.start()
+        await candidate.queue.put(None)
+        ended = await _wait_for_type(manager, "channel.ended")
+        assert ended.payload["channel"] == "candidate"
+        await interviewer.emit(TranscriptEvent(AudioChannel.INTERVIEWER, 1, "如何恢复？", True))
+        await _wait_for_type(manager, "answer.completed")
+        assert candidate.closed and not manager.closed
+        await manager.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("has_partial", [False, True])
+def test_disconnect_retries_only_first_attempt_without_partial_and_keeps_waiting_question(has_partial):
+    async def scenario():
+        asr = ScriptedAsrSession()
+        records, transitions = [], []
+
+        async def store_queue(record, phase):
+            if phase == "queued":
+                records.append((record.question_version, record.attempt, record.queue_order))
+
+        async def store_answer(version, attempt, question, intent, status, text):
+            transitions.append((version, attempt, status, text))
+
+        async def slow_answer(prompt):
+            if has_partial:
+                yield "开头"
+            await asyncio.Event().wait()
+
+        manager = LiveSessionManager(asr_sessions={AudioChannel.INTERVIEWER: asr},
+                                     answer_service=LiveAnswerService(slow_answer),
+                                     answer_hook=store_answer, queue_hook=store_queue)
+        await manager.start()
+        await asr.emit(TranscriptEvent(AudioChannel.INTERVIEWER, 1, "什么是锁？", True))
+        await _wait_for_type(manager, "answer.delta" if has_partial else "answer.started")
+        await asr.emit(TranscriptEvent(AudioChannel.INTERVIEWER, 2, "为什么需要加锁？", True))
+        while True:
+            change = await _wait_for_type(manager, "answer.queue")
+            if change.payload["pending_count"] == 1:
+                break
+        await manager.close("disconnect")
+        expected = [(1, 1), (2, 1)]
+        if not has_partial:
+            expected.append((1, 2))
+            assert records[-1][2] < records[1][2]
+        assert [(version, attempt) for version, attempt, _ in records] == expected
+        assert (1, 1, "cancelled", "开头" if has_partial else "") in transitions
+
+    asyncio.run(scenario())
+
+
+def test_answer_backlog_is_bounded_with_explicit_skipped_question():
+    from src.career_assistant.live_interview.session_manager import MAX_PENDING_ANSWERS
+
+    async def scenario():
+        asr = ScriptedAsrSession()
+        phases = []
+
+        async def store_queue(record, phase):
+            phases.append((record.question, phase))
+
+        async def slow_answer(prompt):
+            yield "开头"
+            await asyncio.Event().wait()
+
+        manager = LiveSessionManager(asr_sessions={AudioChannel.INTERVIEWER: asr},
+                                     answer_service=LiveAnswerService(slow_answer), queue_hook=store_queue)
+        await manager.start()
+        await asr.emit(TranscriptEvent(AudioChannel.INTERVIEWER, 0, "如何处理第 0 条？", True))
+        await _wait_for_type(manager, "answer.started")
+        for seq in range(1, MAX_PENDING_ANSWERS + 2):
+            await asr.emit(TranscriptEvent(AudioChannel.INTERVIEWER, seq, f"如何处理第 {seq} 条？", True))
+        warning = await _wait_for_type(manager, "error")
+        assert warning.payload["code"] == "answer_queue_full"
+        assert ("如何处理第 1 条？", "cancelled") in phases
+        assert len(manager._answer_queue) <= MAX_PENDING_ANSWERS
+        await manager.close()
+
+    asyncio.run(scenario())

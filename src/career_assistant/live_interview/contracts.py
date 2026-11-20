@@ -108,6 +108,12 @@ class AudioCommitEvent:
 
 
 @dataclass(frozen=True)
+class AudioChannelEndEvent:
+    channel: AudioChannel
+    type: str = "audio.channel_end"
+
+
+@dataclass(frozen=True)
 class AnswerRequestEvent:
     mode: str
     question: str | None = None
@@ -125,6 +131,11 @@ class SessionEndEvent:
 
 
 @dataclass(frozen=True)
+class SessionPauseEvent:
+    type: str = "session.pause"
+
+
+@dataclass(frozen=True)
 class PingEvent:
     type: str = "ping"
 
@@ -133,9 +144,11 @@ ClientEvent: TypeAlias = (
     SessionStartEvent
     | AudioAppendEvent
     | AudioCommitEvent
+    | AudioChannelEndEvent
     | AnswerRequestEvent
     | AnswerCancelEvent
     | SessionEndEvent
+    | SessionPauseEvent
     | PingEvent
 )
 
@@ -175,6 +188,10 @@ def parse_client_event(payload: dict[str, object]) -> ClientEvent:
             return AudioCommitEvent(channel=AudioChannel(str(payload["channel"])))
         except (KeyError, ValueError) as exc:
             raise ValueError("audio.commit 的 channel 无效") from exc
+    if event_type == "audio.channel_end":
+        if payload.get("channel") != AudioChannel.CANDIDATE.value:
+            raise ValueError("只允许单独结束候选人音轨")
+        return AudioChannelEndEvent(AudioChannel.CANDIDATE)
     if event_type == "answer.request":
         mode = str(payload.get("mode", "manual"))
         if mode not in {"manual", "regenerate"}:
@@ -188,6 +205,8 @@ def parse_client_event(payload: dict[str, object]) -> ClientEvent:
         return AnswerCancelEvent()
     if event_type == "session.end":
         return SessionEndEvent()
+    if event_type == "session.pause":
+        return SessionPauseEvent()
     if event_type == "ping":
         return PingEvent()
     raise ValueError(f"不支持的客户端事件：{event_type or '<empty>'}")

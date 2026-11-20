@@ -41,9 +41,23 @@ class FakeRepository:
         return None
 
     def activate(self, organization_id, actor_id, session_id):
+        if self.record.status not in (LiveInterviewStatus.PREPARING, LiveInterviewStatus.FAILED):
+            return False
+        self.record = replace(self.record, status=LiveInterviewStatus.ACTIVE)
+        return True
+
+    def pause(self, organization_id, actor_id, session_id):
+        self.record = replace(self.record, status=LiveInterviewStatus.PREPARING)
+        return True
+
+    def finish_inactive(self, organization_id, actor_id, session_id):
+        if self.get_session(organization_id, actor_id, session_id) is None or self.record.status is LiveInterviewStatus.ACTIVE:
+            return False
+        self.record = replace(self.record, status=LiveInterviewStatus.COMPLETED)
         return True
 
     def end(self, organization_id, actor_id, session_id, *, failed=False):
+        self.record = replace(self.record, status=LiveInterviewStatus.FAILED if failed else LiveInterviewStatus.COMPLETED)
         return True
 
 
@@ -58,8 +72,12 @@ class FakeManager:
     async def handle(self, event):
         if event.type == "ping":
             await self.queue.put(ServerEvent("pong"))
-        if event.type == "session.end":
+        if event.type in ("session.end", "session.pause"):
             self.closed = True
+            await self.queue.put(ServerEvent("session.ended"))
+
+    async def disable_channel(self, channel, message):
+        await self.queue.put(ServerEvent("channel.ended", {"channel": channel.value, "message": message}))
 
     async def next_event(self):
         return await self.queue.get()
@@ -449,6 +467,84 @@ def test_websocket_accepts_ping_and_ends_cleanly_in_local_auth_mode() -> None:
             assert ws.receive_json()["type"] == "pong"
             ws.send_json({"type": "session.end"})
 
+    assert manager.closed
+
+
+def test_busy_connection_returns_retryable_code_and_does_not_end_other_owner() -> None:
+    record = replace(_record(), status=LiveInterviewStatus.ACTIVE)
+    repository = FakeRepository(record)
+    repository.activate = lambda *args: False
+    repository.end = lambda *args, **kwargs: pytest.fail("未获得会话的连接不得写入结束状态")
+    app = FastAPI()
+    app.include_router(live_web.router)
+    with patch.object(live_web, "_repository_for_websocket", return_value=repository), TestClient(app) as client:
+        with client.websocket_connect(f"/api/career/live-interviews/{record.id}/stream") as ws:
+            with pytest.raises(WebSocketDisconnect) as error:
+                ws.receive_json()
+            assert error.value.code == 4409
+        assert not app.state.live_interview_connections
+
+
+def test_completed_session_cannot_reopen_or_allocate_a_provider() -> None:
+    record = replace(_record(), status=LiveInterviewStatus.COMPLETED)
+    app = FastAPI()
+    app.include_router(live_web.router)
+    with (
+        patch.object(live_web, "_repository_for_websocket", return_value=FakeRepository(record)),
+        patch.object(live_web, "_build_live_manager", side_effect=AssertionError("已结束的会话不应启动 ASR")),
+        TestClient(app) as client,
+    ):
+        with client.websocket_connect(f"/api/career/live-interviews/{record.id}/stream") as ws:
+            with pytest.raises(WebSocketDisconnect) as error:
+                ws.receive_json()
+            assert error.value.code == 4410
+
+
+def test_pause_keeps_same_session_and_offline_end_needs_no_provider():
+    record = _record()
+    repository = FakeRepository(record)
+    app = FastAPI()
+    app.include_router(live_web.router)
+    path = f"/api/career/live-interviews/sessions/{record.id}/end"
+    with (
+        patch.object(live_web, "_repository_for_websocket", return_value=repository),
+        patch.object(live_web, "get_live_repository", return_value=repository),
+        patch.object(live_web, "_build_live_manager", new=AsyncMock(side_effect=[FakeManager(), FakeManager()])) as build,
+        TestClient(app) as client,
+    ):
+        for _ in range(2):
+            with client.websocket_connect(f"/api/career/live-interviews/{record.id}/stream") as ws:
+                assert ws.receive_json()["type"] == "session.ready"
+                assert client.post(path).status_code == 409
+                ws.send_json({"type": "session.pause"})
+                assert ws.receive_json()["type"] == "session.ended"
+                assert repository.record.status is LiveInterviewStatus.PREPARING
+                with pytest.raises(WebSocketDisconnect):
+                    ws.receive_json()
+        assert client.post(path).json() == {"status": "completed"}
+        assert client.post(path).status_code == 200
+        assert build.await_count == 2
+
+
+def test_repository_end_failure_releases_same_session_connection_lock() -> None:
+    record = _record()
+    repository = FakeRepository(record)
+    repository.end = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("database unavailable"))
+    manager = FakeManager()
+    app = FastAPI()
+    app.include_router(live_web.router)
+    with (
+        patch.object(live_web, "_repository_for_websocket", return_value=repository),
+        patch.object(live_web, "_build_live_manager", new=AsyncMock(return_value=manager)),
+        TestClient(app) as client,
+    ):
+        with client.websocket_connect(f"/api/career/live-interviews/{record.id}/stream") as ws:
+            assert ws.receive_json()["type"] == "session.ready"
+            ws.send_json({"type": "session.end"})
+            assert ws.receive_json()["code"] == "session_failed"
+            with pytest.raises(WebSocketDisconnect):
+                ws.receive_json()
+    assert not app.state.live_interview_connections
     assert manager.closed
 
 

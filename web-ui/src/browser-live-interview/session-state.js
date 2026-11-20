@@ -13,6 +13,7 @@ export function createInterviewState() {
     answerAttempt: 0,
     answerText: '',
     answerStatus: 'idle',
+    pendingAnswers: 0,
     lastDeltaIndex: 0,
     history: [],
     error: null
@@ -30,7 +31,18 @@ export function reduceInterviewEvent(state, event) {
     return {
       ...next,
       connectionState: 'ready',
-      activeChannels: Array.isArray(event.active_channels) ? [...event.active_channels] : []
+      activeChannels: Array.isArray(event.active_channels) ? [...event.active_channels] : [],
+      partialTranscripts: {}
+    }
+  }
+  if (event.type === 'answer.queue') {
+    return { ...next, pendingAnswers: Math.max(0, Number(event.pending_count) || 0) }
+  }
+  if (event.type === 'channel.ended') {
+    return {
+      ...next,
+      activeChannels: next.activeChannels.filter(channel => channel !== event.channel),
+      partialTranscripts: { ...next.partialTranscripts, [event.channel]: '' }
     }
   }
   if (event.type === 'transcript.partial') {
@@ -50,7 +62,7 @@ export function reduceInterviewEvent(state, event) {
     return {
       ...next,
       transcripts: [...next.transcripts, transcript].slice(-MAX_TRANSCRIPTS),
-      partialTranscripts: { ...next.partialTranscripts, [event.channel]: '' }
+      partialTranscripts: event.preserve_partial ? next.partialTranscripts : { ...next.partialTranscripts, [event.channel]: '' }
     }
   }
   if (event.type === 'question.detected') {

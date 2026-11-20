@@ -15,6 +15,10 @@ class AsrSession(Protocol):
 
     def events(self) -> AsyncIterator[TranscriptEvent]: ...
 
+    async def finish(self) -> None:
+        """停止输入，保留读取流以接收最后的转写。"""
+        ...
+
     async def close(self) -> None: ...
 
 

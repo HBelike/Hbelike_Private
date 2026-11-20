@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from dataclasses import replace
 from datetime import date
+from threading import Event, Lock
 from typing import Literal
 from uuid import UUID
 
@@ -16,6 +19,12 @@ from starlette.concurrency import iterate_in_threadpool
 from src.career_assistant.contracts import ModelCapability, ModelSelectionMode, ModelSelectionRequest
 from src.career_assistant.live_interview.answer_service import LIVE_ANSWER_OPTIONS, LiveAnswerService
 from src.career_assistant.live_interview.archive import LiveInterviewArchiveService
+from src.career_assistant.live_interview.audio_relay import (
+    DEFAULT_AUDIO_BUFFER_SECONDS,
+    DEFAULT_AUDIO_SEND_TIMEOUT_SECONDS,
+    AudioRelayError,
+    LiveAudioRelay,
+)
 from src.career_assistant.live_interview.asr.dashscope_realtime import (
     DEFAULT_DASHSCOPE_ASR_MODEL,
     DEFAULT_DASHSCOPE_ASR_URL,
@@ -32,8 +41,13 @@ from src.career_assistant.live_interview.desktop_launcher import (
 )
 from src.career_assistant.live_interview.contracts import (
     AnswerStatus,
+    AudioAppendEvent,
     AudioChannel,
+    AudioChannelEndEvent,
+    AudioCommitEvent,
     SessionEndEvent,
+    SessionPauseEvent,
+    LiveInterviewStatus,
     TranscriptEvent,
     parse_client_event,
 )
@@ -59,6 +73,66 @@ from src.platform_access.contracts import PlatformRole
 
 
 router = APIRouter(prefix="/api/career/live-interviews", tags=["live-interview"])
+logger = logging.getLogger(__name__)
+
+
+class _ClosingAnswerIterator:
+    """取消不等待阻塞中的 SSE 读取，由读取线程在返回后关闭上游。"""
+
+    def __init__(self, iterator: Iterator[str]) -> None:
+        self._iterator = iter(iterator)
+        self._lock = Lock()
+        self._close_requested = Event()
+        self._closed = False
+
+    def __iter__(self) -> "_ClosingAnswerIterator":
+        return self
+
+    def __next__(self) -> str:
+        with self._lock:
+            if self._close_requested.is_set():
+                self._close_locked()
+                raise StopIteration
+            try:
+                return next(self._iterator)
+            finally:
+                if self._close_requested.is_set():
+                    self._close_locked()
+
+    def close(self) -> None:
+        self._close_requested.set()
+        # next 尚在执行时不能调用 generator.close，也不能让取消等待模型返回。
+        if self._lock.acquire(blocking=False):
+            try:
+                self._close_locked()
+            finally:
+                self._lock.release()
+
+    def _close_locked(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        close = getattr(self._iterator, "close", None)
+        if close is not None:
+            try:
+                close()
+            except Exception as exc:
+                logger.warning("live_answer_stream_close_failed error=%s", type(exc).__name__)
+
+
+async def _iterate_answer_stream(iterator: Iterator[str]) -> AsyncIterator[str]:
+    source = _ClosingAnswerIterator(iterator)
+    try:
+        async for chunk in iterate_in_threadpool(source):
+            yield chunk
+    finally:
+        await asyncio.to_thread(source.close)
+
+
+class _FatalAsrStreamError(RuntimeError):
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
 
 
 class CreateLiveInterviewRequest(BaseModel):
@@ -215,6 +289,16 @@ def get_history(
     return payload
 
 
+@router.post("/sessions/{session_id}/end")
+def end_inactive_session(session_id: UUID, request: Request, actor=Depends(get_live_actor)) -> dict[str, str]:
+    repository = get_live_repository(request)
+    if repository.finish_inactive(actor.organization_id, actor.actor_id, session_id):
+        return {"status": "completed"}
+    if repository.get_session(actor.organization_id, actor.actor_id, session_id) is None:
+        raise HTTPException(status_code=404, detail="实时面试会话不存在或无权访问")
+    raise HTTPException(status_code=409, detail="实时面试连接仍在工作，请通过当前连接结束")
+
+
 @router.post("/archive/preview")
 def preview_archive(
     payload: LiveInterviewArchivePreviewRequest,
@@ -292,7 +376,7 @@ async def live_interview_stream(websocket: WebSocket, session_id: UUID) -> None:
     actor = await _resolve_websocket_actor(websocket)
     if actor is None:
         return
-    repository = _repository_for_websocket(websocket)
+    repository = await asyncio.to_thread(_repository_for_websocket, websocket)
     record = await asyncio.to_thread(
         repository.get_session,
         actor.organization_id,
@@ -302,68 +386,198 @@ async def live_interview_stream(websocket: WebSocket, session_id: UUID) -> None:
     if record is None:
         await websocket.close(code=4404, reason="实时面试会话不存在或无权访问")
         return
+    if record.status is LiveInterviewStatus.COMPLETED:
+        await websocket.accept()
+        await websocket.close(code=4410, reason="面试已结束")
+        return
 
     connections: set[UUID] = getattr(websocket.app.state, "live_interview_connections", set())
     websocket.app.state.live_interview_connections = connections
     if session_id in connections:
+        await websocket.accept()
         await websocket.close(code=4409, reason="该会话已有活动连接")
         return
     connections.add(session_id)
     manager: LiveSessionManager | None = None
-    failed = False
-    await websocket.accept()
+    owns_active = False
+    finalized = False
+
+    async def settle_session(event_type: str) -> None:
+        nonlocal finalized
+        if event_type == "session.pause":
+            updated = await asyncio.to_thread(repository.pause, actor.organization_id, actor.actor_id, session_id)
+        else:
+            updated = await asyncio.to_thread(repository.end, actor.organization_id, actor.actor_id, session_id)
+        if not updated:
+            raise RuntimeError("会话结束状态未保存")
+        finalized = True
+
     try:
+        await websocket.accept()
+        owns_active = await asyncio.to_thread(repository.activate, actor.organization_id, actor.actor_id, session_id)
+        if not owns_active:
+            latest = await asyncio.to_thread(repository.get_session, actor.organization_id, actor.actor_id, session_id)
+            if latest and latest.status is LiveInterviewStatus.COMPLETED:
+                await websocket.close(code=4410, reason="面试已结束")
+            else:
+                await websocket.close(code=4409, reason="该会话已有活动连接")
+            return
         manager = await _build_live_manager(websocket, repository, record)
-        await asyncio.to_thread(repository.activate, actor.organization_id, actor.actor_id, session_id)
         await manager.start()
-        sender = asyncio.create_task(_send_manager_events(websocket, manager))
+        channels = (AudioChannel.INTERVIEWER, AudioChannel.CANDIDATE) if (
+            record.candidate_audio_enabled
+        ) else (AudioChannel.INTERVIEWER,)
+        await _run_live_transport(websocket, manager, channels, settle_session=settle_session)
+    except WebSocketDisconnect as exc:
+        # 只记录标准连接原因，不让客户端可控文本或转写正文进入日志。
+        reason = exc.reason if exc.reason in {
+            "keepalive ping timeout", "session_ready_timeout", "session_ready_cancelled", ""
+        } else "omitted"
+        logger.info(
+            "live_interview_client_disconnected session_id=%s code=%s reason=%s",
+            session_id,
+            exc.code,
+            reason,
+        )
+    except _FatalAsrStreamError as exc:
+        logger.warning("live_interview_asr_ended session_id=%s code=%s", session_id, exc.code)
+        # fatal 事件已由 sender 完整发送，随后关闭连接以触发同会话恢复。
         try:
-            while not manager.closed:
-                payload = await websocket.receive_json()
-                try:
-                    event = parse_client_event(payload)
-                    await manager.handle(event)
-                except ValueError as exc:
-                    await websocket.send_json(
-                        {"type": "error", "code": "invalid_event", "message": str(exc)}
-                    )
-                    continue
-                if isinstance(event, SessionEndEvent):
-                    break
-        finally:
-            sender.cancel()
-            await asyncio.gather(sender, return_exceptions=True)
-    except WebSocketDisconnect:
-        pass
-    except Exception:
-        failed = True
+            await websocket.close(code=1013, reason=exc.code)
+        except Exception:
+            pass
+    except AudioRelayError as exc:
+        logger.warning("live_interview_audio_failed session_id=%s code=%s details=%s", session_id, exc.code, exc.details)
+        try:
+            await websocket.send_json({"type": "error", "code": exc.code, "message": str(exc), "fatal": True})
+            await websocket.close(code=1013, reason=exc.code)
+        except Exception:
+            pass
+    except Exception as exc:
+        logger.warning("live_interview_session_failed session_id=%s error=%s", session_id, type(exc).__name__)
         try:
             await websocket.send_json(
-                {"type": "error", "code": "session_failed", "message": "实时面试会话已中止"}
+                {"type": "error", "code": "session_failed", "message": "实时面试会话已中止", "fatal": True}
             )
         except Exception:
             pass
     finally:
-        if manager is not None:
-            await manager.close("disconnect")
-        await asyncio.to_thread(
-            repository.end,
-            actor.organization_id,
-            actor.actor_id,
-            session_id,
-            failed=failed,
-        )
-        connections.discard(session_id)
         try:
-            await websocket.close()
-        except Exception:
-            pass
+            if manager is not None:
+                await manager.close("disconnect")
+        except Exception as exc:
+            logger.error("live_interview_close_failed session_id=%s error=%s", session_id, type(exc).__name__)
+        finally:
+            try:
+                if owns_active and not finalized:
+                    await asyncio.to_thread(repository.end, actor.organization_id, actor.actor_id, session_id, failed=True)
+            except Exception as exc:
+                logger.error("live_interview_end_failed session_id=%s error=%s", session_id, type(exc).__name__)
+            finally:
+                # 数据库短暂失败不能留下永久 4409 的内存连接锁。
+                connections.discard(session_id)
+                try:
+                    await websocket.close()
+                except Exception:
+                    pass
 
 
-async def _send_manager_events(websocket: WebSocket, manager: LiveSessionManager) -> None:
+async def _send_manager_events(
+    websocket: WebSocket, manager: LiveSessionManager, *, candidate_requested: bool = False,
+) -> dict[str, object]:
     while True:
         event = await manager.next_event()
+        if event.type == "session.ended":
+            return event.to_dict()
         await websocket.send_json(event.to_dict())
+        if (event.type == "session.ready" and candidate_requested and "active_channels" in event.payload
+                and AudioChannel.CANDIDATE.value not in event.payload["active_channels"]):
+            await websocket.send_json({"type": "channel.ended", "channel": "candidate",
+                                       "message": "候选人转写暂不可用，继续采集面试官声音。"})
+        if event.type == "error" and event.payload.get("fatal"):
+            raise _FatalAsrStreamError(str(event.payload.get("code", "asr_stream_failed")))
+
+
+async def _run_live_transport(
+    websocket: WebSocket,
+    manager: LiveSessionManager,
+    channels: tuple[AudioChannel, ...],
+    *,
+    audio_send_timeout_seconds: float = DEFAULT_AUDIO_SEND_TIMEOUT_SECONDS,
+    max_audio_frames: int | None = None,
+    max_buffered_audio_seconds: float = DEFAULT_AUDIO_BUFFER_SECONDS,
+    settle_session: Callable[[str], Awaitable[None]] | None = None,
+) -> None:
+    """收包持续运行，音频按轨转发；监控全部后台任务，防止静默失效。"""
+
+    async def write_audio(event) -> None:
+        if isinstance(event, AudioChannelEndEvent):
+            await manager.finish_channel(event.channel)
+        else:
+            await manager.handle(event)
+
+    relay = LiveAudioRelay(
+        write_audio,
+        channels,
+        send_timeout_seconds=audio_send_timeout_seconds,
+        max_frames=max_audio_frames,
+        max_buffered_audio_seconds=max_buffered_audio_seconds,
+        on_optional_failure=manager.disable_channel,
+    )
+    sender = asyncio.create_task(
+        _send_manager_events(websocket, manager, candidate_requested=AudioChannel.CANDIDATE in channels),
+        name="live-event-sender",
+    )
+    relay_failure = asyncio.create_task(relay.wait_failed(), name="live-audio-monitor")
+    receiver: asyncio.Task | None = None
+    finisher: asyncio.Task | None = None
+    try:
+        while not manager.closed:
+            receiver = asyncio.create_task(websocket.receive_json(), name="live-client-receiver")
+            done, _ = await asyncio.wait(
+                (receiver, sender, relay_failure),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if relay_failure in done:
+                relay_failure.result()
+            if sender in done:
+                sender.result()
+                raise RuntimeError("实时事件发送任务意外结束")
+            payload = receiver.result()
+            try:
+                event = parse_client_event(payload)
+                if isinstance(event, AudioAppendEvent | AudioCommitEvent | AudioChannelEndEvent):
+                    relay.enqueue(event)
+                elif isinstance(event, SessionEndEvent | SessionPauseEvent):
+                    await relay.drain()
+                    finisher = asyncio.create_task(manager.handle(event))
+                    first, _ = await asyncio.wait((finisher, sender), return_when=asyncio.FIRST_COMPLETED)
+                    if sender in first:
+                        sender.result()
+                    await finisher
+                    if settle_session is not None:
+                        await settle_session(event.type)
+                    # 先落定会话状态并发送全部尾句，客户端收到结束确认即可读取归档或接续。
+                    ended = await asyncio.wait_for(sender, timeout=5)
+                    await websocket.send_json(ended)
+                    return
+                else:
+                    await manager.handle(event)
+            except ValueError as exc:
+                await websocket.send_json(
+                    {"type": "error", "code": "invalid_event", "message": str(exc)}
+                )
+                continue
+    finally:
+        tasks = [sender, relay_failure]
+        if receiver is not None:
+            tasks.append(receiver)
+        if finisher is not None:
+            tasks.append(finisher)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await relay.close()
 
 
 async def _resolve_websocket_actor(websocket: WebSocket):
@@ -377,7 +591,9 @@ async def _resolve_websocket_actor(websocket: WebSocket):
         await websocket.close(code=4401, reason="请先登录后继续")
         return None
     try:
-        resolution = get_platform_access_service(websocket).resolve_session(token)
+        def resolve():
+            return get_platform_access_service(websocket).resolve_session(token)
+        resolution = await asyncio.to_thread(resolve)
     except HTTPException:
         resolution = None
     if resolution is None:
@@ -405,23 +621,17 @@ async def _build_live_manager(
 ) -> LiveSessionManager:
     from src.career_assistant.web.router import get_career_services
 
-    services = get_career_services(websocket)
+    services = await asyncio.to_thread(get_career_services, websocket)
+    resume = await asyncio.to_thread(
+        repository.resume_state, record.organization_id, record.actor_id, record.id,
+    )
+    if resume is None:
+        raise RuntimeError("实时面试会话不存在或无权恢复")
     terms: tuple[str, ...] = ()
     corrector = TerminologyCorrector(terms)
 
-    asr_provider = _resolve_asr_provider(services, record)
-    sessions = {}
-    try:
-        active_channels = [AudioChannel.INTERVIEWER]
-        if record.candidate_audio_enabled:
-            active_channels.append(AudioChannel.CANDIDATE)
-        for channel in active_channels:
-            sessions[channel] = await asr_provider.start(channel, prompt="、".join(terms[:100]))
-    except Exception:
-        await asyncio.gather(*(item.close() for item in sessions.values()), return_exceptions=True)
-        raise
-
-    answer_resolution = services.model_gateway.resolve(
+    answer_resolution = await asyncio.to_thread(
+        services.model_gateway.resolve,
         record.organization_id,
         ModelSelectionRequest(
             mode=ModelSelectionMode.SPECIFIC_PROFILE
@@ -434,7 +644,7 @@ async def _build_live_manager(
     if answer_resolution.readiness is not ModelReadiness.READY:
         raise RuntimeError("回答模型尚未配置可用凭据")
 
-    async def prompt_streamer(prompt: str) -> AsyncIterator[str]:
+    def prompt_streamer(prompt: str) -> AsyncIterator[str]:
         iterator = services.model_connection_client.stream_complete(
             answer_resolution.profile,
             answer_resolution.credential_env_name,
@@ -445,8 +655,7 @@ async def _build_live_manager(
             api_key=answer_resolution.credential,
             options=LIVE_ANSWER_OPTIONS,
         )
-        async for chunk in iterate_in_threadpool(iterator):
-            yield chunk
+        return _iterate_answer_stream(iterator)
 
     async def save_transcript(event: TranscriptEvent) -> None:
         if record.client_kind == "browser" and event.channel is AudioChannel.CANDIDATE:
@@ -475,13 +684,36 @@ async def _build_live_manager(
             answer_text=answer_text,
         )
 
-    return LiveSessionManager(
-        asr_sessions=sessions,
-        answer_service=LiveAnswerService(prompt_streamer),
-        answer_context=LiveAnswerContext(),
-        transcript_hook=save_transcript,
-        answer_hook=save_answer,
-    )
+    async def save_queue(queued, phase) -> None:
+        if record.client_kind == "browser":
+            # 麦克风文本仅供当前连接使用，恢复元数据不能间接持久化它。
+            queued = replace(queued, recent_conversation=tuple(
+                line for line in queued.recent_conversation if not line.startswith("candidate:")
+            ))
+        await asyncio.to_thread(
+            repository.save_queued_answer,
+            record.organization_id, record.actor_id, record.id, queued, phase,
+        )
+
+    asr_provider = await asyncio.to_thread(_resolve_asr_provider, services, record)
+    sessions = {}
+    try:
+        sessions[AudioChannel.INTERVIEWER] = await asr_provider.start(AudioChannel.INTERVIEWER)
+        if record.candidate_audio_enabled:
+            try:
+                sessions[AudioChannel.CANDIDATE] = await asr_provider.start(AudioChannel.CANDIDATE)
+            except Exception as exc:
+                logger.warning("live_interview_candidate_unavailable session_id=%s error=%s",
+                               record.id, type(exc).__name__)
+        return LiveSessionManager(
+            asr_sessions=sessions, answer_service=LiveAnswerService(prompt_streamer),
+            answer_context=LiveAnswerContext(), transcript_hook=save_transcript,
+            answer_hook=save_answer, resume_state=resume, queue_hook=save_queue,
+        )
+    except BaseException:
+        # 成功后由 manager 接管；构造失败或握手取消时由此处归还。
+        await asyncio.gather(*(item.close() for item in sessions.values()), return_exceptions=True)
+        raise
 
 
 def _resolve_asr_provider(services, record: LiveInterviewSessionRecord):

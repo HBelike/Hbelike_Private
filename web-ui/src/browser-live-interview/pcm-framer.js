@@ -10,6 +10,41 @@ export function floatToPcm16(samples) {
   return pcm
 }
 
+// 用整数采样时钟跨 AudioWorklet 块保留一个输出样本内的累积值。
+export class StreamingPcmResampler {
+  constructor(inputRate, outputRate = TARGET_SAMPLE_RATE) {
+    if (!Number.isFinite(inputRate) || inputRate <= 0 || !Number.isFinite(outputRate) || outputRate <= 0) {
+      throw new RangeError('采样率必须大于零')
+    }
+    this.inputRate = inputRate
+    this.outputRate = outputRate
+    this.filled = 0
+    this.sum = 0
+  }
+
+  append(samples) {
+    if (this.inputRate === this.outputRate) return floatToPcm16(samples)
+    const count = Math.floor((this.filled + samples.length * this.outputRate) / this.inputRate)
+    const result = new Float32Array(count)
+    let index = 0
+    for (const sample of samples) {
+      let remaining = this.outputRate
+      while (remaining > 0) {
+        const width = Math.min(remaining, this.inputRate - this.filled)
+        this.sum += sample * width
+        this.filled += width
+        remaining -= width
+        if (this.filled === this.inputRate) {
+          result[index++] = this.sum / this.inputRate
+          this.filled = 0
+          this.sum = 0
+        }
+      }
+    }
+    return floatToPcm16(result)
+  }
+}
+
 export function resampleToPcm16(samples, inputSampleRate, outputSampleRate = TARGET_SAMPLE_RATE) {
   if (!(samples instanceof Float32Array)) samples = new Float32Array(samples)
   if (!Number.isFinite(inputSampleRate) || inputSampleRate <= 0) {
@@ -83,6 +118,12 @@ export class PcmFrameAccumulator {
 
   clear() {
     this.pending = new Int16Array()
+  }
+
+  flush() {
+    const tail = this.pending
+    this.clear()
+    return tail
   }
 }
 

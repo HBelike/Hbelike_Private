@@ -5,6 +5,8 @@ import { BrowserAudioCapture, detectBrowserInterviewSupport } from '../browser-l
 import { openAnswerPictureInPicture, supportsAnswerPictureInPicture } from '../browser-live-interview/picture-in-picture.js'
 import { createInterviewState, reduceInterviewEvent } from '../browser-live-interview/session-state.js'
 import { LiveInterviewSocket } from '../browser-live-interview/socket.js'
+import { LiveAudioOutbox } from '../browser-live-interview/audio-outbox.js'
+import { LiveInterviewReconnect } from '../browser-live-interview/reconnect.js'
 import {
   advanceSetupProgress,
   answerPreviewLines,
@@ -26,6 +28,9 @@ const support = ref({ supported: false, missing: ['正在检查浏览器能力']
 const phase = ref('preparing')
 const message = ref('')
 const errorMessage = ref('')
+const tailWarning = ref('')
+const audioGaps = ref({})
+const reconnecting = ref(false)
 const connectionState = ref('idle')
 const state = ref(createInterviewState())
 const elapsedSeconds = ref(0)
@@ -56,8 +61,14 @@ let timer = null
 let setupProgressTimer = null
 let startedAt = 0
 let startGeneration = 0
+let outbox = null
+let stoppingInput = null
+let nextSequences = {}
+let candidateTrackEnded = false
+let lastAnswerSocket = null
+const reconnect = new LiveInterviewReconnect()
 const questionDetectedAt = new Map()
-const answeredVersions = new Set()
+const finalReceivedAt = new Map()
 
 const readyAnswerModels = computed(() => (
   setupOptions.value?.answer_models?.filter((item) => item.readiness === 'ready') || []
@@ -80,8 +91,10 @@ const latencyText = computed(() => {
   const sample = latestLatency.value
   if (!sample) return ''
   const model = sample.modelMs === null ? '' : ` · 模型 ${formatLatency(sample.modelMs)}`
-  return `首字 ${formatLatency(sample.endToEndMs)}${model}`
+  return `${sample.label} ${formatLatency(sample.endToEndMs)}${model}`
 })
+const gapText = computed(() => Object.entries(audioGaps.value).map(([channel, seconds]) =>
+  `${channel === 'candidate' ? '麦克风' : '共享声音'}约 ${seconds.toFixed(1)} 秒未发送`).join('，'))
 const quickLines = computed(() => answerPreviewLines(state.value.answerText, 5))
 const latestTranscripts = computed(() => allTranscripts.value.slice(-18))
 const interviewerPartial = computed(() => state.value.partialTranscripts.interviewer || '')
@@ -89,7 +102,9 @@ const candidatePartial = computed(() => state.value.partialTranscripts.candidate
 const phaseLabel = computed(() => ({
   preparing: '准备采集',
   starting: '正在连接',
-  active: connectionState.value === 'ready' ? '正在聆听' : '正在建立实时连接',
+  active: reconnecting.value ? '正在恢复连接' : connectionState.value === 'backpressure' ? '正在暂存声音' : connectionState.value === 'ready' ? '正在聆听' : '正在建立实时连接',
+  pausing: '正在保存最后一句',
+  ending: '正在结束面试',
   paused: '采集已暂停',
   ended: '本场已结束'
 }[phase.value] || '准备采集'))
@@ -121,7 +136,11 @@ async function requestJson(url, options = {}) {
     ...options
   })
   const payload = await response.json().catch(() => ({}))
-  if (!response.ok) throw new Error(payload.detail || payload.message || `请求失败（${response.status}）`)
+  if (!response.ok) {
+    const error = new Error(payload.detail || payload.message || `请求失败（${response.status}）`)
+    error.status = response.status
+    throw error
+  }
   return payload
 }
 
@@ -153,13 +172,32 @@ function stopSetupProgress() {
 }
 
 function handleServerEvent(event) {
-  if (event.type === 'question.detected') questionDetectedAt.set(Number(event.question_version), performance.now())
+  if (event.type === 'channel.ended' && event.channel === 'candidate') {
+    candidateTrackEnded = true
+    capture?.stopChannel('candidate')
+    outbox?.discard('candidate')
+    message.value = '麦克风转写已停止，共享声音继续采集。'
+  }
+  if (event.type === 'question.detected' || (event.type.startsWith('answer.') && event.type !== 'answer.queue')) {
+    lastAnswerSocket = liveSocket?.socket
+  }
+  if (event.type === 'question.detected') {
+    const finalAt = finalReceivedAt.get(event.source_sequence)
+    questionDetectedAt.clear()
+    questionDetectedAt.set(Number(event.question_version), { at: finalAt ?? performance.now(), hasFinal: finalAt != null })
+  }
+  if (event.type === 'answer.started') {
+    const sample = questionDetectedAt.get(Number(event.question_version)) || { at: performance.now(), hasFinal: false }
+    if (!sample.hasFinal) sample.at -= Math.max(0, Number(event.queue_wait_ms) || 0)
+    questionDetectedAt.set(Number(event.question_version), sample)
+  }
   if (event.type === 'answer.delta' && Number(event.delta_index) === 1) {
     const detectedAt = questionDetectedAt.get(Number(event.question_version))
     if (detectedAt) {
       const modelMs = Number(event.first_token_ms)
       latencySamples.value.push({
-        endToEndMs: Math.max(0, performance.now() - detectedAt),
+        label: detectedAt.hasFinal ? '定稿至首字' : '含排队首字',
+        endToEndMs: Math.max(0, performance.now() - detectedAt.at),
         modelMs: Number.isFinite(modelMs) && modelMs >= 0 ? modelMs : null
       })
       latencySamples.value = latencySamples.value.slice(-20)
@@ -167,21 +205,30 @@ function handleServerEvent(event) {
     }
   }
   if (event.type === 'transcript.final') {
+    if (event.channel === 'interviewer') {
+      finalReceivedAt.set(event.sequence, performance.now())
+      if (finalReceivedAt.size > 100) finalReceivedAt.delete(finalReceivedAt.keys().next().value)
+    }
     allTranscripts.value.push({
       sessionId: sessionIds.value.at(-1),
       channel: event.channel,
       text: event.text,
-      sequence: event.sequence
+      sequence: event.sequence,
+      receivedAt: Date.now()
     })
     allTranscripts.value = allTranscripts.value.slice(-100)
+    if (!followLatestTranscripts.value) unseenTranscriptCount.value += 1
+    void scrollTranscriptsToLatest()
   }
   state.value = reduceInterviewEvent(state.value, event)
   if (event.type === 'answer.completed') {
+    if (state.value.questionVersion !== Number(event.question_version) || state.value.answerAttempt !== Number(event.attempt)) return
     const key = `${sessionIds.value.at(-1)}:${event.question_version}:${event.attempt}`
-    if (!answeredVersions.has(key)) {
-      answeredVersions.add(key)
+    if (!completedHistory.value.some(item => item.key === key)) {
       completedHistory.value.push({
         key,
+        questionVersion: Number(event.question_version),
+        attempt: Number(event.attempt),
         question: state.value.currentQuestion,
         answer: state.value.answerText,
         intent: state.value.questionIntent
@@ -189,7 +236,10 @@ function handleServerEvent(event) {
       completedHistory.value = completedHistory.value.slice(-50)
     }
   }
-  if (event.type === 'error') errorMessage.value = event.message || '实时处理出现错误'
+  if (event.type === 'error') {
+    errorMessage.value = event.message || '实时处理出现错误'
+    if (event.code === 'asr_finish_incomplete') tailWarning.value = errorMessage.value
+  }
 }
 
 function handleTranscriptScroll(event) {
@@ -219,9 +269,91 @@ function connectionFailureMessage(detail = {}) {
 
 function handleConnectionState(nextState, detail = {}) {
   connectionState.value = nextState
-  if (nextState === 'backpressure') message.value = '网络发送稍慢，已跳过一小段音频以保持实时性。'
-  if (nextState === 'disconnected' && detail.wasReady && phase.value === 'active') {
-    void pauseCapture(connectionFailureMessage(detail))
+  if (nextState === 'backpressure') message.value = '网络发送变慢，正在按顺序暂存声音。'
+  if (nextState === 'ready' && !reconnecting.value && phase.value === 'active') message.value = ''
+  if (nextState === 'disconnected' && phase.value === 'active' && !reconnecting.value) {
+    void recoverLiveConnection(detail)
+  }
+}
+
+async function refreshRecoveredHistory(socket) {
+  const connection = socket.socket
+  try {
+    const history = await requestJson(`/api/career/live-interviews/sessions/${encodeURIComponent(socket.sessionId)}/history`, {
+      signal: AbortSignal.timeout(3_000)
+    })
+    if (liveSocket !== socket || socket.socket !== connection || !socket.ready) return
+    const current = new Map(allTranscripts.value.map(item => [`${item.channel}:${item.sequence}`, item]))
+    for (const row of (history.utterances || []).slice(-100)) {
+      const channel = row.channel || row.role
+      const key = `${channel}:${row.channel_sequence}`
+      if (!current.has(key)) current.set(key, {
+        sessionId: socket.sessionId, channel, sequence: row.channel_sequence,
+        text: row.corrected_text || row.raw_text, receivedAt: Date.parse(row.created_at) || 0
+      })
+    }
+    allTranscripts.value = [...current.values()].sort((a, b) => a.receivedAt - b.receivedAt).slice(-100)
+    const entries = new Map(completedHistory.value.map(item => [item.key, item]))
+    for (const item of history.answers || []) {
+      const partial = item.status === 'cancelled' && Boolean(item.answer_text)
+      if (item.status !== 'completed' && !partial) continue
+      const key = `${socket.sessionId}:${item.question_version}:${item.attempt}`
+      entries.set(key, {
+        key, questionVersion: item.question_version, attempt: item.attempt,
+        question: item.normalized_question || item.original_question || '', answer: item.answer_text || '', intent: item.intent, partial
+      })
+    }
+    completedHistory.value = [...entries.values()].sort((a, b) => a.questionVersion - b.questionVersion || a.attempt - b.attempt).slice(-50)
+    const latest = (history.answers || []).filter(item => !item.evidence_json?.some?.(entry =>
+      entry.type === 'live_answer_queue' && ['queued', 'cancelled'].includes(entry.phase)
+    )).sort((a, b) =>
+      (Date.parse(a.updated_at || a.created_at) || 0) - (Date.parse(b.updated_at || b.created_at) || 0)
+      || a.question_version - b.question_version || a.attempt - b.attempt
+    ).at(-1)
+    if (lastAnswerSocket !== connection && latest) {
+      state.value = {
+        ...state.value, currentQuestion: latest.normalized_question || latest.original_question, questionIntent: latest.intent,
+        questionVersion: latest.question_version, answerAttempt: latest.attempt, answerText: latest.answer_text || '',
+        answerStatus: latest.status === 'generating' ? 'waiting' : latest.status, lastDeltaIndex: 0
+      }
+      if (latest.status === 'cancelled' && latest.answer_text) {
+        message.value = '已保留中断前生成的部分回答，可点击“重新生成”重新回答本题。'
+      }
+    }
+  } catch {
+    if (liveSocket === socket && socket.socket === connection && socket.ready) message.value = '声音已恢复，断线期间的历史回答暂未同步。'
+  }
+}
+
+async function finishCandidateTrack(socket, buffer) {
+  if (!socket?.ready || !buffer || !candidateTrackEnded) return
+  if (await buffer.drain(5_000, 'candidate') && liveSocket === socket && socket.ready && candidateTrackEnded) {
+    socket.send({ type: 'audio.channel_end', channel: 'candidate' })
+  }
+}
+
+async function recoverLiveConnection(detail) {
+  const generation = startGeneration
+  const socket = liveSocket
+  const current = () => generation === startGeneration && phase.value === 'active' && liveSocket === socket
+  if (!socket || !current()) return
+  reconnecting.value = true
+  try {
+    await reconnect.run(async (attempt) => {
+      message.value = `正在第 ${attempt} 次恢复本场面试，每条音轨最多暂存最近 5 秒的未发送声音。`
+      await socket.connect()
+      if (!socket.ready || !current()) throw new Error('实时连接尚未恢复')
+    }, current)
+    if (!current()) return
+    if (!socket.ready) throw new Error('实时连接恢复时再次断开')
+    errorMessage.value = ''
+    message.value = '已接回本场面试，继续发送暂存声音；断线时正在传输的片段可能不完整。'
+    void finishCandidateTrack(socket, outbox)
+    void refreshRecoveredHistory(socket)
+  } catch {
+    if (current()) await pauseCapture(`${connectionFailureMessage(detail)} 自动恢复未成功，可以重新选择声音来源接续本场。`)
+  } finally {
+    if (generation === startGeneration) reconnecting.value = false
   }
 }
 
@@ -231,24 +363,33 @@ function isCurrentStart(generation) {
 
 async function createAndConnectLiveSession(candidateAudioEnabled, generation) {
   let lastError = null
+  let sessionId = sessionIds.value.at(-1)
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     if (!isCurrentStart(generation)) throw new Error('实时连接启动已取消')
-    const created = await requestJson('/api/career/live-interviews/sessions', {
-      method: 'POST',
-      body: JSON.stringify({
-        asr_model_profile_id: null,
-        answer_model_profile_id: selectedAnswerModelId.value || null,
-        client_kind: 'browser',
-        candidate_audio_enabled: candidateAudioEnabled
+    if (!sessionId) {
+      const created = await requestJson('/api/career/live-interviews/sessions', {
+        method: 'POST',
+        body: JSON.stringify({
+          asr_model_profile_id: null,
+          answer_model_profile_id: selectedAnswerModelId.value || null,
+          client_kind: 'browser',
+          candidate_audio_enabled: candidateAudioEnabled
+        })
       })
-    })
-    const sessionId = created.session.id
-    sessionIds.value.push(sessionId)
+      sessionId = created.session.id
+      if (!isCurrentStart(generation)) {
+        await completeStoppedSession(sessionId)
+        throw new Error('实时连接启动已取消')
+      }
+      sessionIds.value.push(sessionId)
+    }
     if (!isCurrentStart(generation)) throw new Error('实时连接启动已取消')
     let socket = null
     socket = new LiveInterviewSocket({
       sessionId,
-      onEvent: handleServerEvent,
+      onEvent: event => {
+        if (liveSocket === socket) handleServerEvent(event)
+      },
       onStateChange: (nextState, detail) => {
         if (liveSocket !== socket) return
         handleConnectionState(nextState, detail)
@@ -277,29 +418,53 @@ async function createAndConnectLiveSession(candidateAudioEnabled, generation) {
 async function startInterview() {
   if (!canStart.value || phase.value === 'starting') return
   const generation = ++startGeneration
+  const resuming = Boolean(sessionIds.value.length)
+  reconnect.cancel()
+  reconnecting.value = false
   phase.value = 'starting'
   errorMessage.value = ''
   message.value = ''
-  state.value = createInterviewState()
+  if (!resuming) state.value = createInterviewState()
   latencySamples.value = []
   questionDetectedAt.clear()
+  finalReceivedAt.clear()
   connectionState.value = 'connecting'
   capture = new BrowserAudioCapture()
+  const previousGaps = { ...audioGaps.value }
+  const buffer = new LiveAudioOutbox({
+    send: (channel, sequence, pcm) => Boolean(liveSocket?.sendAudio(channel, sequence, pcm)),
+    onGap: (channel, seconds) => { audioGaps.value = { ...audioGaps.value, [channel]: (previousGaps[channel] || 0) + seconds } }
+  })
+  outbox = buffer
+  candidateTrackEnded = false
   try {
     const captureResult = await capture.start({
       candidateEnabled: candidateEnabled.value,
-      onFrame: ({ channel, sequence, pcm }) => liveSocket?.sendAudio(channel, sequence, pcm),
-      onEnded: () => {
+      nextSequences,
+      onFrame: frame => {
+        nextSequences[frame.channel] = frame.sequence + 1
+        buffer.append(frame)
+      },
+      onEnded: ({ channel }) => {
         if (generation === startGeneration) {
+          if (channel === 'candidate') {
+            candidateTrackEnded = true
+            message.value = '麦克风已断开，继续转写面试官的声音。'
+            void finishCandidateTrack(liveSocket, buffer)
+            return
+          }
           void pauseCapture('电脑声音共享已停止，回答和历史已保留。')
         }
       }
     })
     if (!isCurrentStart(generation)) throw new Error('电脑声音共享已停止')
-    candidateEnabled.value = captureResult.candidateEnabled
+    candidateTrackEnded ||= candidateEnabled.value && !captureResult.candidateEnabled
+    if (!resuming) candidateEnabled.value = captureResult.candidateEnabled
     const connection = await createAndConnectLiveSession(captureResult.candidateEnabled, generation)
     if (!isCurrentStart(generation)) throw new Error('实时连接启动已取消')
     phase.value = 'active'
+    if (candidateTrackEnded && state.value.activeChannels.includes('candidate')) void finishCandidateTrack(liveSocket, buffer)
+    if (resuming) void refreshRecoveredHistory(liveSocket)
     const notices = []
     if (captureResult.warning) notices.push(captureResult.warning)
     if (connection.retried) notices.push('首次实时连接中断，已自动恢复。')
@@ -312,6 +477,8 @@ async function startInterview() {
     socket?.close()
     await capture?.stop()
     capture = null
+    buffer.close()
+    outbox = null
     phase.value = sessionIds.value.length ? 'paused' : 'preparing'
     connectionState.value = 'idle'
     errorMessage.value = error instanceof Error ? error.message : '无法开始浏览器面试'
@@ -328,32 +495,87 @@ function startTimer() {
   }, 1000)
 }
 
+async function stopLiveInput(pause) {
+  reconnect.cancel()
+  reconnecting.value = false
+  const socket = liveSocket
+  const currentCapture = capture
+  const buffer = outbox
+  capture = null
+  try {
+    await currentCapture?.stop()
+    const delivered = !buffer?.pending || (socket?.ready && await buffer.drain())
+    if (!delivered) {
+      tailWarning.value = '最后一段暂存声音未能全部发送。'
+      errorMessage.value = tailWarning.value
+    }
+    const finished = await socket?.end({ pause })
+    if (!finished && delivered && sessionIds.value.length) {
+      tailWarning.value = '最后一句未收到服务端保存确认，归档内容可能不完整。'
+      errorMessage.value = tailWarning.value
+    }
+    return finished
+  } finally {
+    socket?.close()
+    buffer?.close()
+    if (liveSocket === socket) liveSocket = null
+    if (outbox === buffer) outbox = null
+  }
+}
+
 async function pauseCapture(reason) {
   if (!['active', 'starting'].includes(phase.value)) return
   startGeneration += 1
-  phase.value = 'paused'
+  phase.value = 'pausing'
   message.value = reason
-  const socket = liveSocket
-  liveSocket = null
-  socket?.end()
-  const currentCapture = capture
-  capture = null
-  await currentCapture?.stop()
+  stoppingInput = stopLiveInput(true)
+  try {
+    const finished = await stoppingInput
+    if (!finished && sessionIds.value.length) errorMessage.value ||= '暂停前的最后一句可能未能完整保存。'
+  } catch {
+    errorMessage.value = '已停止采集，暂停前的最后一句未能确认。'
+  } finally {
+    stoppingInput = null
+    if (phase.value === 'pausing') phase.value = 'paused'
+  }
+}
+
+async function completeStoppedSession(sessionId) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await requestJson(`/api/career/live-interviews/sessions/${encodeURIComponent(sessionId)}/end`, {
+        method: 'POST', signal: AbortSignal.timeout(3_000)
+      })
+      return
+    } catch (error) {
+      if (error.status !== 409 || attempt >= 2) throw error
+      await new Promise(resolve => window.setTimeout(resolve, 300 * (attempt + 1)))
+    }
+  }
 }
 
 async function endInterview(reason = '本场面试已结束。') {
-  if (phase.value === 'ended') return
+  if (['ending', 'ended'].includes(phase.value)) return
   startGeneration += 1
-  phase.value = 'ended'
+  phase.value = 'ending'
   message.value = reason
-  const socket = liveSocket
-  liveSocket = null
-  socket?.end()
-  const currentCapture = capture
-  capture = null
-  await currentCapture?.stop()
   if (timer) window.clearInterval(timer)
   timer = null
+  try {
+    let finished = false
+    if (stoppingInput) await stoppingInput
+    else if (capture || liveSocket) {
+      stoppingInput = stopLiveInput(false)
+      finished = await stoppingInput
+    }
+    const sessionId = sessionIds.value.at(-1)
+    if (!finished && sessionId) await completeStoppedSession(sessionId)
+  } catch {
+    errorMessage.value = '声音采集已停止，服务端结束状态暂未确认。'
+  } finally {
+    stoppingInput = null
+  }
+  phase.value = 'ended'
   hiddenViewportEnabled.value = false
   closePip()
   await openArchiveDialog()
@@ -441,7 +663,7 @@ function answerNow() {
     return
   }
   errorMessage.value = ''
-  liveSocket?.requestAnswer('manual', latest.text)
+  liveSocket?.requestAnswer('manual')
 }
 
 function regenerateAnswer() {
@@ -521,13 +743,6 @@ function goBack() {
   window.location.assign('/career')
 }
 
-watch(() => allTranscripts.value.length, (nextLength, previousLength) => {
-  if (nextLength > previousLength && !followLatestTranscripts.value) {
-    unseenTranscriptCount.value += nextLength - previousLength
-  }
-  void scrollTranscriptsToLatest()
-})
-
 watch([interviewerPartial, candidatePartial], () => {
   void scrollTranscriptsToLatest()
 })
@@ -544,11 +759,11 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   startGeneration += 1
+  reconnect.cancel()
   stopSetupProgress()
   if (timer) window.clearInterval(timer)
   timer = null
-  liveSocket?.close()
-  void capture?.stop()
+  if (!stoppingInput) void stopLiveInput(false)
   closePip()
 })
 </script>
@@ -708,7 +923,7 @@ onBeforeUnmount(() => {
             </div>
           </header>
           <div ref="transcriptList" class="transcript-list" @scroll.passive="handleTranscriptScroll">
-            <article v-for="(item, index) in latestTranscripts" :key="`${item.sessionId}-${item.channel}-${item.sequence}-${index}`" :class="item.channel">
+            <article v-for="item in latestTranscripts" :key="`${item.sessionId}-${item.channel}-${item.sequence}`" :class="item.channel">
               <span>{{ item.channel === 'interviewer' ? '面试官' : '我' }}</span>
               <p>{{ item.text }}</p>
             </article>
@@ -728,6 +943,7 @@ onBeforeUnmount(() => {
 
       <section class="answer-workspace">
         <div v-if="message" class="notice-strip">{{ message }}</div>
+        <div v-if="gapText" class="notice-strip error">网络积压超过 5 秒，{{ gapText }}。</div>
         <div v-if="errorMessage" class="notice-strip error">{{ errorMessage }}</div>
 
         <article class="current-question-card">
@@ -736,9 +952,10 @@ onBeforeUnmount(() => {
             <div><strong v-if="latencyText">{{ latencyText }}</strong><em>{{ state.questionIntent || '等待识别' }}</em></div>
           </div>
           <h1>{{ state.currentQuestion || '面试官的完整问题会显示在这里' }}</h1>
+          <p v-if="state.pendingAnswers" role="status">还有 {{ state.pendingAnswers }} 个问题等待回答。</p>
           <div class="question-actions">
-            <button type="button" :disabled="phase !== 'active'" @click="answerNow">立即回答</button>
-            <button type="button" :disabled="!state.currentQuestion || phase !== 'active'" @click="regenerateAnswer">重新生成</button>
+            <button type="button" :disabled="phase !== 'active' || reconnecting || !liveSocket?.ready" @click="answerNow">立即回答</button>
+            <button type="button" :disabled="!state.currentQuestion || phase !== 'active' || reconnecting || !liveSocket?.ready" @click="regenerateAnswer">重新生成</button>
             <button type="button" :disabled="!canOpenPip" @click="openPip">打开置顶小窗</button>
             <button type="button" :disabled="!canOpenPip" @click="toggleHiddenViewport">开启隐藏视口V1</button>
           </div>
@@ -755,7 +972,7 @@ onBeforeUnmount(() => {
 
           <article class="full-answer-card">
             <header>
-              <div><span>完整回答</span><small>{{ state.answerStatus === 'generating' ? '正在流式生成' : '统一中文' }}</small></div>
+              <div><span>完整回答</span><small>{{ state.answerStatus === 'generating' ? '正在流式生成' : state.answerStatus === 'cancelled' ? '生成已中断' : '统一中文' }}</small></div>
               <i v-if="state.answerStatus === 'generating'" class="typing-dot"></i>
             </header>
             <div class="answer-text">{{ state.answerText || '等待面试官提出问题…' }}</div>
@@ -766,7 +983,7 @@ onBeforeUnmount(() => {
           <header><h2>本场问答</h2><span>{{ completedHistory.length }} 题</span></header>
           <div v-if="completedHistory.length" class="history-list">
             <details v-for="(item, index) in [...completedHistory].reverse()" :key="item.key" :open="index === 0">
-              <summary><span>Q{{ completedHistory.length - index }}</span>{{ item.question }}</summary>
+              <summary><span>Q{{ completedHistory.length - index }}</span>{{ item.question }}<small v-if="item.partial">部分回答</small></summary>
               <p>{{ item.answer }}</p>
             </details>
           </div>
@@ -807,6 +1024,7 @@ onBeforeUnmount(() => {
           </div>
 
           <form v-else class="archive-form" @submit.prevent="saveArchive">
+            <p v-if="tailWarning" class="archive-error" role="alert">{{ tailWarning }}</p>
             <div class="archive-fields">
               <label>
                 <span>公司名称 <em>*</em></span>

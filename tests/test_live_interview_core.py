@@ -120,6 +120,16 @@ def test_terminology_correction_is_limited_to_confirmed_terms() -> None:
     assert result.raw_text == "使用 Postgres SQL 和 kafka 进行开发"
 
 
+def test_assembler_keeps_late_final_without_clearing_newer_openai_partial():
+    assembler = TranscriptAssembler()
+    newer = TranscriptEvent(AudioChannel.INTERVIEWER, 2, "下一句", False, provider="openai")
+    older = TranscriptEvent(AudioChannel.INTERVIEWER, 1, "上一句", True, provider="openai")
+    assert assembler.accept(newer) == newer
+    assert assembler.accept(older) == older and assembler.has_newer_partial(older)
+    assert assembler.accept(older) is None
+    assert assembler.accept(TranscriptEvent(AudioChannel.INTERVIEWER, 1, "迟到片段", False, provider="openai")) is None
+
+
 def test_detector_only_uses_interviewer_final_and_supports_mixed_language() -> None:
     detector = RuleBasedQuestionDetector()
     candidate = TranscriptEvent(
@@ -174,7 +184,7 @@ def test_detector_marks_follow_up() -> None:
         "Redis 为什么这么快",
     ),
 )
-def test_detector_answers_every_non_filler_interviewer_final(text: str) -> None:
+def test_detector_answers_spoken_requests_without_question_mark(text: str) -> None:
     detected = RuleBasedQuestionDetector().detect(
         TranscriptEvent(
             channel=AudioChannel.INTERVIEWER,
@@ -230,6 +240,29 @@ def test_detector_only_deduplicates_inside_three_second_window() -> None:
     assert detector.detect(event(1)) is not None
     assert detector.detect(event(2)) is None
     assert detector.detect(event(3)) is not None
+
+
+@pytest.mark.parametrize(("text", "follow_up"), (
+    ("为什么", True), ("那它的缺点是什么", True), ("举个例子", True),
+    ("举个例子吧", True), ("能举个例子吗", True), ("举个例子呢", True), ("举一个例子吧", True),
+    ("举个数据库索引失效的例子", False),
+))
+def test_detector_only_uses_prior_topic_for_unspecified_examples(text, follow_up):
+    detector = RuleBasedQuestionDetector()
+    question = detector.detect(TranscriptEvent(AudioChannel.INTERVIEWER, 1, text, True), "介绍令牌桶")
+    assert question is not None and question.is_follow_up is follow_up
+
+
+def test_repeated_last_sentence_does_not_split_a_grouped_question():
+    detector = RuleBasedQuestionDetector()
+    def emit(sequence, text):
+        return detector.detect(TranscriptEvent(AudioChannel.INTERVIEWER, sequence, text, True))
+
+    assert emit(1, "系统要支持突发流量。") is None
+    assert emit(2, "讲一下限流策略").normalized_question == "系统要支持突发流量。\n讲一下限流策略"
+    assert emit(3, "讲一下限流策略") is None
+    assert emit(4, "现在不能访问 Redis。") is None
+    assert emit(5, "讲一下限流策略").normalized_question.startswith("现在不能访问 Redis。")
 
 
 def test_openai_transcription_messages_map_to_domain_events() -> None:

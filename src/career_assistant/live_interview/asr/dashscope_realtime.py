@@ -36,9 +36,12 @@ def map_dashscope_event(
     sentence = output.get("sentence")
     if not isinstance(sentence, dict):
         return None
-    text = str(sentence.get("text", "")).strip()
-    if not text:
+    text = str(sentence.get("text") or "").strip()
+    if not text or sentence.get("heartbeat"):
         return None
+    sentence_id = sentence.get("sentence_id")
+    if type(sentence_id) is int and sentence_id >= 0:
+        sequence = sentence_id
     return TranscriptEvent(
         channel=channel,
         sequence=sequence,
@@ -53,13 +56,13 @@ class DashScopeRealtimeAsrSession:
         self._websocket = websocket
         self._channel = channel
         self._task_id = task_id
-        self._sequence = 0
+        self._next_sentence = 1
+        self._finishing = False
         self._closed = False
 
     async def append_audio(self, pcm: bytes, sequence: int) -> None:
-        if self._closed:
+        if self._closed or self._finishing:
             raise RuntimeError("DashScope ASR 会话已关闭")
-        self._sequence = sequence
         await self._websocket.send(pcm)
 
     async def commit(self) -> None:
@@ -79,27 +82,30 @@ class DashScopeRealtimeAsrSession:
                 raise RuntimeError("DashScope 实时转写任务失败")
             if event_type == "task-finished":
                 return
-            event = map_dashscope_event(payload, self._channel, self._sequence)
+            event = map_dashscope_event(payload, self._channel, self._next_sentence)
             if event is not None:
+                if event.is_final:
+                    self._next_sentence = max(self._next_sentence, event.sequence + 1)
                 yield event
+        if self._finishing and not self._closed:
+            raise RuntimeError("语音服务未返回 task-finished")
+
+    async def finish(self) -> None:
+        if self._closed or self._finishing:
+            return
+        self._finishing = True
+        await self._websocket.send(json.dumps({
+            "header": {"action": "finish-task", "task_id": self._task_id, "streaming": "duplex"},
+            "payload": {"input": {}},
+        }))
 
     async def close(self) -> None:
         if self._closed:
             return
-        self._closed = True
         with suppress(Exception):
-            await self._websocket.send(
-                json.dumps(
-                    {
-                        "header": {
-                            "action": "finish-task",
-                            "task_id": self._task_id,
-                            "streaming": "duplex",
-                        },
-                        "payload": {"input": {}},
-                    }
-                )
-            )
+            async with asyncio.timeout(2):
+                await self.finish()
+        self._closed = True
         await self._websocket.close()
 
 
@@ -168,27 +174,16 @@ class DashScopeRealtimeAsrProvider:
                     "content": [{"type": "input_text", "text": prompt.strip()[:2_000]}],
                 }
             ]
-        await websocket.send(
-            json.dumps(
-                {
-                    "header": {
-                        "action": "run-task",
-                        "task_id": task_id,
-                        "streaming": "duplex",
-                    },
-                    "payload": {
-                        "task_group": "audio",
-                        "task": "asr",
-                        "function": "recognition",
-                        "model": self._model,
-                        "parameters": parameters,
-                        "input": input_payload,
-                    },
-                }
-            )
-        )
+        task = {
+            "header": {"action": "run-task", "task_id": task_id, "streaming": "duplex"},
+            "payload": {
+                "task_group": "audio", "task": "asr", "function": "recognition",
+                "model": self._model, "parameters": parameters, "input": input_payload,
+            },
+        }
         try:
             async with asyncio.timeout(15):
+                await websocket.send(json.dumps(task))
                 while True:
                     message = await websocket.recv()
                     if not isinstance(message, str):
@@ -200,7 +195,7 @@ class DashScopeRealtimeAsrProvider:
                         break
                     if event_type == "task-failed":
                         raise RuntimeError("DashScope 实时转写任务启动失败")
-        except Exception:
+        except BaseException:
             await websocket.close()
             raise
         return DashScopeRealtimeAsrSession(websocket, channel, task_id)

@@ -33,10 +33,13 @@ class FakeAsrSession:
                 break
             yield event
 
-    async def close(self) -> None:
+    async def finish(self) -> None:
         if not self._closed:
             self._closed = True
             await self._queue.put(None)
+
+    async def close(self) -> None:
+        await self.finish()
 
 
 class FakeAsrProvider:

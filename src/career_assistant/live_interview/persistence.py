@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
@@ -12,6 +12,7 @@ from sqlalchemy import RowMapping, text
 
 from src.career_assistant.live_interview.contracts import (
     AnswerStatus,
+    AudioChannel,
     LiveInterviewStatus,
     QuestionIntent,
     TranscriptEvent,
@@ -37,6 +38,37 @@ class LiveInterviewSessionRecord:
     ended_at: datetime | None
     created_at: datetime
     updated_at: datetime
+
+
+@dataclass(frozen=True)
+class LiveInterviewResumeState:
+    """恢复游标、最近转写和一份有长度限制的上一题建议。"""
+
+    recent_conversation: tuple[str, ...] = ()
+    last_interviewer_final: str | None = None
+    last_question: str | None = None
+    last_question_intent: QuestionIntent = QuestionIntent.KNOWLEDGE
+    last_answer_attempt: int = 0
+    max_question_version: int = 0
+    last_question_version: int | None = None
+    max_sequence: dict[AudioChannel, int] = field(default_factory=dict)
+    pending_answers: tuple["LiveInterviewQueuedAnswerState", ...] = ()
+    previous_answer: tuple[str, str] | None = None
+
+
+@dataclass(frozen=True)
+class LiveInterviewQueuedAnswerState:
+    question_version: int
+    attempt: int
+    question: str
+    intent: QuestionIntent
+    recent_conversation: tuple[str, ...]
+    queued_at: datetime
+    source_sequence: int | None = None
+    queue_order: int = 0
+    manual: bool = False
+    emit_detected: bool = True
+    previous_question: str | None = None
 
 
 class LiveInterviewRepository:
@@ -135,12 +167,208 @@ class LiveInterviewRepository:
         return _session(row) if row is not None else None
 
     def activate(self, organization_id: UUID, actor_id: UUID, session_id: UUID) -> bool:
-        return self._set_session_status(
-            organization_id,
-            actor_id,
-            session_id,
-            LiveInterviewStatus.ACTIVE,
+        with self._database.transaction() as connection:
+            result = connection.execute(
+                text(
+                    """
+                    UPDATE career_assistant.live_interview_sessions
+                    SET status = 'active', started_at = COALESCE(started_at, NOW()),
+                        ended_at = NULL, updated_at = NOW()
+                    WHERE id = :session_id
+                      AND organization_id = :organization_id
+                      AND actor_id = :actor_id
+                      AND status IN ('preparing', 'failed')
+                    """
+                ),
+                {"session_id": session_id, "organization_id": organization_id, "actor_id": actor_id},
+            )
+        return bool(result.rowcount)
+
+    def resume_state(
+        self,
+        organization_id: UUID,
+        actor_id: UUID,
+        session_id: UUID,
+    ) -> LiveInterviewResumeState | None:
+        if self.get_session(organization_id, actor_id, session_id) is None:
+            return None
+        params = {"session_id": session_id, "organization_id": organization_id, "actor_id": actor_id}
+        with self._database.transaction() as connection:
+            # 每条查询保留归属条件；历史正文只取最近四条，避免长面试随时间膨胀。
+            recent = connection.execute(
+                text(
+                    """
+                    SELECT utterance.role, COALESCE(utterance.corrected_text, utterance.raw_text) AS text
+                    FROM career_assistant.live_interview_utterances AS utterance
+                    JOIN career_assistant.live_interview_sessions AS session ON session.id = utterance.session_id
+                    WHERE session.id = :session_id AND session.organization_id = :organization_id
+                      AND session.actor_id = :actor_id
+                    ORDER BY utterance.created_at DESC, utterance.channel_sequence DESC
+                    LIMIT 4
+                    """
+                ), params,
+            ).mappings().all()
+            interviewer = connection.execute(
+                text(
+                    """
+                    SELECT COALESCE(utterance.corrected_text, utterance.raw_text) AS text
+                    FROM career_assistant.live_interview_utterances AS utterance
+                    JOIN career_assistant.live_interview_sessions AS session ON session.id = utterance.session_id
+                    WHERE session.id = :session_id AND session.organization_id = :organization_id
+                      AND session.actor_id = :actor_id AND utterance.role = 'interviewer'
+                    ORDER BY utterance.created_at DESC, utterance.channel_sequence DESC LIMIT 1
+                    """
+                ), params,
+            ).mappings().one_or_none()
+            question = connection.execute(
+                text(
+                    """
+                    SELECT answer.original_question, answer.intent, answer.question_version, answer.attempt
+                    FROM career_assistant.live_interview_answers AS answer
+                    JOIN career_assistant.live_interview_sessions AS session ON session.id = answer.session_id
+                    WHERE session.id = :session_id AND session.organization_id = :organization_id
+                      AND session.actor_id = :actor_id
+                      AND NOT answer.evidence_json @> '[{"type":"live_answer_queue","phase":"queued"}]'::jsonb
+                      AND NOT answer.evidence_json @> '[{"type":"live_answer_queue","phase":"cancelled"}]'::jsonb
+                    ORDER BY answer.updated_at DESC, answer.question_version DESC, answer.attempt DESC LIMIT 1
+                    """
+                ), params,
+            ).mappings().one_or_none()
+            sequences = connection.execute(
+                text(
+                    """
+                    SELECT utterance.role, MAX(utterance.channel_sequence) AS max_sequence
+                    FROM career_assistant.live_interview_utterances AS utterance
+                    JOIN career_assistant.live_interview_sessions AS session ON session.id = utterance.session_id
+                    WHERE session.id = :session_id AND session.organization_id = :organization_id
+                      AND session.actor_id = :actor_id GROUP BY utterance.role
+                    """
+                ), params,
+            ).mappings().all()
+            max_version = connection.execute(
+                text(
+                    """
+                    SELECT COALESCE(MAX(answer.question_version), 0)
+                    FROM career_assistant.live_interview_answers AS answer
+                    JOIN career_assistant.live_interview_sessions AS session ON session.id = answer.session_id
+                    WHERE session.id = :session_id AND session.organization_id = :organization_id
+                      AND session.actor_id = :actor_id
+                    """
+                ), params,
+            ).scalar_one()
+            completed = connection.execute(text("""
+                SELECT answer.original_question, LEFT(answer.answer_text, 800) AS suggestion
+                FROM career_assistant.live_interview_answers AS answer
+                JOIN career_assistant.live_interview_sessions AS session ON session.id = answer.session_id
+                WHERE session.id = :session_id AND session.organization_id = :organization_id
+                  AND session.actor_id = :actor_id AND answer.status = 'completed'
+                ORDER BY answer.updated_at DESC, answer.question_version DESC, answer.attempt DESC LIMIT 1
+            """), params).mappings().one_or_none()
+            pending = connection.execute(
+                text(
+                    """
+                    SELECT answer.* FROM career_assistant.live_interview_answers AS answer
+                    JOIN career_assistant.live_interview_sessions AS session ON session.id = answer.session_id
+                    WHERE session.id = :session_id AND session.organization_id = :organization_id
+                      AND session.actor_id = :actor_id
+                      AND answer.evidence_json @> '[{"type":"live_answer_queue","phase":"queued"}]'::jsonb
+                    ORDER BY answer.question_version, answer.attempt
+                    """
+                ), params,
+            ).mappings().all()
+        queued_answers = []
+        for row in pending:
+            metadata = next(item for item in row["evidence_json"] if (
+                item.get("type") == "live_answer_queue" and item.get("phase") == "queued"
+            ))
+            queued_answers.append(LiveInterviewQueuedAnswerState(
+                question_version=int(row["question_version"]),
+                attempt=int(row["attempt"]),
+                question=str(row["original_question"]),
+                intent=QuestionIntent(str(row["intent"])),
+                recent_conversation=tuple(str(item) for item in metadata["recent_conversation"][-4:]),
+                queued_at=datetime.fromisoformat(metadata["queued_at"]),
+                source_sequence=metadata.get("source_sequence"),
+                queue_order=int(metadata.get("queue_order", row["question_version"])),
+                manual=bool(metadata.get("manual", False)),
+                emit_detected=bool(metadata.get("emit_detected", True)),
+                previous_question=metadata.get("previous_question"),
+            ))
+        queued_answers.sort(key=lambda item: (item.queue_order, item.question_version, item.attempt))
+        return LiveInterviewResumeState(
+            recent_conversation=tuple(f"{row['role']}: {row['text']}" for row in reversed(recent)),
+            last_interviewer_final=str(interviewer["text"]) if interviewer else None,
+            last_question=str(question["original_question"]) if question else None,
+            last_question_intent=QuestionIntent(str(question["intent"])) if question else QuestionIntent.KNOWLEDGE,
+            last_answer_attempt=int(question["attempt"]) if question else 0,
+            max_question_version=int(max_version),
+            last_question_version=int(question["question_version"]) if question else 0,
+            max_sequence={AudioChannel(str(row["role"])): int(row["max_sequence"]) for row in sequences},
+            pending_answers=tuple(queued_answers),
+            previous_answer=(completed["original_question"], completed["suggestion"]) if completed else None,
         )
+
+    def save_queued_answer(
+        self,
+        organization_id: UUID,
+        actor_id: UUID,
+        session_id: UUID,
+        queued: LiveInterviewQueuedAnswerState,
+        phase: str,
+    ) -> None:
+        if phase not in {"queued", "started", "cancelled"}:
+            raise ValueError("排队状态无效")
+        metadata = {
+            "type": "live_answer_queue", "phase": phase,
+            "recent_conversation": list(queued.recent_conversation[-4:]),
+            "queued_at": queued.queued_at.isoformat(), "source_sequence": queued.source_sequence,
+            "queue_order": queued.queue_order, "manual": queued.manual, "emit_detected": queued.emit_detected,
+            "previous_question": queued.previous_question,
+        }
+        self.upsert_answer(
+            organization_id, actor_id, session_id,
+            question_version=queued.question_version, attempt=queued.attempt,
+            question=queued.question, intent=queued.intent,
+            status=AnswerStatus.CANCELLED if phase == "cancelled" else AnswerStatus.GENERATING,
+            evidence=() if phase == "started" else (metadata,),
+        )
+
+    def pause(self, organization_id: UUID, actor_id: UUID, session_id: UUID) -> bool:
+        with self._database.transaction() as connection:
+            result = connection.execute(
+                text("""
+                    UPDATE career_assistant.live_interview_sessions
+                    SET status = 'preparing', ended_at = NULL, updated_at = NOW()
+                    WHERE id = :session_id AND organization_id = :organization_id
+                      AND actor_id = :actor_id AND status = 'active'
+                """),
+                {"session_id": session_id, "organization_id": organization_id, "actor_id": actor_id},
+            )
+        return bool(result.rowcount)
+
+    def finish_inactive(self, organization_id: UUID, actor_id: UUID, session_id: UUID) -> bool:
+        """仅结束已经离线的会话；与并行重新连接通过同一行的条件更新互斥。"""
+        with self._database.transaction() as connection:
+            result = connection.execute(
+                text("""
+                    UPDATE career_assistant.live_interview_sessions
+                    SET status = 'completed', ended_at = COALESCE(ended_at, NOW()), updated_at = NOW()
+                    WHERE id = :session_id AND organization_id = :organization_id
+                      AND actor_id = :actor_id AND status IN ('preparing', 'failed', 'completed')
+                """),
+                {"session_id": session_id, "organization_id": organization_id, "actor_id": actor_id},
+            )
+            if result.rowcount:
+                # 离线用户主动结束后，尚未启动的持久化队列不能继续展示为生成中。
+                connection.execute(text("""
+                    UPDATE career_assistant.live_interview_answers
+                    SET status = 'cancelled', updated_at = NOW(), evidence_json = CASE
+                        WHEN evidence_json->0->>'type' = 'live_answer_queue'
+                        THEN jsonb_set(evidence_json, '{0,phase}', '"cancelled"'::jsonb)
+                        ELSE evidence_json END
+                    WHERE session_id = :session_id AND status = 'generating'
+                """), {"session_id": session_id})
+        return bool(result.rowcount)
 
     def end(
         self,
@@ -150,27 +378,12 @@ class LiveInterviewRepository:
         *,
         failed: bool = False,
     ) -> bool:
-        return self._set_session_status(
-            organization_id,
-            actor_id,
-            session_id,
-            LiveInterviewStatus.FAILED if failed else LiveInterviewStatus.COMPLETED,
-        )
-
-    def _set_session_status(
-        self,
-        organization_id: UUID,
-        actor_id: UUID,
-        session_id: UUID,
-        target: LiveInterviewStatus,
-    ) -> bool:
-        timestamp_field = "started_at" if target is LiveInterviewStatus.ACTIVE else "ended_at"
         with self._database.transaction() as connection:
             result = connection.execute(
                 text(
-                    f"""
+                    """
                     UPDATE career_assistant.live_interview_sessions
-                    SET status = :status, {timestamp_field} = COALESCE({timestamp_field}, NOW()),
+                    SET status = :status, ended_at = COALESCE(ended_at, NOW()),
                         updated_at = NOW()
                     WHERE id = :session_id
                       AND organization_id = :organization_id
@@ -179,7 +392,7 @@ class LiveInterviewRepository:
                     """
                 ),
                 {
-                    "status": target.value,
+                    "status": LiveInterviewStatus.FAILED.value if failed else LiveInterviewStatus.COMPLETED.value,
                     "session_id": session_id,
                     "organization_id": organization_id,
                     "actor_id": actor_id,
@@ -203,7 +416,7 @@ class LiveInterviewRepository:
             row = connection.execute(
                 text(
                     """
-                    INSERT INTO career_assistant.live_interview_utterances
+                    INSERT INTO career_assistant.live_interview_utterances AS stored
                         (id, session_id, role, channel_sequence, raw_text,
                          corrected_text, provider, confidence)
                     SELECT :id, session.id, :role, :sequence, :raw_text,
@@ -212,7 +425,8 @@ class LiveInterviewRepository:
                     WHERE session.id = :session_id
                       AND session.organization_id = :organization_id
                       AND session.actor_id = :actor_id
-                    ON CONFLICT (session_id, role, channel_sequence) DO NOTHING
+                    ON CONFLICT (session_id, role, channel_sequence)
+                    DO UPDATE SET raw_text = stored.raw_text WHERE stored.raw_text = excluded.raw_text
                     RETURNING id
                     """
                 ),
@@ -230,7 +444,7 @@ class LiveInterviewRepository:
                 },
             ).scalar_one_or_none()
         if row is None:
-            raise LookupError("会话不存在、无权访问或该 final 已保存")
+            raise LookupError("会话不存在、无权访问或同一转写编号已保存不同内容")
         return UUID(str(row))
 
     def upsert_answer(
